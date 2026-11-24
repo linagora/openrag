@@ -134,7 +134,9 @@ class TestPptxParserConvertPath:
         slide3.has_notes_slide = False
 
         mock_prs = MagicMock()
-        mock_prs.slides = [slide1, slide2, slide3]
+        # _convert resolves each slide-list entry itself (#1394).
+        mock_prs._element.sldIdLst.sldId_lst = [MagicMock(rId=f"rId{n}") for n in (1, 2, 3)]
+        mock_prs.part.related_slide = {"rId1": slide1, "rId2": slide2, "rId3": slide3}.__getitem__
 
         import pptx as _pptx_module
 
@@ -320,3 +322,76 @@ def test_a_placeholder_of_an_unknown_type_does_not_fail_the_deck(tmp_path, where
     _, slides, _ = PptxParser()._convert(str(deck))
 
     assert slides == [(1, first_slide), (2, "# Next slide")]
+
+
+# ---------------------------------------------------------------------------
+# A slide that cannot be resolved does not fail the deck (#1394)
+# ---------------------------------------------------------------------------
+
+
+def _deck_with_three_slides(tmp_path, *, edit_deck=None, edit_zip=None):
+    """Build a real .pptx with three text slides, then break the second one,
+    either in the saved package (``edit_zip``) or before saving (``edit_deck``)."""
+    import zipfile
+
+    import pptx
+    from pptx.util import Inches
+
+    presentation = pptx.Presentation()
+    for text in ("Slide one", "Slide two", "Slide three"):
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1)).text = text
+    if edit_deck is not None:
+        edit_deck(presentation)
+    built = tmp_path / "built.pptx"
+    presentation.save(built)
+
+    deck = tmp_path / "deck.pptx"
+    with zipfile.ZipFile(built) as source, zipfile.ZipFile(deck, "w") as target:
+        for item in source.infolist():
+            data = source.read(item.filename)
+            if edit_zip is not None:
+                data = edit_zip(item.filename, data)
+            if data is not None:
+                target.writestr(item, data)
+    return deck
+
+
+def _drop_second_slide_relationship(filename, data):
+    import re
+
+    if filename == "ppt/_rels/presentation.xml.rels":
+        return re.sub(rb'<Relationship [^>]*Target="slides/slide2.xml"/>', b"", data)
+    return data
+
+
+def _drop_second_slide_part(filename, data):
+    # python-pptx drops a relationship whose target part is missing when it
+    # opens the package, which leaves the slide's r:id dangling.
+    if filename in ("ppt/slides/slide2.xml", "ppt/slides/_rels/slide2.xml.rels"):
+        return None
+    return data
+
+
+def _point_second_slide_at_the_master(presentation):
+    from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+
+    master = next(rid for rid, rel in presentation.part.rels.items() if rel.reltype == RT.SLIDE_MASTER)
+    presentation._element.sldIdLst.sldId_lst[1].rId = master
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        pytest.param({"edit_zip": _drop_second_slide_relationship}, id="relationship-removed"),
+        pytest.param({"edit_zip": _drop_second_slide_part}, id="slide-part-missing"),
+        pytest.param({"edit_deck": _point_second_slide_at_the_master}, id="r-id-to-the-slide-master"),
+    ],
+)
+def test_a_slide_that_cannot_be_resolved_does_not_fail_the_deck(tmp_path, broken):
+    deck = _deck_with_three_slides(tmp_path, **broken)
+
+    slide_count, slides, _ = PptxParser()._convert(str(deck))
+
+    assert slide_count == 3
+    assert slides == [(1, "Slide one"), (3, "Slide three")]

@@ -6,7 +6,7 @@ the OIDC ID token — into the partition memberships OpenRAG understands. The
 and reconciles the result against the database; everything here is a string
 transform so it is exhaustively unit-testable without a DB or an IdP.
 
-The strategy doc (``REFACTORING_STRATEGY_v1.md`` §15C) specified this mapping:
+The mapping:
 
     /openrag/project-alpha/editor  ->  ("project-alpha", "editor")
 
@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING, Any
+
+from core.utils.consts import is_reserved_partition_name
 
 if TYPE_CHECKING:
     from core.config.auth import OIDCConfig
@@ -75,7 +77,7 @@ def extract_partition_roles(claims: Any, cfg: OIDCConfig) -> list[tuple[str, str
             continue
         partition = match.group(1).strip().strip("/")
         role = match.group(2).strip().lower()
-        if not partition or role not in _ROLE_RANK:
+        if not partition or role not in _ROLE_RANK or is_reserved_partition_name(partition):
             continue
         if partition not in best or _ROLE_RANK[role] > _ROLE_RANK[best[partition]]:
             best[partition] = role

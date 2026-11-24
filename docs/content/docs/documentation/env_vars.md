@@ -39,7 +39,7 @@ python3 scripts/gen_env.py --check   # verify nothing is left unset
 | `API_KEY`, `VLM_API_KEY`, `EMBEDDER_API_KEY`, `RERANKER_API_KEY`, `TRANSCRIBER_API_KEY`, `WEBSEARCH_API_TOKEN` | Per integration | Set by the provider, so no length floor. Use the literal `EMPTY` for a local OpenAI-compatible server that requires no credential — that is the documented sentinel and is always accepted. |
 
 `UVICORN_FORWARDED_ALLOW_IPS` is not a secret but belongs in the same conversation: it
-must name your proxy's subnet for session cookies and per-IP rate limits to behave
+must list your trusted proxies for session cookies and per-IP rate limits to behave
 correctly behind a reverse proxy. See [FastAPI & Access Control](#fastapi--access-control).
 
 ## What will be refused
@@ -72,6 +72,7 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing (after image captioning) is saved next to the uploaded file as `<file>.md`. Useful for debugging and verifying the correctness of the generated markdown. Page changes are marked with `<!-- page N -->`, and images left without a description show their alt text (or `[Image]`). Only files stored under `DATA_DIR` get a copy, so URLs indexed through MCP are skipped. The copy is kept whatever `SAVE_UPLOADED_FILES` says, and nothing deletes it afterwards (deleting the file or its partition doesn't either), so turn the flag off once you're done. |
 |`SAVE_UPLOADED_FILES`|`bool`|`true`| When `true`, uploaded files are stored on disk. You must enable this option if you want Chainlit to show sources while chatting.|
 | `CONTENT_DEDUPLICATION_ENABLED` | `bool` | `true` | Rejects a file when identical content already exists in the same partition. Set it to `false` when a test intentionally indexes duplicates. |
+| `FILE_FENCES` | `str` | `ray` | Where the per-file fences live: `ray` or `postgres`. With `postgres`, an upload or replace of a file that is being indexed or deleted is refused with `409`; a delete of a file being indexed stops the indexing and wins, and a delete of a file already being deleted waits for it (up to 60 s, then `409`); an indexing task whose file was deleted meanwhile cannot write it back. Set the same value on every API replica: a replica on `ray` doesn't take the fences, so a file it deletes can be written back by a task the others started. Not yet meant for production. |
 | `PDFLOADER` | `str` | `PyMuPDFLoader` | PDF parsing engine. `PyMuPDFLoader` (default) is a lightweight, fast, CPU-friendly backend for searchable PDFs. Switch to `MarkerLoader` for OCR / scanned documents, complex layouts and embedded images (heavier; GPU-friendly). Other options: `DoclingLoader`, `DotsOCRLoader`.|
 | `PARSE_TIMEOUT` | `int` | `3600` | Outer wall-clock bound (in seconds) for a single file's parse stage, whichever loader runs it. Marker and Docling self-limit via their own timeouts, but `PyMuPDFLoader` has none — this bound stops a wedged parse from stalling indexing: the file fails and is reported instead. |
 | `INDEXING_CALLBACK_ALLOW_PRIVATE_URLS` | `bool` | `false` | Development-only escape hatch for the upload `callback_url`. By default, literal localhost, private, link-local, and reserved addresses are refused. DNS hostnames are not resolved by this check. Set it to `true` only in a dev stack whose callback target is a local instance (e.g. `http://cozy.localhost:8080`). Non-`http(s)` schemes stay rejected either way. |
@@ -85,10 +86,11 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `XLSX_BATCH_SIZE` | `int` | `10000` | Positive number of data rows per parser batch for `.xlsx` and `.xlsm` workbooks. The rendered batch byte limit can flush a batch earlier. This is independent of the chunk token budget. |
+| `XLSX_CHARTS` | `str` | `full` | Charts in workbooks: `full` indexes every chart with its data, including data plotted from hidden worksheets; `without_hidden_data` indexes every chart but leaves out values, labels, names, titles and text boxes read from hidden worksheets, rows or columns; `off` reads no chart (worksheet text boxes are still indexed). |
 
 Set archive, worksheet, cell, and batch byte limits through `loader.xlsx_limits` in YAML; there are no individual environment-variable overrides for these limits. Unknown limit names, non-integer values, and non-positive values are rejected. Rows waiting for their table's turn in the single worksheet pass use memory first, then a temporary file in the standard `TMPDIR`; a read-only or full `TMPDIR` only makes large worksheets fall back to slower per-table reads, never changes what is indexed. Header selection is automatic per table; the former `XLSX_HEADER_ROW` and per-sheet header settings are no longer supported.
 
-See the [XLSX ingestion guide](/openrag/documentation/xlsx_ingestion/) for table detection, formula handling, hidden content, and default safety limits.
+See the [XLSX ingestion guide](/openrag/documentation/xlsx_ingestion/) for table detection, charts, formula handling, hidden content, and default safety limits.
 
 #### PDF Loader
 ##### PyMuPDF Loader Configuration
@@ -465,7 +467,7 @@ The retriever fetches relevant documents from the vector database based on query
 |----------|------|---------|-------------|
 | `RETRIEVER_TYPE` | str | single | Retrieval strategy to use. Options: `single`, `multiQuery`, `hyde` |
 | `RETRIEVER_TOP_K` | int | 50 | Number of documents to retrieve before reranking.|
-| `SIMILARITY_THRESHOLD` | float | 0.6 | Minimum similarity score (0.0-1.0) for document retrieval. Documents below this threshold are filtered out |
+| `SIMILARITY_THRESHOLD` | float | 0.2 | Minimum similarity score (0.0-1.0) applied to the dense (semantic) search only, before it is merged with the keyword (BM25) results. Its scale depends on the embedding model; with the default embedder relevant passages score about 0.2-0.7. Read only when no partition is loaded. Chat uses the `similarity_threshold` of the partition's retrieval preset, `GET /search` its own `similarity_threshold` parameter (default 0.2), and the MCP search tool `OPENRAG_MCP_SIMILARITY_THRESHOLD` |
 | `WITH_SURROUNDING_CHUNKS` | `bool` | false | When enabled, retrieves adjacent chunks (preceding and following) for each matched document to provide additional context.|
 | `INCLUDE_RELATED` | `bool` | true | Expand results with chunks from files sharing the matched file's `relationship_id` (see [Linked files](/openrag/documentation/linked_files/)). |
 | `INCLUDE_ANCESTORS` | `bool` | true | Expand results with chunks from ancestor files in the parent/child file hierarchy (see [Linked files](/openrag/documentation/linked_files/)). |
@@ -720,7 +722,7 @@ The following environment variables configure the FastAPI server and control acc
 | `METRICS_ALLOW_UNAUTHENTICATED` | `boolean` | `false` | Serve `GET /metrics` to anyone who can reach the API port when `METRICS_TOKEN` is unset. Only for deployments that block `/metrics` at the edge and scrape from inside the network; a configured token always wins. |
 | `ASSISTANT_NAME` | `string` | empty | Name used in the assistant's greeting. Leave unset for a neutral introduction; set it for a white-label deployment. |
 | `CORS_EXTRA_ORIGINS` | `string` | _(unset)_ | Semicolon-separated list of additional origins allowed by CORS (e.g. `https://app.example.com;https://other.example.com`). Extends the default list without replacing it. |
-| `UVICORN_FORWARDED_ALLOW_IPS` | `string` | `127.0.0.1` | Comma-separated CIDRs/IPs (or `*`) whose `X-Forwarded-*` headers uvicorn trusts. **Required when OpenRAG runs behind a reverse proxy that lives outside loopback** (typical docker-compose / k8s — including the bundled admin-ui proxy). Otherwise `X-Forwarded-Proto` is dropped and OIDC cookies ship with `Secure=False` even over HTTPS, and `X-Forwarded-For` is dropped so per-user rate limits collapse onto the proxy's single IP. **Set this to your proxy's subnet, not `*`** — see the proxy-trust caution under [Rate Limiting](#rate-limiting) for why `*` can be spoofed. |
+| `UVICORN_FORWARDED_ALLOW_IPS` | `string` | Loopback and the exact admin UI proxy address in Compose. Loopback elsewhere. | Comma-separated addresses allowed to supply `X-Forwarded-*` headers. Set this explicitly for Helm and other additional reverse proxies. See [Rate Limiting](#rate-limiting). |
 | `MAX_UPLOAD_SIZE_MB` | `int` | `1024` | Maximum accepted upload size, in MB. `0` or a negative value means unlimited. |
 | `MAX_PARTITIONS_PER_USER` | `int` | `100` | Maximum number of partitions a non-admin user may own. `-1` disables the cap (unlimited). Admin users always bypass it. |
 | `APP_UID` | `int` | `1000` | UID the API container drops to before running the app. Override when your host user is not UID 1000 and bind-mounted folders (`data/`, `logs/`) would otherwise not be writable by the container user. |
@@ -749,21 +751,20 @@ Limit values use the `<count>/<period>` format from the [`limits`](https://limit
 | `RATE_LIMIT_EXEMPT_PATHS` | `str` | `/chainlit/,/assets/` | Comma-separated path prefixes the limiter skips, matched with `startswith`. These are auth-bypassed (Chainlit does its own header auth), so requests there carry no user and can only be keyed by IP. Chainlit's Socket.IO transport also issues one HTTP request per packet when it long-polls. Keep the trailing slash so a sibling like `/chainlithack` stays rate-limited rather than being swept into the `/chainlit` exemption. Set-but-empty (`RATE_LIMIT_EXEMPT_PATHS=`) removes all exemptions; `/auth/*` is never exempt. |
 
 :::caution[Behind a reverse proxy, trust the right client IP]
-The `/auth/*` limits and the failed-login budget (`RATE_LIMIT_AUTH_FAILURE`) are keyed **by client IP** — that is how brute-force protection tells attackers apart. Behind a proxy, uvicorn only sees the real client IP if it trusts the proxy's `X-Forwarded-For`, so `UVICORN_FORWARDED_ALLOW_IPS` must name the proxy. Get this wrong in either direction and the per-IP limits stop working:
+The `/auth/*` limits and failed-login budget use the client IP. If the API cannot
+trust a proxy's forwarding headers, requests share the proxy's IP and failure
+budget. The OIDC cookie's `Secure` flag reads `X-Forwarded-Proto` directly (or
+`PREFERRED_URL_SCHEME`); this check is independent of Uvicorn's forwarded-IP
+trust list.
 
-- **Too narrow** (default `127.0.0.1`, proxy outside loopback): every request keys on the proxy's single address, so one shared bucket throttles the whole deployment at once — one client's failed logins can lock out everyone.
-- **Too wide** (`*`): uvicorn trusts `X-Forwarded-For` from *any* peer. If the API port is reachable directly (the bundled compose publishes `APP_PORT` on `0.0.0.0`), an attacker sends a forged, rotating `X-Forwarded-For` and gets a fresh bucket per request — the brute-force limiter is fully bypassed.
+- **Compose** trusts loopback and the exact admin UI proxy address by default. The admin UI proxy appends its peer address to `X-Forwarded-For`, allowing Uvicorn to select the actual client address. Do not add NPM’s address while it accepts client-supplied `X-Real-IP` from private networks.
+- **Helm** leaves trust at loopback until an administrator sets `env.config.UVICORN_FORWARDED_ALLOW_IPS` in the chart values. Use your proxy's stable addresses and update the allowlist if the addresses change.
 
-**Recommended:** set `UVICORN_FORWARDED_ALLOW_IPS` to the proxy's subnet (e.g. your compose/k8s network CIDR), **not** `*`. Reserve `*` for deployments where nothing untrusted can reach `APP_PORT` — keep the API on the internal network and expose only the admin-ui proxy (you don't need to publish `APP_PORT` at all).
+Keep the allowlist limited to proxies you control. A wildcard or a shared container or pod subnet gives unrelated clients the ability to supply forwarding headers. Configure the edge proxy to supply the actual client address and only accept forwarded addresses from trusted upstreams.
 
-**Defense in depth (proxy config):** trusting `X-Forwarded-For` only helps if the header can't be forged *through* the proxy. The bundled nginx **appends** to the header (`proxy_add_x_forwarded_for`), and uvicorn reads the left-most value — which a client can inject. For a hard guarantee, have the edge proxy **overwrite** it with the real peer instead of appending:
+Compose uses a fixed bridge subnet so it can reserve the admin UI address. For an overlapping network or another stack on the same host, set `OPENRAG_COMPOSE_SUBNET`, `OPENRAG_COMPOSE_DYNAMIC_RANGE`, and `OPENRAG_ADMIN_UI_PROXY_IP` in the Compose environment. If you use the TLS overlay, also set `OPENRAG_NPM_PROXY_IP`. Keep the proxy addresses distinct, inside the subnet, and outside the dynamic range.
 
-```nginx
-# openrag-admin.conf — edge proxy: replace any client-supplied X-Forwarded-For
-proxy_set_header X-Forwarded-For $remote_addr;
-```
-
-If nginx itself sits behind another load balancer, use the [real-ip module](https://nginx.org/en/docs/http/ngx_http_realip_module.html) (`set_real_ip_from <lb-subnet>; real_ip_header X-Forwarded-For;`) so the true client is resolved only from that trusted upstream.
+Keep loopback and the exact admin UI proxy address in explicit Compose allowlists. Do not use a broad range such as `172.16.0.0/12` with the TLS overlay because it includes NPM’s address. Add other proxy addresses only after hardening and verifying their forwarded-IP handling. When the Compose subnet changes, recreate the project network before starting the updated stack.
 :::
 
 ### Admin UI
@@ -819,7 +820,7 @@ OpenRAG ships a standalone [Model Context Protocol](https://modelcontextprotocol
 | `OPENRAG_MCP_PATH` | `str` | `/mcp` | HTTP path the MCP endpoint is served under. |
 | `OPENRAG_MCP_DEFAULT_TOP_K` | `int` | `5` | Number of chunks the search tool returns when the caller doesn't specify `top_k`. |
 | `OPENRAG_MCP_MAX_TOP_K` | `int` | `50` | Upper bound clamped on a caller-supplied `top_k`. |
-| `OPENRAG_MCP_SIMILARITY_THRESHOLD` | `float` | `0.8` | Minimum similarity score for a chunk to be returned by the search tool. |
+| `OPENRAG_MCP_SIMILARITY_THRESHOLD` | `float` | `0.2` | Minimum similarity score applied to the dense (semantic) side of the search only, before the merge with keyword (BM25) results. Its scale depends on the embedder. |
 | `OPENRAG_MCP_DOWNLOAD_TIMEOUT` | `float` | `30.0` | Timeout (seconds) for the server-side `index_url` fetch (SSRF/DoS hardening). |
 | `OPENRAG_MCP_MAX_DOWNLOAD_BYTES` | `int` | `104857600` | Maximum bytes downloaded by an `index_url` fetch. Default is 100 MiB. |
 

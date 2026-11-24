@@ -13,6 +13,38 @@ The commands are written for bash. In zsh, run `setopt interactive_comments sh_w
 first. Without it, zsh does not treat `#` as the start of a comment and does not
 split `$DC` into `docker compose`, so the commands below fail.
 
+## OpenRAG 2.3.6
+
+The Compose stack now declares its bridge subnet so it can reserve the bundled
+proxy addresses. When upgrading an existing stack, schedule a service
+interruption and recreate the project network from `infra/compose/`:
+
+```sh
+docker compose down
+docker compose up -d
+```
+
+Before `down`, stop and disconnect any containers outside this Compose project
+that use its network. Reconnect them after `up -d` recreates the network; an
+attached external container can prevent removal and leave the stack stopped.
+Use the same `-f` files and profiles that you use for the deployment on both
+commands. Do not add `-v` to `down`, because that removes persistent volumes.
+A full `up -d` alone may leave an existing network with its old subnet, and a
+service-only update can stop that service while failing to remove the network.
+If you explicitly set `UVICORN_FORWARDED_ALLOW_IPS`, include loopback and the
+exact admin UI proxy address. With the TLS overlay, remove broad ranges such as
+`172.16.0.0/12`, which include NPM's address. Do not add the NPM address while
+private-network clients can set `X-Real-IP` at NPM. Until NPM's forwarding
+behavior is hardened, requests through NPM share its address for both the
+`/auth/*` and failed-login rate limits. The forwarded HTTPS scheme is ignored,
+so most generated API links remain `http`; `PREFERRED_URL_SCHEME=https` only
+corrects links from the indexing API. Trust other proxy addresses only after
+verifying their forwarded-header behavior. If Compose reports `Pool overlaps with other one on this address
+space`, choose an unused range and set `OPENRAG_COMPOSE_SUBNET`,
+`OPENRAG_COMPOSE_DYNAMIC_RANGE`, and `OPENRAG_ADMIN_UI_PROXY_IP`; with the
+TLS overlay, set `OPENRAG_NPM_PROXY_IP` as well. Keep both proxy addresses
+inside the subnet and outside the dynamic range.
+
 ## 2.3.0 or 2.3.1 to a later 2.3.x
 
 The fence that holds a file while an orphaned indexing worker may still write to
@@ -61,6 +93,48 @@ not change an existing endpoint: to turn thinking off on a Qwen3 endpoint, set
 `"enable_thinking": false` in its `extra` the same way. `OPENAI_LOADER_ENABLE_THINKING`
 is read from the configuration: leave it unset for a Mistral-tokenizer OCR model.
 See [Model Endpoints](/openrag/documentation/api/#-model-endpoints).
+
+The default similarity threshold is now `0.2`. The threshold filters the semantic
+(embedding) search only, before it is merged with the keyword search, and with
+the default embedder relevant passages score about 0.2-0.7, so the old values
+often emptied the semantic side. Retrieval results change: more passages come
+from the semantic search, mostly for questions in another language than the
+documents and for abbreviations. Each path reads its own value, so to keep the
+old behavior, set it back where that path reads it:
+
+- Chat uses the `similarity_threshold` of the partition's retrieval preset. A
+  migration sets it to `0.2` in every retrieval preset that still holds exactly
+  `0.6`, and a rollback does not restore `0.6`. A preset without the key, such
+  as the seeded `multiquery` and `hyde`, follows the new default of `0.2` (it was
+  `0.6`). A preset holding any other value keeps it. To keep `0.6`, set it in the
+  preset after the upgrade.
+- `GET /search` defaults to `0.2` (it was `0.75`). Pass `similarity_threshold` in
+  the request to keep the old value; the preset does not change it.
+- The MCP search tool reads `OPENRAG_MCP_SIMILARITY_THRESHOLD`, now `0.2` (it was
+  `0.8`). Set the variable to keep the old value; the preset does not change it.
+- `SIMILARITY_THRESHOLD` is now `0.2` (it was `0.6`). It is read only when no
+  partition is loaded.
+
+## OpenRAG 2.3.6 on a shared Ray cluster: file quota during the upgrade
+
+From OpenRAG 2.3.6, an upload by a user with a file quota takes a slot when it is
+accepted and holds it in Postgres until the file is recorded in the catalog,
+or until cleanup gives the slot back when the task fails or is cancelled.
+Admins and users without a limit take no slot. Uploads queued before the upgrade
+hold no slot. With Ray inside the OpenRAG pod or container, the upgrade restarts
+Ray and those tasks are gone. On a shared Ray cluster (`ray.enabled: true`, or an
+external cluster), the previous release's indexer workers keep running the tasks
+they had queued, and until those tasks finish a user's new uploads are accepted
+as if they were not there: a user with uploads queued at the time can end up over
+their quota by that many files. When upgrading from a release older than 2.3.5,
+the [2.3.5 note below](#openrag-235-on-a-shared-ray-cluster-stop-indexing-first)
+applies as well, and those queued files can stay `SERIALIZING` instead.
+
+To avoid it, stop upload traffic, wait until no indexing task is queued or
+running, upgrade, and resume uploads once every old replica has stopped. A user
+who did go over their quota can upload again once their file count is below the
+limit: they delete enough files to get below it, or an administrator raises the
+quota above their current count.
 
 ## OpenRAG 2.3.5 on a shared Ray cluster: stop indexing first
 
@@ -112,7 +186,7 @@ the error names the setting.
 
 | The chart refuses | Why | What to change |
 |---|---|---|
-| `openrag.replicas` above 1 | Each pod has its own task state: each pod's job reconciler marks the jobs still queued on the other pods failed, and cancelling a task or counting pending uploads for the quota only sees one pod. | Keep `openrag.replicas: 1`, or share one Ray cluster: `ray.enabled: true` together with `env.config.RAY_ADDRESS` or `env.config.ENABLE_RAY_SERVE=true` (see [Notes](/openrag/documentation/kubernetes/#notes)), or an external cluster through `env.config.RAY_ADDRESS`, with `ray.externalCluster: true` when `RAY_ADDRESS` comes from a Secret the chart cannot read. |
+| `openrag.replicas` above 1 | Each pod has its own task state: each pod's job reconciler marks the jobs still queued on the other pods failed, cancelling a task only sees one pod, and, from 2.3.6, each pod's quota sweep gives back the upload slots the other pods hold once they are older than five minutes, so a user can go over their file quota. | Keep `openrag.replicas: 1`, or share one Ray cluster: `ray.enabled: true` together with `env.config.RAY_ADDRESS` or `env.config.ENABLE_RAY_SERVE=true` (see [Notes](/openrag/documentation/kubernetes/#notes)), or an external cluster through `env.config.RAY_ADDRESS`, with `ray.externalCluster: true` when `RAY_ADDRESS` comes from a Secret the chart cannot read. |
 | Marker, Docling and Whisper workers that don't fit the OpenRAG pod's GPUs | Each worker reserves its `*_NUM_GPUS` of the pod's GPUs (`MARKER_POOL_SIZE` × `MARKER_NUM_GPUS`, `DOCLING_POOL_SIZE` × `DOCLING_NUM_GPUS`, `WHISPER_N_WORKERS` × `WHISPER_NUM_GPUS`). Ray keeps a fraction of a GPU on a single card, and takes a reservation of 1 or more as whole cards, so three workers at 0.6 do not fit on two GPUs. The workers that don't fit never start, and files sent to them fail after the parser's timeout. A preset can select Marker or Docling even when `PDFLOADER` names another parser, and Whisper transcribes audio by default, so the check applies to every deployment with a GPU in the pod, whatever order the workers start in. | Lower the pool sizes or the `*_NUM_GPUS` values, or give the pod more GPUs. A reservation above 1 must be a whole number. |
 
 The chart can check the GPU settings only where it can read them: in `env.config`,
@@ -162,6 +236,28 @@ Two changes to chunks indexed after the upgrade. Chunks already indexed don't ch
 
 - Contextualized chunks no longer have a `* filename:` line. The chunker's `[Source: ...]` header now names the file once, using the sanitized filename.
 - `structured_section` no longer has a `prepend_heading_path` option. A preset that still sets it to `false` keeps loading and ignores it, so its new chunks get a header, which leaves less room for each chunk's body and can move chunk boundaries.
+
+## OpenRAG 2.3.5: a partition named `all`
+
+Search and chat use `all` to mean every partition you can access (`partitions=all`,
+`openrag-all`). From 2.3.5 it is a reserved partition name, in any case and with or
+without surrounding whitespace. A partition can no longer be created with that name, and
+the files of one that already exists are no longer reachable through the API after
+the upgrade.
+
+Only an instance that ran 2.2.2 or earlier can have one. Check before you upgrade, in
+the OpenRAG database:
+
+```sql
+SELECT partition FROM partitions WHERE lower(regexp_replace(partition, '[^[:alnum:]]', '', 'g')) = 'all';
+```
+
+The query also lists a name such as `a.l.l`, which is not reserved: only a name that
+reads `all` once the whitespace around it is removed is. If it returns such a name,
+upload that partition's files again into a partition with another name before you
+upgrade. Don't delete or copy files out of the `all` partition first:
+on 2.3.4 and earlier, those operations also reach files with the same ID in other
+partitions.
 
 ## OpenRAG 2.3.4: the filename in `recursive_splitter` chunks
 

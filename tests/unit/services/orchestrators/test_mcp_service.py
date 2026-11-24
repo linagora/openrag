@@ -536,6 +536,18 @@ async def test_delete_file_admin_wildcard_bypasses_membership():
     assert indexing.deleted == [("f1", "a")]
 
 
+@pytest.mark.parametrize("partition", ["all", "ALL"])
+@pytest.mark.asyncio
+async def test_admin_wildcard_cannot_delete_in_a_reserved_partition(partition):
+    """The store reads `all` as every partition: deleting file X in it deleted X everywhere."""
+    indexing = FakeIndexing()
+    with pytest.raises(PermissionError, match="reserved"):
+        await _service(partitions=FakePartitions(exists=True), indexing=indexing).delete_file(
+            partition=partition, file_id="f1", allowed_partitions=["all"], user_id=1
+        )
+    assert indexing.deleted == []
+
+
 @pytest.mark.asyncio
 async def test_delete_file_invalid_file_id():
     with pytest.raises(ValueError):
@@ -1198,7 +1210,7 @@ async def test_index_url_removes_the_download_opened_after_a_cancel(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_update_metadata_strips_protected_keys_keeps_move():
+async def test_update_metadata_strips_protected_keys():
     indexing = FakeIndexing()
     await _service(partitions=FakePartitions(exists=True), indexing=indexing).update_file_metadata(
         partition="a",
@@ -1208,34 +1220,41 @@ async def test_update_metadata_strips_protected_keys_keeps_move():
             "source": "/evil",
             "created_by": 999,
             "degraded_stages": ["caption"],
-            "partition": "dest",
         },
         allowed_partitions=["all"],
         user_id=1,
     )
     _file_id, sent_md, _partition, _user = indexing.updated[0]
     assert sent_md["author"] == "x"
-    assert sent_md["partition"] == "dest"  # authorized move control preserved
     assert "source" not in sent_md and "created_by" not in sent_md and "degraded_stages" not in sent_md
 
 
 @pytest.mark.asyncio
-async def test_update_metadata_move_requires_editor_on_destination():
-    # Non-wildcard caller: editor on source but only viewer on the move target.
-    class P(FakePartitions):
-        async def list_members(self, partition):
-            role = "viewer" if partition == "dest" else "editor"
-            return [{"user_id": 5, "role": role}]
+async def test_update_metadata_refuses_another_partition():
+    from unittest.mock import MagicMock
 
-    svc = _service(partitions=P(exists=True))
-    with pytest.raises(PermissionError):
+    from services.orchestrators.indexing_service import IndexingService
+
+    class Dispatcher:
+        def __init__(self) -> None:
+            self.updated: list = []
+
+        async def update_file_metadata(self, *args):
+            self.updated.append(args)
+
+    dispatcher = Dispatcher()
+    indexing = IndexingService(document_repo=MagicMock(), workspace_repo=MagicMock(), dispatcher=dispatcher)
+    svc = _service(partitions=FakePartitions(exists=True), indexing=indexing)
+    with pytest.raises(ValidationError) as exc:
         await svc.update_file_metadata(
             partition="src",
             file_id="f1",
             metadata={"partition": "dest"},
-            allowed_partitions=["src", "dest"],
+            allowed_partitions=["all"],
             user_id=5,
         )
+    assert exc.value.code == "PARTITION_CHANGE_UNSUPPORTED"
+    assert dispatcher.updated == []
 
 
 @pytest.mark.asyncio

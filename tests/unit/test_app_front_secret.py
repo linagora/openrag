@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from markdown_it import MarkdownIt
 from starlette.responses import Response
 
 _FIX_SOURCE = Path(__file__).resolve().parents[2] / "openrag" / "app_front.py"
@@ -24,9 +25,17 @@ def _load_app_front(monkeypatch, *, auth_mode: str, module_name: str):
     monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: None)
     monkeypatch.syspath_prepend(str(_OPENRAG_RUNTIME_PATH))
 
-    spec = importlib.util.spec_from_file_location(module_name, _FIX_SOURCE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    from chainlit.config import CodeSettings, config
+
+    saved_code = config.code
+    config.code = CodeSettings(action_callbacks={})
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, _FIX_SOURCE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module._registered_chainlit_code = config.code
+    finally:
+        config.code = saved_code
     return module
 
 
@@ -110,6 +119,10 @@ async def test_chainlit_forwards_the_complete_message_to_the_shared_streaming_ch
         return [], []
 
     module.cl = SimpleNamespace(user_session=UserSession(), Step=Step, Message=Message)
+    runtime_session = SimpleNamespace(id="shared-chat-policy-test")
+    monkeypatch.setitem(module.user_sessions, runtime_session.id, module.cl.user_session.values)
+    monkeypatch.setattr(module, "get_context", lambda: SimpleNamespace(session=runtime_session))
+    setattr(runtime_session, module._WORKSPACE_RUNTIME_READY_ATTRIBUTE, module._workspace_runtime_state())
     monkeypatch.setattr(module, "AsyncOpenAI", FakeAsyncOpenAI)
     monkeypatch.setattr(module, "_format_sources", capture_sources)
 
@@ -148,21 +161,23 @@ def test_token_mode_keeps_chainlit_password_login(monkeypatch):
     """Token mode keeps manual login while allowing Admin UI handoff."""
     from chainlit.config import config
 
-    monkeypatch.setattr(config.code, "header_auth_callback", None)
-    monkeypatch.setattr(config.code, "password_auth_callback", None)
+    original_code = config.code
 
-    _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_token_mode_test")
+    def existing_callback(_headers):
+        return None
 
-    assert config.code.header_auth_callback is not None
-    assert config.code.password_auth_callback is not None
+    monkeypatch.setattr(original_code, "header_auth_callback", existing_callback)
+
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_token_mode_test")
+
+    assert config.code is original_code
+    assert config.code.header_auth_callback is existing_callback
+    assert callable(module._registered_chainlit_code.header_auth_callback)
+    assert callable(module._registered_chainlit_code.password_auth_callback)
 
 
 @pytest.mark.asyncio
 async def test_token_mode_header_auth_accepts_chainlit_handoff_cookie(monkeypatch):
-    from chainlit.config import config
-
-    monkeypatch.setattr(config.code, "header_auth_callback", None)
-    monkeypatch.setattr(config.code, "password_auth_callback", None)
     module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_token_handoff_test")
 
     async def fake_load_user_info(_client, api_key):
@@ -180,7 +195,9 @@ async def test_token_mode_header_auth_accepts_chainlit_handoff_cookie(monkeypatc
     monkeypatch.setattr(module, "_load_user_info", fake_load_user_info)
     monkeypatch.setattr(module, "_load_openrag_model_ids_for_metadata", fake_load_model_ids)
 
-    user = await config.code.header_auth_callback({"cookie": f"{module.CHAINLIT_TOKEN_COOKIE_NAME}=or-user-token"})
+    user = await module._registered_chainlit_code.header_auth_callback(
+        {"cookie": f"{module.CHAINLIT_TOKEN_COOKIE_NAME}=or-user-token"}
+    )
 
     assert user.identifier == "Token User"
     assert user.metadata["provider"] == "credentials"
@@ -336,6 +353,9 @@ async def test_chat_start_handles_expired_handoff_without_exception_log(monkeypa
     )
     module.logger = logger
     module.cl = SimpleNamespace(user_session=UserSession(), Message=Message)
+    runtime_session = SimpleNamespace(id="chat-start-expired-handoff-test")
+    monkeypatch.setitem(module.user_sessions, runtime_session.id, module.cl.user_session.values)
+    monkeypatch.setattr(module, "get_context", lambda: SimpleNamespace(session=runtime_session))
     monkeypatch.setattr(
         module,
         "_current_openrag_api_key",
@@ -646,6 +666,61 @@ async def test_chainlit_keeps_valid_web_sources(monkeypatch):
     assert elements[0].content == ("**[Example reference](https://example.test/reference)**\n\nSupporting evidence")
 
 
+@pytest.mark.parametrize(
+    ("title", "expected_title"),
+    [
+        ("Report\n\n annex", "Report annex"),
+        ("Report\n\n    indented", "Report indented"),
+        ("Report\r\n\r\n annex", "Report annex"),
+        ("+ \n\nhttps://", "+ https://"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_chainlit_web_title_cannot_split_the_citation_link(monkeypatch, title, expected_title):
+    """Ensure multiline web titles remain a single bold citation link."""
+    module = _load_app_front(
+        monkeypatch,
+        auth_mode="token",
+        module_name="app_front_web_title_blank_line_test",
+    )
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+    _stub_chainlit_elements(module)
+
+    elements, _ = await module._format_sources(
+        [
+            {
+                "source_type": "web",
+                "title": title,
+                "url": "https://example.test/a",
+            }
+        ]
+    )
+
+    assert len(elements) == 1
+
+    tokens = MarkdownIt("commonmark").parse(elements[0].content)
+
+    # The citation must remain exactly one Markdown paragraph.
+    assert [token.type for token in tokens] == [
+        "paragraph_open",
+        "inline",
+        "paragraph_close",
+    ]
+
+    children = tokens[1].children
+
+    # The paragraph must contain one bold link.
+    kinds = [child.type for child in children if child.type != "text" or child.content]
+    assert kinds[:2] == ["strong_open", "link_open"]
+    assert kinds[-2:] == ["link_close", "strong_close"]
+
+    # Verify the normalized title and destination.
+    assert "".join(child.content for child in children if child.type == "text") == expected_title
+
+    link = next(child for child in children if child.type == "link_open")
+    assert link.attrGet("href") == "https://example.test/a"
+
+
 @pytest.mark.asyncio
 async def test_chainlit_escapes_untrusted_web_source_markdown(monkeypatch):
     module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_web_source_escaping_test")
@@ -698,6 +773,14 @@ async def test_chainlit_keeps_source_names_unique_after_sanitizing(monkeypatch):
         ("rapport_annuel_2026.pdf", "rapport_annuel_2026.pdf"),
         ("report.pdf (page: 3)", "report.pdf (page: 3)"),
         ("C++_style_guide.pdf", "C++_style_guide.pdf"),
+        ("report=final.pdf", "report=final.pdf"),
+        ("PROGRA~1.pdf", "PROGRA~1.pdf"),
+        ("cost ~5 or ~10", "cost ~5 or ~10"),
+        ("~*draft~", "~ draft~"),
+        ("v1~~~v2.pdf", "v1~~~v2.pdf"),
+        ("12:30 meeting.pdf", "12:30 meeting.pdf"),
+        ("std::vector.pdf", "std::vector.pdf"),
+        ("https://example.test/a", "https://example.test/a"),
     ],
 )
 def test_chainlit_preserves_safe_source_name_punctuation(monkeypatch, source_name, expected):
@@ -714,6 +797,12 @@ def test_chainlit_preserves_safe_source_name_punctuation(monkeypatch, source_nam
         ("__trusted__", "trusted"),
         ("foo _trusted_ bar", "foo trusted bar"),
         ("~~irrelevant~~", "irrelevant"),
+        ("~draft~ notes.pdf", "draft notes.pdf"),
+        ("a~b~c.pdf", "a b c.pdf"),
+        ("~a ~~b~ c~~", "a b c"),
+        ("a﻿~~!draft~~.pdf", "a﻿ !draft .pdf"),
+        ("AWS re:Invent 2025 recap", "AWS re: Invent 2025 recap"),
+        (":draft notes.pdf", ": draft notes.pdf"),
         ("# Trusted source", "Trusted source"),
         ("1. Official result", "Official result"),
         ("- Search result", "Search result"),
@@ -726,6 +815,21 @@ def test_chainlit_neutralizes_active_source_name_markdown(monkeypatch, source_na
     module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_source_name_markdown_test")
 
     assert module._safe_source_name(source_name, {}) == expected
+
+
+@pytest.mark.parametrize(
+    "source_name",
+    ["1)", "12.", "-", "+", "#", "- ___", r"\___", "=", "==", "  ===  ", "--"],
+)
+def test_chainlit_source_names_stay_plain_text_in_sources_block(monkeypatch, source_name):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_block_marker_source_name_test")
+    safe_name = module._safe_source_name(source_name, {})
+
+    for markdown in (safe_name, f"Sources: \n{safe_name}"):
+        tokens = MarkdownIt("commonmark").parse(markdown)
+
+        assert [token.type for token in tokens] == ["paragraph_open", "inline", "paragraph_close"]
+        assert tokens[1].content == markdown
 
 
 @pytest.mark.parametrize("source_name", ["#report.pdf", "1.report.pdf"])
@@ -906,7 +1010,14 @@ def test_app_front_raises_when_secret_missing(monkeypatch):
     for mod in [m for m in sys.modules if m == "app_front" or m.endswith(".app_front")]:
         sys.modules.pop(mod, None)
 
-    spec = importlib.util.spec_from_file_location("app_front_test", _FIX_SOURCE)
-    module = importlib.util.module_from_spec(spec)
-    with pytest.raises(RuntimeError, match="CHAINLIT_AUTH_SECRET"):
-        spec.loader.exec_module(module)
+    from chainlit.config import CodeSettings, config
+
+    saved_code = config.code
+    config.code = CodeSettings(action_callbacks={})
+    try:
+        spec = importlib.util.spec_from_file_location("app_front_test", _FIX_SOURCE)
+        module = importlib.util.module_from_spec(spec)
+        with pytest.raises(RuntimeError, match="CHAINLIT_AUTH_SECRET"):
+            spec.loader.exec_module(module)
+    finally:
+        config.code = saved_code

@@ -46,6 +46,11 @@ class TestValidateFileId:
             validate_file_id("a/b")
         assert exc.value.status_code == 400
 
+    def test_rejects_dot_path_segments(self):
+        for bad in (".", ".."):
+            with pytest.raises(ValidationError, match="dot path segment"):
+                validate_file_id(bad)
+
     def test_empty_or_whitespace_raises(self):
         for bad in ("", "   "):
             with pytest.raises(ValidationError):
