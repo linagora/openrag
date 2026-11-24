@@ -322,6 +322,53 @@ async def test_callback_state_mismatch():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("claims", "marker"),
+    [
+        ({}, None),
+        ({"sub": None}, None),
+        ({"sub": ""}, None),
+        ({"sub": "   "}, None),
+        ({"sub": 987654321}, "987654321"),
+        ({"sub": 0}, None),
+        ({"sub": ["malformed-subject-in-list"]}, "malformed-subject-in-list"),
+        ({"sub": []}, None),
+        ({"sub": {"nested": "malformed-subject-in-dict"}}, "malformed-subject-in-dict"),
+        ({"sub": {}}, None),
+    ],
+)
+async def test_callback_rejects_malformed_sub_claim(claims, marker):
+    svc = _service(client=FakeOIDCClient(bundle=_bundle(claims=claims)))
+
+    log_messages = []
+    handler_id = logger.add(
+        lambda message: log_messages.append(str(message)),
+        format="{message} {extra}\n{exception}",
+        level="DEBUG",
+    )
+
+    try:
+        state, cookie = await _login_and_get_state(svc)
+        with pytest.raises(OIDCFlowError) as ei:
+            await svc.handle_oidc_callback(
+                code="abc",
+                state=state,
+                state_cookie_raw=cookie,
+            )
+    finally:
+        logger.remove(handler_id)
+
+    assert ei.value.status_code == 400
+    assert "must be a non-empty string" in ei.value.message
+
+    captured_logs = "".join(log_messages)
+    assert "Invalid OIDC ID token: 'sub' claim must be a non-empty string" in captured_logs
+    assert "AttributeError" not in captured_logs
+    if marker is not None:
+        assert marker not in captured_logs
+
+
+@pytest.mark.asyncio
 async def test_callback_unregistered_user_rejected():
     sub = "kc-unregistered"
     svc = _service(

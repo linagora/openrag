@@ -242,8 +242,9 @@ class AuthService:
             raise OIDCFlowError("OIDC code exchange failed") from e
 
         sub = bundle.claims.get("sub")
-        if not sub:
-            raise OIDCFlowError("ID token missing 'sub' claim.")
+        if not isinstance(sub, str) or not sub.strip():
+            logger.warning("Invalid OIDC ID token: 'sub' claim must be a non-empty string")
+            raise OIDCFlowError("ID token 'sub' claim must be a non-empty string.")
 
         user = await self._resolve_user(sub, bundle.claims)
         user = await self._sync_auto_provisioned(user, sub, bundle.claims)
