@@ -114,6 +114,13 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap-env.yaml") . | sha256sum }}
+        {{- /* Rolls the pods when a helm upgrade changes the env Secret the
+           chart renders, so a rotated credential takes effect (#985). The
+           chart can't see the values of an env.existingSecret or of an
+           operator-managed Secret: see "Rotating a secret" in kubernetes.md. */}}
+        {{- if and (not .Values.env.existingSecret) (eq (.Values.env.secretsProvider.type | default "values") "values") }}
+        checksum/secret: {{ include "openrag-stack.envSecretValues" . | sha256sum }}
+        {{- end }}
         {{- /* Not under Ray Serve: this pod's 8080 is then the serve driver,
            not the API (see templates/servicemonitor.yaml). */}}
         {{- if and .Values.openrag.metrics.prometheusAnnotations (ne (include "openrag-stack.rayServeApi" .) "true") }}
