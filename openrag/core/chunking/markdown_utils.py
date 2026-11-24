@@ -313,7 +313,8 @@ def chunk_table(
 
     Each chunk repeats the table header. When a new chunk starts, the LAST
     row of the previous chunk is replayed as overlap so context is preserved
-    across the boundary.
+    across the boundary, as long as it fits in ``chunk_size`` beside the
+    group that opens the chunk.
     """
     if table_element.metadata and table_element.metadata.get("tabular_format") in WORKBOOK_TABULAR_FORMATS:
         return _chunk_xlsx_table(table_element.content, table_element, chunk_size, length_function)
@@ -344,10 +345,16 @@ def chunk_table(
             body_size = 0
             # Replay only the last row of the previous chunk as overlap
             # (matches the docstring contract : prev_last_row is the trailing
-            # line of the last admitted group).
+            # line of the last admitted group). The group below is appended
+            # whatever its size, so the overlap has to be counted with it: a
+            # row replayed beside a group it does not fit with left the chunk
+            # over ``chunk_size`` although each of its rows fitted, and what an
+            # embedder then truncates is the chunk's tail, the new rows.
             if prev_last_row:
-                body_rows.append(prev_last_row)
-                body_size += length_function(prev_last_row)
+                overlap_ntoks = length_function(prev_last_row)
+                if header_ntoks + overlap_ntoks + g_ntoks <= chunk_size:
+                    body_rows.append(prev_last_row)
+                    body_size += overlap_ntoks
         body_rows.append(group_txt)
         body_size += g_ntoks
         # The "last row" is the trailing line of this group, not the whole group.

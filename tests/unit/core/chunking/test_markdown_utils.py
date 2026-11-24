@@ -371,6 +371,52 @@ class TestChunkTable:
         assert "first" not in second_chunk
         assert "second" not in second_chunk
 
+    def test_overlap_row_does_not_push_a_piece_past_chunk_size(self):
+        """One row fits the budget and two do not. The replayed row was added
+        to the new piece without being counted, so every piece after the first
+        held two rows and left over ``chunk_size``."""
+        header = "| Requirement | Description |\n|---|---|"
+        rows = [f"| REQ-{i} | {' '.join([f'word{i}'] * 30)} |" for i in range(1, 6)]
+        table = "\n".join([header, *rows])
+
+        def length(text: str) -> int:
+            return len(text.split())
+
+        chunk_size = length(header) + length(rows[0]) + 10
+        chunks = chunk_table(
+            MDElement(type="table", content=table, page_number=1), chunk_size=chunk_size, length_function=length
+        )
+
+        assert len(chunks) == 5
+        assert all(length(chunk.content) <= chunk_size for chunk in chunks)
+        # Nothing is lost by leaving the overlap out: each row is in one piece.
+        for i in range(1, 6):
+            assert [f"REQ-{i} " in chunk.content for chunk in chunks].count(True) == 1
+
+    def test_overlap_row_is_replayed_only_beside_a_group_it_fits_with(self):
+        """A short row that opens a piece still gets the previous row replayed
+        above it. A row that fills the piece by itself gets none."""
+        header = "| Requirement | Description |\n|---|---|"
+        short = [f"| REQ-{i} | {' '.join([f'short{i}'] * 8)} |" for i in range(1, 6)]
+        long = f"| REQ-6 | {' '.join(['long'] * 30)} |"
+        table = "\n".join([header, *short, long])
+
+        def length(text: str) -> int:
+            return len(text.split())
+
+        # Room for three short rows, or for the long one alone.
+        chunk_size = length(header) + length(long) + 6
+        chunks = chunk_table(
+            MDElement(type="table", content=table, page_number=1), chunk_size=chunk_size, length_function=length
+        )
+
+        assert [[i for i in range(1, 7) if f"REQ-{i} " in chunk.content] for chunk in chunks] == [
+            [1, 2, 3],
+            [3, 4, 5],  # REQ-3 is the overlap
+            [6],  # REQ-5 would not fit beside it
+        ]
+        assert all(length(chunk.content) <= chunk_size for chunk in chunks)
+
     def test_csv_rows_are_packed_whole_with_a_header_in_every_chunk(self):
         table = (
             "| id | name | note |\n"
