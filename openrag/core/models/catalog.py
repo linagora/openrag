@@ -78,6 +78,37 @@ TASK_FINISHED_AT_METADATA_KEY = "_openrag_job_finished_at"
 CONTENT_CLAIM_TOKEN_METADATA_KEY = "_openrag_content_claim_token"
 INDEXING_CONTENT_CLAIM_TOKEN_PREFIX = "task:"
 COPY_CONTENT_CLAIM_TOKEN_PREFIX = "copy:"
+# The lease of a file fence (#1430). Short, because nothing else reliably frees
+# the fence of a holder that crashed. A lapsed lease never fails its holder by
+# itself: the catalog commit checks the holder, not the expiry.
+FILE_FENCE_TTL_SECONDS = 120.0
+# Four renewals per lease: a holder survives three missed rounds in a row.
+FILE_FENCE_RENEW_INTERVAL_SECONDS = FILE_FENCE_TTL_SECONDS / 4
+
+
+class FileFenceKind(str, Enum):
+    """What holds a file's fence (#1430).
+
+    ``INDEX`` covers indexing a new file and replacing it: the holder is the
+    indexing task. ``DELETE`` is held by one delete request for as long as it
+    runs. ``METADATA`` is meant for metadata updates and copies, which don't
+    take a fence yet.
+    """
+
+    INDEX = "index"
+    DELETE = "delete"
+    METADATA = "metadata"
+
+
+class FileFence(BaseModel):
+    """The one operation allowed to change ``(partition, file_id)`` right now."""
+
+    partition: str
+    file_id: str
+    kind: FileFenceKind
+    holder_id: str
+    acquired_at: datetime
+    expires_at: datetime
 
 
 class DocumentRecord(BaseModel):
@@ -121,6 +152,7 @@ class IndexationJob(BaseModel):
     error: str | None = None
     error_reason: str | None = None
     degraded_stages: list[str] = Field(default_factory=list)
+    stage_tracking_version: int | None = Field(default=None, ge=0, le=1)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime | None = None
     started_at: datetime | None = None

@@ -45,6 +45,8 @@ class FakeDispatcher:
         self.copied: list[tuple] = []
         self.cancelled: list[str] = []
         self.cancel_result = True
+        self.task_ids: list[str | None] = []
+        self.copy_reservations: list[str | None] = []
 
     async def dispatch_indexing(
         self,
@@ -61,7 +63,9 @@ class FakeDispatcher:
         callback_token=None,
         require_existing_partition=False,
         allow_legacy_require_existing_partition_retry=False,
+        task_id=None,
     ):
+        self.task_ids.append(task_id)
         self.dispatched.append(
             {
                 "path": path,
@@ -86,8 +90,9 @@ class FakeDispatcher:
     async def update_file_metadata(self, file_id, metadata, partition, user):
         self.updated.append((file_id, metadata, partition, user))
 
-    async def copy_file(self, file_id, metadata, partition, user, **destination):
+    async def copy_file(self, file_id, metadata, partition, user, *, quota_reservation_id=None, **destination):
         self.copied.append((file_id, metadata, partition, user))
+        self.copy_reservations.append(quota_reservation_id)
         self.copy_destination = destination
 
     async def get_task_state(self, task_id):
@@ -303,6 +308,28 @@ async def test_add_file_builds_metadata_and_dispatches(tmp_path):
     assert md["content_sha256"] is None
 
 
+@pytest.mark.parametrize("task_id", [None, "reservation-1"], ids=["dispatcher-mints", "reserved-upload"])
+@pytest.mark.asyncio
+async def test_add_file_runs_the_task_under_the_callers_reservation(tmp_path, task_id):
+    """A capped upload's task id is its file-slot reservation, which the worker consumes (#664)."""
+    f = tmp_path / "doc.txt"
+    f.write_text("hello world")
+    disp = FakeDispatcher()
+
+    await _service(disp=disp).add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="p1",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user={"id": 7},
+        task_id=task_id,
+    )
+
+    assert disp.task_ids == [task_id]
+
+
 @pytest.mark.asyncio
 async def test_add_file_drops_caller_supplied_degraded_stages(tmp_path):
     file_path = tmp_path / "doc.txt"
@@ -396,6 +423,130 @@ async def test_add_file_holds_partition_admission_fence_until_dispatch(tmp_path)
 
     assert psvc.admissions == ["tenant-a"]
     assert psvc.admission_depth == 0
+
+
+class _UnlockFailsPartitionService(FakePartitionService):
+    """Admission whose exit raises, like a failed advisory unlock."""
+
+    @asynccontextmanager
+    async def indexing_admission(self, partition: str):
+        async with super().indexing_admission(partition) as existed:
+            yield existed
+        raise ConnectionError("advisory unlock failed")
+
+
+class _UnlockAlwaysFailsPartitionService(FakePartitionService):
+    """Admission whose exit raises even while the body's error propagates."""
+
+    @asynccontextmanager
+    async def indexing_admission(self, partition: str):
+        try:
+            async with super().indexing_admission(partition) as existed:
+                yield existed
+        finally:
+            raise ConnectionError("advisory unlock failed")
+
+
+@pytest.mark.asyncio
+async def test_add_file_marks_an_admission_exit_failure_after_dispatch(tmp_path):
+    """The task is queued, so its worker may still insert the file (#664).
+
+    The route keeps the upload and its quota slot only for a marked error.
+    """
+    from core.utils.exceptions import indexing_worker_may_be_running
+
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    config = type("Config", (), {"partitions": {}})()
+    disp = FakeDispatcher()
+    svc = _service(
+        disp=disp,
+        config=config,
+        partition_service=_UnlockFailsPartitionService(config, db_partitions={"tenant-a"}),
+    )
+
+    with pytest.raises(ConnectionError) as excinfo:
+        await svc.add_file(
+            file_path=str(f),
+            file_id="f1",
+            partition="tenant-a",
+            metadata={},
+            sanitized_filename="doc.txt",
+            original_filename="doc.txt",
+            user={"id": 7},
+        )
+
+    assert disp.dispatched
+    assert indexing_worker_may_be_running(excinfo.value) is True
+
+
+@pytest.mark.asyncio
+async def test_add_file_marks_an_admission_exit_failure_after_a_marked_dispatch_error(tmp_path):
+    """The unlock error replaces the dispatcher's marked one, whose worker may
+    still run (#664): the error reaching the route must stay marked."""
+    from core.utils.exceptions import indexing_worker_may_be_running, mark_indexing_worker_may_be_running
+
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    config = type("Config", (), {"partitions": {}})()
+
+    class UnknownSubmissionDispatcher(FakeDispatcher):
+        async def dispatch_indexing(self, **kwargs):
+            exc = RuntimeError("submission outcome unknown")
+            mark_indexing_worker_may_be_running(exc)
+            raise exc
+
+    svc = _service(
+        disp=UnknownSubmissionDispatcher(),
+        config=config,
+        partition_service=_UnlockAlwaysFailsPartitionService(config, db_partitions={"tenant-a"}),
+    )
+
+    with pytest.raises(ConnectionError) as excinfo:
+        await svc.add_file(
+            file_path=str(f),
+            file_id="f1",
+            partition="tenant-a",
+            metadata={},
+            sanitized_filename="doc.txt",
+            original_filename="doc.txt",
+            user={"id": 7},
+        )
+
+    assert indexing_worker_may_be_running(excinfo.value) is True
+
+
+@pytest.mark.asyncio
+async def test_add_file_leaves_a_failed_dispatch_unmarked(tmp_path):
+    """No task was queued, so the route may delete the upload and free the slot."""
+    from core.utils.exceptions import indexing_worker_may_be_running
+
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    config = type("Config", (), {"partitions": {}})()
+
+    class FailingDispatcher(FakeDispatcher):
+        async def dispatch_indexing(self, **kwargs):
+            raise RuntimeError("rejected before worker submission")
+
+    svc = _service(
+        disp=FailingDispatcher(),
+        config=config,
+        partition_service=FakePartitionService(config, db_partitions={"tenant-a"}),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await svc.add_file(
+            file_path=str(f),
+            file_id="f1",
+            partition="tenant-a",
+            metadata={},
+            sanitized_filename="doc.txt",
+            original_filename="doc.txt",
+            user={"id": 7},
+        )
+
+    assert indexing_worker_may_be_running(excinfo.value) is False
 
 
 @pytest.mark.asyncio
@@ -525,7 +676,7 @@ async def test_copy_file_pins_the_target_partition_before_dispatch():
     config = SimpleNamespace(partitions={})
     partition_service = _PinningPartitionService(config)
     config.partitions["p-dst"] = partition_service._cfg("p-dst")
-    svc = _service(disp=disp, config=config, partition_service=partition_service)
+    svc = _service(doc=FakeDocumentRepo(exists=True), disp=disp, config=config, partition_service=partition_service)
 
     await svc.copy_file(
         source_file_id="src",
@@ -755,6 +906,41 @@ async def test_update_metadata_injects_file_id():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["p2", "missing", "all", "", None, "P1", " p1", "p1 ", 1, ["p1"], {"name": "p1"}])
+async def test_update_metadata_refuses_another_partition(target):
+    disp = FakeDispatcher()
+    with pytest.raises(ValidationError) as exc:
+        await _service(disp=disp).update_metadata("f1", {"author": "bob", "partition": target}, "p1", {"id": 1})
+    assert exc.value.status_code == 400
+    assert exc.value.code == "PARTITION_CHANGE_UNSUPPORTED"
+    assert disp.updated == []
+
+
+@pytest.mark.asyncio
+async def test_update_metadata_naming_the_file_partition_is_an_update():
+    disp = FakeDispatcher()
+    await _service(disp=disp).update_metadata("f1", {"author": "bob", "partition": "p1"}, "p1", {"id": 1})
+    assert disp.updated[0][1] == {"author": "bob", "partition": "p1", "file_id": "f1"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partition", ["all", "ALL"])
+async def test_a_file_in_a_reserved_partition_is_neither_updated_nor_deleted(partition):
+    """The store reads `all` as every partition: file X there is file X everywhere."""
+    disp = FakeDispatcher()
+    svc = _service(disp=disp)
+
+    with pytest.raises(ValidationError) as update:
+        await svc.update_metadata("f1", {"author": "bob"}, partition, {"id": 1})
+    with pytest.raises(ValidationError) as delete:
+        await svc.delete_file("f1", partition)
+
+    for exc in (update, delete):
+        assert (exc.value.status_code, exc.value.code) == (400, "RESERVED_PARTITION_NAME")
+    assert (disp.updated, disp.deleted) == ([], [])
+
+
+@pytest.mark.asyncio
 async def test_update_metadata_cannot_override_content_hash():
     disp = FakeDispatcher()
     svc = _service(disp=disp)
@@ -772,7 +958,7 @@ async def test_update_metadata_cannot_override_content_hash():
 @pytest.mark.asyncio
 async def test_copy_file_sets_target_fields():
     disp = FakeDispatcher()
-    svc = _service(disp=disp)
+    svc = _service(doc=FakeDocumentRepo(exists=True), disp=disp)
     await svc.copy_file(
         source_file_id="src",
         source_partition="p-src",
@@ -786,13 +972,51 @@ async def test_copy_file_sets_target_fields():
     assert partition == "p-src"
     assert md == {"k": "v", "file_id": "dst", "partition": "p-dst", "content_sha256": None}
     assert user == {"id": 2}
+    assert disp.copy_reservations == [None]
+
+
+@pytest.mark.asyncio
+async def test_copy_file_forwards_the_reserved_file_slot():
+    disp = FakeDispatcher()
+
+    await _service(doc=FakeDocumentRepo(exists=True), disp=disp).copy_file(
+        source_file_id="src",
+        source_partition="p-src",
+        target_file_id="dst",
+        target_partition="p-dst",
+        metadata={},
+        user={"id": 2},
+        quota_reservation_id="reservation-1",
+    )
+
+    assert disp.copy_reservations == ["reservation-1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "target"), [("all", "p-dst"), ("ALL", "p-dst"), ("p-src", "all"), ("p-src", " All ")]
+)
+async def test_copy_file_refuses_a_reserved_partition(source, target):
+    """The store reads `all` as every partition: copying file X from there copies X's chunks from everywhere."""
+    disp = FakeDispatcher()
+    with pytest.raises(ValidationError) as exc:
+        await _service(disp=disp).copy_file(
+            source_file_id="src",
+            source_partition=source,
+            target_file_id="dst",
+            target_partition=target,
+            metadata={},
+            user={"id": 1},
+        )
+    assert (exc.value.status_code, exc.value.code) == (400, "RESERVED_PARTITION_NAME")
+    assert disp.copied == []
 
 
 @pytest.mark.asyncio
 async def test_copy_file_preserves_content_hash_when_deduplication_is_enabled():
     disp = FakeDispatcher()
     config = SimpleNamespace(loader=SimpleNamespace(content_deduplication_enabled=True), partitions={})
-    svc = _service(doc=FakeDocumentRepo(content_sha256="abc123"), disp=disp, config=config)
+    svc = _service(doc=FakeDocumentRepo(exists=True, content_sha256="abc123"), disp=disp, config=config)
 
     await svc.copy_file(
         source_file_id="src",
@@ -872,7 +1096,7 @@ async def test_update_metadata_drops_protected_keys():
 @pytest.mark.asyncio
 async def test_copy_file_drops_protected_keys():
     disp = FakeDispatcher()
-    svc = _service(disp=disp)
+    svc = _service(doc=FakeDocumentRepo(exists=True), disp=disp)
     await svc.copy_file(
         source_file_id="src",
         source_partition="p1",
@@ -1019,7 +1243,7 @@ def _copy_destination(vector_field: str, embedder: str) -> dict:
 
 def _copy_service(config: SimpleNamespace, disp: FakeDispatcher, partition_service=None) -> IndexingService:
     return IndexingService(
-        document_repo=FakeDocumentRepo(),
+        document_repo=FakeDocumentRepo(exists=True),
         workspace_repo=FakeWorkspaceRepo(),
         dispatcher=disp,
         config=config,

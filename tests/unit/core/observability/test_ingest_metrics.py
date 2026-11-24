@@ -173,6 +173,15 @@ def test_terminal_status_label_is_lowercased(monkeypatch: pytest.MonkeyPatch) ->
     assert docs.increments == [{"status": "failed"}]
 
 
+def test_live_snapshot_sink_failure_has_a_distinct_drop_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    dropped = _Recorder()
+    monkeypatch.setattr(ray_metrics, "_STAGE_EVENT_DROPPED_TOTAL", dropped)
+
+    ray_metrics.record_stage_live_snapshot_failure()
+
+    assert dropped.increments == [{"reason": "live_snapshot_failed"}]
+
+
 # ---------------------------------------------------------------------------
 # Wiring: the TaskStateManager counts transitions, not writes
 # ---------------------------------------------------------------------------
@@ -504,3 +513,21 @@ def test_a_failed_zero_start_never_stops_the_actor(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(ray_metrics, "start_counter_at_zero", _boom)
 
     ray_metrics.initialize_ingest_counters()
+
+
+def test_stage_event_drop_counter_skips_non_positive_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Counter:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def inc(self, value: int, *, tags: dict[str, str]) -> None:
+            self.calls.append((value, tags))
+
+    counter = Counter()
+    monkeypatch.setattr(ray_metrics, "_STAGE_EVENT_DROPPED_TOTAL", counter)
+
+    ray_metrics.record_stage_event_drop("write_failed", 0)
+    ray_metrics.record_stage_event_drop("write_failed", -1)
+    ray_metrics.record_stage_event_drop("write_failed", 2)
+
+    assert counter.calls == [(2, {"reason": "write_failed"})]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
@@ -82,6 +82,93 @@ def test_protocol_generation_drains_before_removal(monkeypatch: pytest.MonkeyPat
     assert [call.args[2] for call in rpc.await_args_list] == [
         "Begin draining indexer generation v2",
         "Check indexer generation v2 drain status",
+    ]
+
+
+def test_stage_writers_are_drained_after_jobs_settle_and_before_actor_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.workers.retire_indexer_generation as module
+
+    worker_name = "IndexerWorker-v2-0"
+    events: list[str] = []
+    dispatcher = SimpleNamespace(
+        begin_drain=SimpleNamespace(remote=Mock()),
+    )
+    worker = SimpleNamespace(close_stage_writer=SimpleNamespace(remote=Mock(return_value="close-ref")))
+    actors = [
+        {"name": "IndexerPoolDispatcher-v2", "state": "ALIVE"},
+        {"name": worker_name, "state": "ALIVE"},
+    ]
+
+    async def call_actor(_future, _timeout, description):
+        events.append(description)
+        if description.startswith("Begin draining"):
+            return {"inflight_jobs": 0, "worker_names": [worker_name]}
+        return None
+
+    monkeypatch.setattr("ray.util.state.list_actors", lambda **_kwargs: actors)
+    monkeypatch.setattr(
+        module,
+        "_get_actor",
+        lambda name, _namespace: dispatcher if "Dispatcher" in name else worker,
+    )
+    monkeypatch.setattr(module, "call_ray_actor_with_timeout", call_actor)
+    monkeypatch.setattr(
+        module,
+        "_kill_actor",
+        lambda name, _namespace: events.append(f"removed:{name}") is None,
+    )
+
+    assert module.retire_generation(
+        "v2",
+        namespace="openrag",
+        timeout=1,
+        poll_interval=0,
+        confirm_legacy_idle=False,
+    ) == ["IndexerPoolDispatcher-v2", worker_name]
+    worker.close_stage_writer.remote.assert_called_once_with()
+    assert events.index(f"Drain stage writer for {worker_name}") < events.index(f"removed:{worker_name}")
+
+
+def test_writer_drain_failure_does_not_block_retirement(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.retire_indexer_generation as module
+
+    worker_name = "IndexerWorker-v2-0"
+    dispatcher = SimpleNamespace(begin_drain=SimpleNamespace(remote=Mock()))
+    worker = SimpleNamespace(close_stage_writer=SimpleNamespace(remote=Mock(return_value="close-ref")))
+    actors = [
+        {"name": "IndexerPoolDispatcher-v2", "state": "ALIVE"},
+        {"name": worker_name, "state": "ALIVE"},
+    ]
+    monkeypatch.setattr("ray.util.state.list_actors", lambda **_kwargs: actors)
+    monkeypatch.setattr(
+        module,
+        "_get_actor",
+        lambda name, _namespace: dispatcher if "Dispatcher" in name else worker,
+    )
+
+    async def fail_writer_drain(_future, _timeout, description):
+        if description.startswith("Begin draining"):
+            return {"inflight_jobs": 0, "worker_names": [worker_name]}
+        raise TimeoutError("worker actor did not respond")
+
+    monkeypatch.setattr(module, "call_ray_actor_with_timeout", fail_writer_drain)
+    kill = Mock()
+    monkeypatch.setattr(module, "_kill_actor", kill)
+
+    removed = module.retire_generation(
+        "v2",
+        namespace="openrag",
+        timeout=1,
+        poll_interval=0,
+        confirm_legacy_idle=False,
+    )
+
+    assert removed == ["IndexerPoolDispatcher-v2", worker_name]
+    assert kill.call_args_list == [
+        call("IndexerPoolDispatcher-v2", "openrag"),
+        call(worker_name, "openrag"),
     ]
 
 

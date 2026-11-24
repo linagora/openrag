@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from core.models.query import Query, TemporalPredicate
 
 
@@ -44,3 +45,58 @@ def test_a_non_utc_offset_is_kept_as_given():
 def test_an_unparseable_value_is_dropped_and_the_rest_kept():
     assert _filter((">=", "last monday"), ("<", "2026-09-14")) == 'created_at < ISO "2026-09-14T00:00:00+00:00"'
     assert _filter((">=", "last monday")) is None
+
+
+# --------------------------------------------------------------------------- #
+# date_order — "the last / first X" is an ordering, not a period
+# --------------------------------------------------------------------------- #
+
+
+def test_date_order_defaults_to_none_and_accepts_both_directions():
+    assert Query(query="q").date_order is None
+    assert Query(query="q", date_order="newest").date_order == "newest"
+    assert Query(query="q", date_order="oldest").date_order == "oldest"
+
+
+@pytest.mark.parametrize("value", ["latest", "none", "", "null", 1])
+def test_unknown_date_order_is_ignored_and_keeps_the_rest_of_the_query(value):
+    query = Query(
+        query="q",
+        temporal_filters=[TemporalPredicate(operator=">=", value="2026-01-01")],
+        date_order=value,
+    )
+    assert query.date_order is None
+    assert query.to_milvus_filter() is not None
+
+
+def test_date_order_does_not_leak_into_the_milvus_filter():
+    """Ordering is applied on the ranked list, never as a Milvus predicate."""
+    assert Query(query="q", date_order="newest").to_milvus_filter() is None
+
+
+def test_date_order_parses_from_the_contextualizer_json_and_may_be_omitted():
+    from core.models.query import SearchQueries
+
+    parsed = SearchQueries.model_validate_json(
+        '{"requires_retrieval": true, "query_list": [{"query": "meeting notes", "temporal_filters": null, '
+        '"date_order": "newest"}, {"query": "old shape", "temporal_filters": null}]}'
+    )
+    assert [q.date_order for q in parsed.query_list] == ["newest", None]
+
+
+def test_search_queries_date_order_requires_every_sub_query_to_share_it():
+    from core.models.query import SearchQueries
+
+    def order(*orders):
+        return SearchQueries(query_list=[Query(query="q", date_order=o) for o in orders]).date_order
+
+    assert order() is None
+    assert order(None, None) is None
+    assert order("oldest", "oldest") == "oldest"
+    assert order("newest", "oldest") is None
+    assert order(None, "oldest") is None
+
+
+def test_str_mentions_the_order_only_when_set():
+    assert "Order" not in str(Query(query="q"))
+    assert str(Query(query="q", date_order="newest")).endswith("Order: newest")

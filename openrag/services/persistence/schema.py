@@ -13,7 +13,7 @@ divergence as a pending schema change.
 
 from datetime import datetime
 
-from core.models.catalog import DocumentStatus
+from core.models.catalog import DocumentStatus, FileFenceKind
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -34,7 +34,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 
 metadata = MetaData()
 
@@ -313,6 +313,39 @@ file_content_claims = Table(
 )
 
 
+_FILE_FENCE_KIND_CHECK = "holder_kind IN ({})".format(",".join(f"'{kind.value}'" for kind in FileFenceKind))
+
+
+# One row per file an operation is changing right now (#1430): indexing (a new
+# file or a replace) or a delete; metadata updates and copies don't take one
+# yet. The primary key is what makes it exclusive. ``holder_id`` is the fencing token:
+# the indexing task id, or a fresh id for a request. A row rather than an
+# advisory lock, because the process that takes an indexing fence (the API at
+# admission) is not the one that releases it (whatever settles the task).
+#
+# ``expires_at`` is the last resort for a holder that died; an indexing fence
+# whose ``jobs`` row is terminal is free before that. The catalog write checks
+# the fence in its own transaction (``PgDocumentRepository``), so an operation
+# that lost it never makes a file visible. Deleting the partition drops its
+# fences, as it does its content claims.
+file_fences = Table(
+    "file_fences",
+    metadata,
+    Column(
+        "partition_name",
+        String,
+        ForeignKey("partitions.partition", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("file_id", String, primary_key=True),
+    Column("holder_kind", String, nullable=False),
+    Column("holder_id", String, nullable=False),
+    Column("acquired_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(_FILE_FENCE_KIND_CHECK, name="ck_file_fences_holder_kind"),
+)
+
+
 _JOB_STATUS_CHECK = "status IN ({})".format(",".join(f"'{status.value}'" for status in DocumentStatus))
 
 
@@ -344,6 +377,11 @@ jobs = Table(
         server_default=text("ARRAY[]::text[]"),
         nullable=False,
     ),
+    Column("stage_tracking_version", Integer, nullable=True),
+    # Orphan reconciliation can fail a job without proving its worker stopped.
+    # This records the attempt whose settlement was confirmed before marking
+    # an open stage as interrupted.
+    Column("stage_interruption_confirmed_attempt", Integer, nullable=True),
     Column("created_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
     # Queue wait is ``started_at - created_at`` and service time is
@@ -371,6 +409,110 @@ jobs = Table(
     Index("ix_jobs_settled_at", text("COALESCE(completed_at, created_at)")),
     # Incident lookups start from a file, not a task id.
     Index("ix_jobs_partition_file_id", "partition", "file_id"),
+    CheckConstraint(
+        "stage_tracking_version IS NULL OR stage_tracking_version IN (0, 1)",
+        name="ck_jobs_stage_tracking_version",
+    ),
+)
+
+
+job_stage_events = Table(
+    "job_stage_events",
+    metadata,
+    Column("event_id", UUID(as_uuid=True), primary_key=True),
+    Column("task_id", String, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False),
+    Column("attempt", Integer, nullable=False),
+    Column("sequence", BigInteger, nullable=False),
+    Column("invocation_id", UUID(as_uuid=True), nullable=False),
+    Column("stage_id", String(64), nullable=False),
+    Column("stage_rank", Integer, nullable=True),
+    Column("status", String(16), nullable=False),
+    Column("occurred_at", DateTime(timezone=True), nullable=False),
+    Column("duration_ms", BigInteger, nullable=True),
+    Column("failure_effect", String(32), nullable=True),
+    UniqueConstraint("task_id", "attempt", "sequence", name="uq_job_stage_events_task_attempt_sequence"),
+    CheckConstraint("attempt > 0", name="ck_job_stage_events_attempt_positive"),
+    CheckConstraint("sequence > 0", name="ck_job_stage_events_sequence_positive"),
+    CheckConstraint(
+        "status IN ('started', 'completed', 'failed', 'cancelled')",
+        name="ck_job_stage_events_status",
+    ),
+    CheckConstraint("stage_rank IS NULL OR stage_rank >= 0", name="ck_job_stage_events_rank_nonnegative"),
+    CheckConstraint("duration_ms IS NULL OR duration_ms >= 0", name="ck_job_stage_events_duration_nonnegative"),
+    CheckConstraint(
+        "status <> 'started' OR duration_ms IS NULL",
+        name="ck_job_stage_events_started_duration_null",
+    ),
+    CheckConstraint(
+        "failure_effect IS NULL OR failure_effect IN ('continued_degraded', 'task_failed')",
+        name="ck_job_stage_events_failure_effect",
+    ),
+    CheckConstraint("failure_effect IS NULL OR status = 'failed'", name="ck_job_stage_events_failure_status"),
+    Index(
+        "uq_job_stage_events_one_start",
+        "task_id",
+        "attempt",
+        "invocation_id",
+        unique=True,
+        postgresql_where=text("status = 'started'"),
+    ),
+    Index(
+        "uq_job_stage_events_one_terminal",
+        "task_id",
+        "attempt",
+        "invocation_id",
+        unique=True,
+        postgresql_where=text("status IN ('completed', 'failed', 'cancelled')"),
+    ),
+)
+
+
+job_stage_state = Table(
+    "job_stage_state",
+    metadata,
+    Column("task_id", String, ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True),
+    Column("attempt", Integer, nullable=False, server_default="1"),
+    Column("latest_sequence", BigInteger, nullable=False, server_default="0"),
+    Column("snapshot_revision", BigInteger, nullable=False, server_default="0"),
+    Column("tracking_version", Integer, nullable=True),
+    Column("phase", String(24), nullable=False, server_default="preparing"),
+    Column("current_stage_id", String(64), nullable=True),
+    Column("current_stage_rank", Integer, nullable=True),
+    Column("current_substage_id", String(64), nullable=True),
+    Column("current_substage_label", String(160), nullable=True),
+    Column("current_substage_progress", BigInteger, nullable=True),
+    Column("current_substage_total", BigInteger, nullable=True),
+    Column("position_score", Integer, nullable=False, server_default="0"),
+    Column("stage_started_at", DateTime(timezone=True), nullable=True),
+    Column("current_invocation_id", UUID(as_uuid=True), nullable=True),
+    Column("interrupted_invocation_id", UUID(as_uuid=True), nullable=True),
+    Column("persisted_through_sequence", BigInteger, nullable=False, server_default="0"),
+    Column("expected_final_sequence", BigInteger, nullable=True),
+    Column("known_loss", Boolean, nullable=False, server_default="false"),
+    Column("known_conflict", Boolean, nullable=False, server_default="false"),
+    Column("has_open_invocation", Boolean, nullable=False, server_default="false"),
+    Column("history_truncated", Boolean, nullable=False, server_default="false"),
+    Column("has_summary", Boolean, nullable=False, server_default="true"),
+    Column("updated_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    CheckConstraint("attempt > 0", name="ck_job_stage_state_attempt_positive"),
+    CheckConstraint("latest_sequence >= 0", name="ck_job_stage_state_sequence_nonnegative"),
+    CheckConstraint("snapshot_revision >= 0", name="ck_job_stage_state_revision_nonnegative"),
+    CheckConstraint(
+        "tracking_version IS NULL OR tracking_version = 1",
+        name="ck_job_stage_state_tracking_version",
+    ),
+    CheckConstraint(
+        "phase IN ('queued', 'preparing', 'stage', 'between_stages', 'finalizing')",
+        name="ck_job_stage_state_phase",
+    ),
+    CheckConstraint(
+        "persisted_through_sequence >= 0",
+        name="ck_job_stage_state_persisted_sequence_nonnegative",
+    ),
+    CheckConstraint(
+        "expected_final_sequence IS NULL OR expected_final_sequence >= 0",
+        name="ck_job_stage_state_expected_final_nonnegative",
+    ),
 )
 
 
@@ -421,6 +563,29 @@ Index(
     "ix_users_lower_display_name_pattern",
     func.lower(users.c.display_name).label("display_name_lower"),
     postgresql_ops={"display_name_lower": "text_pattern_ops"},
+)
+
+
+# One row per file slot a quota-capped upload holds before its file exists
+# (#664). Admission bumps ``users.file_count`` and inserts the row in one
+# transaction; the catalog insert deletes it instead of bumping the count, and
+# every path that gives the slot back deletes it and decrements the count in one
+# statement. So ``file_count`` is always the uploader's files plus their rows
+# here, and a release that finds no row is a no-op rather than a double count.
+#
+# ``id`` is the indexing task id for an upload, and a fresh id for a copy.
+# Deleting the user deletes their reservations, as it does their counter.
+file_quota_reservations = Table(
+    "file_quota_reservations",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    # ``clock_timestamp()``, not ``now()``: the reservation is inserted after the
+    # quota UPDATE, which can wait on the user's row lock, and ``now()`` is the
+    # transaction start, so a long wait would stamp a row already past the
+    # sweep's grace window.
+    Column("created_at", DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False),
+    Index("ix_file_quota_reservations_user_id", "user_id"),
 )
 
 

@@ -5,16 +5,20 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from core.config.infrastructure import VerboseConfig
 from core.utils.logging import (
+    _ACCESS_LOG_LOGGERS,
     _STDLIB_LOGGERS_QUIETED,
     _STDLIB_LOGGERS_TO_FLATTEN,
     RESERVED_JSON_KEYS,
+    AccessLogMinimiser,
     escape_markup,
     get_logger,
     json_record,
     json_sink,
     mask_email,
     terminal_formatter,
+    truncate_client_addr,
 )
 from loguru import logger
 
@@ -30,6 +34,10 @@ def _reset_stdlib_logging():
         lg.propagate = True
     for name in _STDLIB_LOGGERS_QUIETED:
         logging.getLogger(name).setLevel(logging.NOTSET)
+    for name in _ACCESS_LOG_LOGGERS:
+        lg = logging.getLogger(name)
+        for flt in [f for f in lg.filters if isinstance(f, AccessLogMinimiser)]:
+            lg.removeFilter(flt)
 
 
 def _restore_default_logger() -> None:
@@ -434,3 +442,129 @@ def test_json_mode_keeps_an_operator_set_library_level(capsys):
         assert logging.getLogger("httpcore").level == logging.WARNING
     finally:
         _restore_default_logger()
+
+
+# ---------------------------------------------------------------------------
+# uvicorn request lines: client address and query string
+# ---------------------------------------------------------------------------
+
+# The exact call uvicorn's h11/httptools protocols make for every request.
+_ACCESS_FORMAT = '%s - "%s %s HTTP/%s" %d'
+
+
+def _log_request(client_addr: str, path: str) -> None:
+    logging.getLogger("uvicorn.access").info(_ACCESS_FORMAT, client_addr, "GET", path, "1.1", 200)
+
+
+@pytest.mark.parametrize(
+    ("client_addr", "expected"),
+    [
+        ("203.0.113.42:51234", "203.0.113.0"),
+        ("2001:db8:85a3:8d3:1319:8a2e:370:7348:443", "2001:db8:85a3::"),
+        ("::1:5678", "::"),
+        ("[2001:db8::1]:80", "2001:db8::"),
+        ("", ""),
+        ("testclient:50000", "-"),
+        # IPv4-mapped IPv6 keeps the /24 of the IPv4 address it carries.
+        ("::ffff:203.0.113.42:5678", "203.0.113.0"),
+        # Some WebSocket implementations pass a (host, port) tuple.
+        (("203.0.113.42", 0), "203.0.113.0"),
+    ],
+)
+def test_truncate_client_addr_keeps_only_the_network(client_addr, expected):
+    assert truncate_client_addr(client_addr) == expected
+
+
+def test_json_mode_access_line_drops_query_string_and_host_part(capsys):
+    config = SimpleNamespace(verbose=SimpleNamespace(level="INFO", format="json"))
+    try:
+        get_logger(config)
+        _log_request("203.0.113.42:51234", "/search?partitions=all&text=Jean%20Dupont%20salary")
+        payload = json.loads(capsys.readouterr().err)
+        assert payload["msg"] == '203.0.113.0 - "GET /search?[REDACTED] HTTP/1.1" 200'
+    finally:
+        _restore_default_logger()
+
+
+def test_text_mode_access_line_is_minimised_through_uvicorns_own_config(capsys):
+    """Text mode prints through uvicorn's handlers. Its ``dictConfig`` runs
+    when uvicorn starts, which may be after ``get_logger`` has attached the
+    filter (``uvicorn.run`` on an already-imported app): the filter must
+    survive it, and uvicorn's ``AccessFormatter`` must still unpack the args."""
+    from uvicorn.config import LOGGING_CONFIG, Config
+
+    try:
+        get_logger(SimpleNamespace(verbose=SimpleNamespace(level="INFO", format="text")))
+        Config(app="api.main:app", log_config=LOGGING_CONFIG, use_colors=False).configure_logging()
+        _log_request("198.51.100.7:40000", "/auth/callback?code=abc123&state=xyz")
+        out = capsys.readouterr().out
+        assert '198.51.100.0 - "GET /auth/callback?[REDACTED] HTTP/1.1" 200' in out
+        assert "abc123" not in out
+        assert "198.51.100.7" not in out
+    finally:
+        _restore_default_logger()
+
+
+def test_personal_data_keeps_the_address_but_still_drops_the_query(capsys):
+    config = SimpleNamespace(verbose=SimpleNamespace(level="INFO", format="json", personal_data=True))
+    try:
+        get_logger(config)
+        _log_request("203.0.113.42:51234", "/search?text=secret")
+        payload = json.loads(capsys.readouterr().err)
+        assert payload["msg"] == '203.0.113.42:51234 - "GET /search?[REDACTED] HTTP/1.1" 200'
+    finally:
+        _restore_default_logger()
+
+
+def test_websocket_handshake_lines_on_uvicorn_error_are_minimised(capsys):
+    config = SimpleNamespace(verbose=SimpleNamespace(level="INFO", format="json"))
+    try:
+        get_logger(config)
+        logging.getLogger("uvicorn.error").info(
+            '%s - "WebSocket %s" [accepted]', "203.0.113.42:51234", "/ws/socket.io/?token=abc&EIO=4"
+        )
+        payload = json.loads(capsys.readouterr().err)
+        assert payload["msg"] == '203.0.113.0 - "WebSocket /ws/socket.io/?[REDACTED]" [accepted]'
+    finally:
+        _restore_default_logger()
+
+
+def test_an_absolute_request_target_loses_its_query_too(capsys):
+    """A hand-crafted ``GET http://host/search?text=…`` does not start with ``/``."""
+    config = SimpleNamespace(verbose=SimpleNamespace(level="INFO", format="json"))
+    try:
+        get_logger(config)
+        _log_request("203.0.113.42:51234", "http%3A//h/search?text=Jeanne%20Dupont")
+        payload = json.loads(capsys.readouterr().err)
+        assert payload["msg"] == '203.0.113.0 - "GET http%3A//h/search?[REDACTED] HTTP/1.1" 200'
+    finally:
+        _restore_default_logger()
+
+
+def test_other_uvicorn_lines_are_left_alone(capsys):
+    config = SimpleNamespace(verbose=SimpleNamespace(level="INFO", format="json"))
+    try:
+        get_logger(config)
+        logging.getLogger("uvicorn.error").info("Uvicorn running on %s://%s:%d", "http", "0.0.0.0", 8080)
+        payload = json.loads(capsys.readouterr().err)
+        assert payload["msg"] == "Uvicorn running on http://0.0.0.0:8080"
+    finally:
+        _restore_default_logger()
+
+
+def test_access_log_minimiser_is_installed_once_and_follows_the_latest_config():
+    try:
+        get_logger(SimpleNamespace(verbose=SimpleNamespace(level="INFO", format="text", personal_data=True)))
+        get_logger(SimpleNamespace(verbose=SimpleNamespace(level="INFO", format="text")))
+        for name in _ACCESS_LOG_LOGGERS:
+            filters = [f for f in logging.getLogger(name).filters if isinstance(f, AccessLogMinimiser)]
+            assert len(filters) == 1
+            assert filters[0].personal_data is False
+    finally:
+        _restore_default_logger()
+
+
+def test_verbose_config_defaults_are_production_safe():
+    config = VerboseConfig()
+    assert config.level == "INFO"
+    assert config.personal_data is False

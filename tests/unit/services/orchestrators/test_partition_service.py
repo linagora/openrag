@@ -149,8 +149,10 @@ class FakeMembershipRepo:
         owned: dict[int, int] | None = None,
         candidate_rows: list[dict] | None = None,
         add_result: bool = True,
+        owners: set[tuple[int, str]] | None = None,
     ):
         self._members = members or set()
+        self._owners = owners or set()
         self._owned = owned or {}  # user_id -> number of partitions owned
         self._candidate_rows = candidate_rows or []
         self._add_result = add_result
@@ -207,13 +209,20 @@ class FakeMembershipRepo:
         self.added.append((partition, user_id, role))
         return self._add_result
 
-    async def remove_partition_member(self, partition: str, user_id: int) -> bool:
-        self.removed.append((partition, user_id))
-        return True
+    def _is_last_owner(self, partition: str, user_id: int) -> bool:
+        return {u for (u, p) in self._owners if p == partition} == {user_id}
 
-    async def update_partition_member_role(self, partition: str, user_id: int, new_role: str) -> bool:
+    async def remove_partition_member(self, partition: str, user_id: int) -> str:
+        if self._is_last_owner(partition, user_id):
+            return "last_owner"
+        self.removed.append((partition, user_id))
+        return "ok"
+
+    async def update_partition_member_role(self, partition: str, user_id: int, new_role: str) -> str:
+        if new_role != "owner" and self._is_last_owner(partition, user_id):
+            return "last_owner"
         self.role_updates.append((partition, user_id, new_role))
-        return True
+        return "ok"
 
 
 class FakeDocumentRepo:
@@ -714,6 +723,8 @@ async def test_delete_partition_cancels_active_indexing_tasks_before_cleanup():
     tsm.get_matching_active_task_refs_v2.remote = AsyncMock(return_value={"task-1": {"ref": ref}})
     tsm.set_state = MagicMock()
     tsm.set_state.remote = AsyncMock(return_value=None)
+    tsm.set_cancelled_if_active = MagicMock()
+    tsm.set_cancelled_if_active.remote = AsyncMock(return_value=True)
     tsm.finish_cancellation = MagicMock()
     tsm.finish_cancellation.remote = AsyncMock(return_value=True)
 
@@ -722,7 +733,7 @@ async def test_delete_partition_cancels_active_indexing_tasks_before_cleanup():
 
     tsm.get_matching_active_task_refs_v2.remote.assert_called_once_with(partition="p1", file_id=None)
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
 
 
@@ -753,6 +764,8 @@ async def test_delete_partition_uses_legacy_task_state_lookup_when_matching_api_
     tsm.get_object_ref.remote = AsyncMock(return_value={"ref": ref})
     tsm.set_state = MagicMock()
     tsm.set_state.remote = AsyncMock(return_value=None)
+    tsm.set_cancelled_if_active = MagicMock()
+    tsm.set_cancelled_if_active.remote = AsyncMock(return_value=True)
     tsm.finish_cancellation = MagicMock()
     tsm.finish_cancellation.remote = AsyncMock(return_value=True)
 
@@ -762,7 +775,7 @@ async def test_delete_partition_uses_legacy_task_state_lookup_when_matching_api_
     tsm.get_all_info.remote.assert_called_once_with()
     tsm.get_object_ref.remote.assert_called_once_with("task-1")
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
     assert vstore.deleted_filters == [{"partition": "p1"}, {"partition": "p1"}]
     assert prepo.deleted == ["p1"]
@@ -1330,6 +1343,53 @@ async def test_update_role_success():
     svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=FakeUserRepo({9}))
     await svc.update_role("p", 9, "owner")
     assert mrepo.role_updates == [("p", 9, "owner")]
+
+
+@pytest.mark.asyncio
+async def test_remove_last_owner_is_refused_with_409():
+    # Without an owner nobody can manage the partition's members any more
+    # (short of SUPER_ADMIN_MODE), so the last owner cannot leave.
+    mrepo = FakeMembershipRepo(members={(1, "default"), (9, "default")}, owners={(1, "default")})
+    svc = _svc(prepo=FakePartitionRepo({"default"}), mrepo=mrepo, urepo=FakeUserRepo({1, 9}))
+
+    with pytest.raises(ConflictError) as ei:
+        await svc.remove_member("default", 1)
+
+    assert ei.value.status_code == 409
+    assert ei.value.code == "LAST_PARTITION_OWNER"
+    assert mrepo.removed == []
+
+
+@pytest.mark.asyncio
+async def test_remove_owner_when_another_owner_remains():
+    mrepo = FakeMembershipRepo(members={(1, "p"), (9, "p")}, owners={(1, "p"), (9, "p")})
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=FakeUserRepo({1, 9}))
+
+    await svc.remove_member("p", 1)
+
+    assert mrepo.removed == [("p", 1)]
+
+
+@pytest.mark.asyncio
+async def test_demote_last_owner_is_refused_with_409():
+    mrepo = FakeMembershipRepo(members={(1, "p")}, owners={(1, "p")})
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=FakeUserRepo({1}))
+
+    with pytest.raises(ConflictError) as ei:
+        await svc.update_role("p", 1, "editor")
+
+    assert ei.value.code == "LAST_PARTITION_OWNER"
+    assert mrepo.role_updates == []
+
+
+@pytest.mark.asyncio
+async def test_demote_owner_when_another_owner_remains():
+    mrepo = FakeMembershipRepo(members={(1, "p"), (9, "p")}, owners={(1, "p"), (9, "p")})
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=FakeUserRepo({1, 9}))
+
+    await svc.update_role("p", 1, "viewer")
+
+    assert mrepo.role_updates == [("p", 1, "viewer")]
 
 
 # --------------------------------------------------------------------------- #

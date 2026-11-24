@@ -22,7 +22,7 @@ async def topic_tag_stage(
             raise ValueError("topic_tag_stage row must contain a list[Chunk] under 'chunks'")
 
         filename = str(row.get("filename") or "")
-        language = resolve_language(row)
+        language = await resolve_language(row)
         # DB-resolved per-partition prompt for this file, if any; otherwise the
         # tagger falls back to its own (disk-loaded) default.
         system_prompt = row.get("topic_tagger_prompt")

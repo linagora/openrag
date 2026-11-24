@@ -54,7 +54,7 @@ services:
       retries: 5
 
   milvus:
-    image: milvusdb/milvus:v3.0.2
+    image: milvusdb/milvus:v3.0.5
     command: ["milvus", "run", "standalone"]
     security_opt:
     - seccomp:unconfined
@@ -104,6 +104,7 @@ services:
       - RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
       - RAY_memory_monitor_refresh_ms=0
       - DEFAULT_FILE_QUOTA=10
+      - FILE_FENCES=${FILE_FENCES:-ray}
       - AUTH_TOKEN=${AUTH_TOKEN:-test-admin-token}
       - SUPER_ADMIN_MODE=${SUPER_ADMIN_MODE:-true}
       # This stack is disposable and its credentials are published in this file,

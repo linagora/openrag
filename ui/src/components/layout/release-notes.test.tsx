@@ -1,14 +1,21 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { formatReleaseDate, LAST_VIEWED_RELEASE_NOTES_KEY, releaseNotes } from "@/lib/release-notes";
 import { ReleaseNotes } from "./release-notes";
 
 const triggerLabel = `Open Release Notes · v${releaseNotes.version}`;
 
 describe("ReleaseNotes", () => {
+  const shipped = { ...releaseNotes };
+
   beforeEach(() => {
     localStorage.clear();
+  });
+
+  afterEach(() => {
+    delete releaseNotes.breakingChange;
+    Object.assign(releaseNotes, shipped);
   });
 
   it("opens the current release without navigating and remembers it as viewed", async () => {
@@ -37,8 +44,8 @@ describe("ReleaseNotes", () => {
 
   it("renders the breaking-change callout from the release data", async () => {
     const user = userEvent.setup();
-    const { breakingChange } = releaseNotes;
-    expect(breakingChange).toBeTruthy();
+    const breakingChange = { title: "A title", description: "A description", action: "An action" };
+    releaseNotes.breakingChange = breakingChange;
     render(<ReleaseNotes />);
 
     await user.click(screen.getByRole("button", { name: /^Open Release Notes/ }));
@@ -46,11 +53,20 @@ describe("ReleaseNotes", () => {
     const dialog = await screen.findByRole("dialog");
     const callout = within(dialog).getByRole("alert");
     expect(callout.textContent).toContain("Breaking Changes");
-    if (breakingChange) {
-      expect(callout.textContent).toContain(breakingChange.title);
-      expect(callout.textContent).toContain(breakingChange.description);
-      expect(callout.textContent).toContain(breakingChange.action);
-    }
+    expect(callout.textContent).toContain(breakingChange.title);
+    expect(callout.textContent).toContain(breakingChange.description);
+    expect(callout.textContent).toContain(breakingChange.action);
+  });
+
+  it("renders no callout for a release without a breaking change", async () => {
+    const user = userEvent.setup();
+    delete releaseNotes.breakingChange;
+    render(<ReleaseNotes />);
+
+    await user.click(screen.getByRole("button", { name: /^Open Release Notes/ }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByRole("alert")).toBeNull();
   });
 
   it("does not show the new badge after the current version was viewed", () => {

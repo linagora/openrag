@@ -29,6 +29,12 @@ data:
   # Set env.config.RAY_LOG_TO_STDERR yourself to override.
   RAY_LOG_TO_STDERR: "1"
 {{- end }}
+{{- if and (eq (lower (toString (.Values.env.config.LOG_FORMAT | default ""))) "json") (not (hasKey .Values.env.config "TQDM_DISABLE")) }}
+  # tqdm progress bars are not JSON: each refresh would become a log line.
+  # Follows LOG_FORMAT so a text deployment keeps its bars. Set
+  # env.config.TQDM_DISABLE yourself to override.
+  TQDM_DISABLE: "1"
+{{- end }}
 {{- with .Values.openrag.seedUsers }}
 {{- if hasKey $.Values.env.config "SEED_USERS" }}
 {{- fail "openrag.seedUsers is set and env.config also defines SEED_USERS: keep one of the two." }}

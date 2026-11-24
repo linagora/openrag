@@ -14,29 +14,31 @@ from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
-from core.indexing.parsers.tabular.csv_parser import CsvParser
+from core.indexing.parsers.progress import bind_parser_progress
+from core.indexing.parsers.tabular.base import TabularBatchParser
 from core.indexing.topic_tags import TopicTagger
 from core.models.document import Document, DocumentType, ProcessedDocument
+from core.observability.metric_specs import STAGE_VALUES
 from core.observability.ray_metrics import observe_stage_duration
 from core.utils.exceptions import ConfigError, NoIndexableContentError, PipelineError
 from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
-from services.workers.csv_pipeline import run_csv_batches
 from services.workers.embedder_provenance import embedder_provenance
 from services.workers.stages._common import run_with_optional_timeout
-from services.workers.stages.caption import caption_stage
+from services.workers.stages.caption import caption_stage, drop_uncaptioned_image_refs
 from services.workers.stages.chunk import chunk_stage
 from services.workers.stages.contextualize import contextualize_stage
 from services.workers.stages.embed import embed_stage
 from services.workers.stages.parse import parse_stage
 from services.workers.stages.store import store_stage
 from services.workers.stages.topic_tag import topic_tag_stage
+from services.workers.tabular_pipeline import run_tabular_batches
 
 logger = get_logger()
 
 #: Tokens a later stage may prepend to a chunk before it is embedded — the
-#: ``[CONTEXT]`` block plus the ``[CHUNK_START]``/filename envelope, measured at
+#: ``[CONTEXT]`` block plus the ``[CHUNK_START]`` envelope, measured at
 #: ~56 tokens on the marker corpus. Generously over-estimated: it only decides
 #: how close to the limit a chunk must be to be worth re-tokenising.
 _ENVELOPE_HEADROOM_TOKENS = 512
@@ -64,7 +66,7 @@ class PipelineTimeouts:
 
 @dataclass(slots=True, frozen=True)
 class BatchIndexingContext:
-    """Resolved per-file dependencies reused by every parsed CSV batch."""
+    """Resolved per-file dependencies reused by every parsed tabular batch."""
 
     config: IndexationPipelineConfig | None
     parser: DocumentParser
@@ -101,6 +103,16 @@ def _accepts_embedder_window(factory: Callable[..., Any]) -> bool:
         p for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
     ]
     return len(positional) >= 2
+
+
+def _safe_tracking_call(tracker: Any, method: str, *args: Any, **kwargs: Any) -> None:
+    """Keep optional observability failures outside the indexing outcome."""
+    if tracker is None:
+        return
+    try:
+        getattr(tracker, method)(*args, **kwargs)
+    except Exception:  # noqa: BLE001 - stage tracking cannot fail indexing
+        logger.warning("Indexing stage progress update failed", operation=method)
 
 
 @dataclass(slots=True, frozen=True)
@@ -141,13 +153,15 @@ class IndexingPipeline:
     # upload, for inspecting parser output.
     save_markdown: bool = False
     # ``paths.data_dir``. The markdown copy is only written for uploads stored
-    # under it; anything else (e.g. MCP ``index_url`` temp downloads) is skipped.
+    # under it; anything else (a file stored under an earlier ``data_dir``) is
+    # skipped.
     data_dir: Path | None = None
 
     async def run(
         self,
         row: MutableMapping[str, Any],
         *,
+        stage_tracker: Any | None = None,
         _processed: ProcessedDocument | None = None,
         _chunk_offset: int = 0,
         _indexed_at: datetime | None = None,
@@ -204,16 +218,25 @@ class IndexingPipeline:
             configured_window = embedder_window
 
         document = row.get("document")
-        if _processed is None and isinstance(document, Document) and document.content_type is DocumentType.CSV:
+        if (
+            _processed is None
+            and isinstance(document, Document)
+            and document.content_type
+            in {
+                DocumentType.CSV,
+                DocumentType.XLSX,
+            }
+        ):
+            format_label = document.content_type.value.upper()
             if contextualizer is not None:
-                message = "CSV streaming skips chunk contextualization"
+                message = f"{format_label} streaming skips chunk contextualization"
                 row.setdefault("degraded_stages", {})["contextualize"] = message
                 logger.bind(task_id=row.get("task_id"), filename=row.get("filename", "")).warning(
                     f"{message}; continuing with labelled row chunks"
                 )
             concrete_parser = parser.resolve(document) if hasattr(parser, "resolve") else parser
-            if not isinstance(concrete_parser, CsvParser):
-                raise ConfigError("CSV indexing requires a configured CsvParser")
+            if not isinstance(concrete_parser, TabularBatchParser):
+                raise ConfigError(f"{format_label} indexing requires a configured tabular batch parser")
             batch_context = BatchIndexingContext(
                 config=config,
                 parser=parser,
@@ -227,21 +250,45 @@ class IndexingPipeline:
                 topic_tagger=None,
                 topic_tagging_llm=None,
             )
-            return await run_csv_batches(
+            return await run_tabular_batches(
                 self,
                 row,
                 concrete_parser,
                 batch_context=batch_context,
+                stage_tracker=stage_tracker,
                 topic_tagger=topic_tagger,
                 max_topic_tags=config.max_topic_tags if config is not None else 7,
             )
 
         timings: dict[str, float] = {}
 
-        async def _timed(name: str, coro: Any) -> None:
+        async def _timed(name: str, coro: Any, *, degradable: bool = False) -> None:
             start = time.perf_counter()
+            stage_rank = STAGE_VALUES.index(name)
+            _safe_tracking_call(stage_tracker, "start_stage", name, stage_rank)
             try:
-                await coro
+                if name == "parse":
+                    with bind_parser_progress(stage_tracker):
+                        await coro
+                else:
+                    await coro
+            except asyncio.CancelledError:
+                _safe_tracking_call(stage_tracker, "finish_stage", cancelled=True)
+                raise
+            except Exception as exc:
+                _safe_tracking_call(stage_tracker, "finish_stage", error=exc, degraded=degradable)
+                raise
+            else:
+                degraded_error = (row.get("degraded_stages") or {}).get(name)
+                if degraded_error is None:
+                    _safe_tracking_call(stage_tracker, "finish_stage")
+                else:
+                    _safe_tracking_call(
+                        stage_tracker,
+                        "finish_stage",
+                        error=RuntimeError(str(degraded_error)),
+                        degraded=degradable,
+                    )
             finally:
                 elapsed = time.perf_counter() - start
                 timings[name] = elapsed * 1000.0
@@ -274,7 +321,7 @@ class IndexingPipeline:
             so the next stage runs on the un-enriched value.
             """
             try:
-                await _timed(name, coro)
+                await _timed(name, coro, degradable=True)
             except Exception as exc:  # noqa: BLE001 - enrichment must not fail the file
                 row.setdefault("degraded_stages", {})[name] = str(exc)
                 logger.bind(
@@ -335,6 +382,9 @@ class IndexingPipeline:
             # final rows, so CSV sidecars are intentionally skipped.
             if self.save_markdown and _batch_context is None:
                 await _save_markdown(row, self.data_dir)
+            # After the sidecar, which marks each such image ``[Image]`` instead.
+            if isinstance(row.get("processed_document"), ProcessedDocument):
+                row["processed_document"] = drop_uncaptioned_image_refs(row["processed_document"])
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
             # Emptiness is the chunk count. Caption is the only enrichment that
             # has run, and only run() knows whether it ran (#1077).
@@ -464,6 +514,7 @@ class IndexingPipeline:
         row: MutableMapping[str, Any],
         processed: ProcessedDocument,
         *,
+        stage_tracker: Any | None = None,
         chunk_offset: int,
         indexed_at: datetime,
         context: BatchIndexingContext,
@@ -475,6 +526,7 @@ class IndexingPipeline:
         """
         return await self.run(
             row,
+            stage_tracker=stage_tracker,
             _processed=processed,
             _chunk_offset=chunk_offset,
             _indexed_at=indexed_at,
@@ -845,9 +897,10 @@ async def _save_markdown(row: MutableMapping[str, Any], data_dir: Path | None) -
     """Write the parsed markdown to ``<upload>.md`` next to the stored upload.
 
     Runs after captioning, so image descriptions are already in the text. Rows
-    without a ``source_path`` have nowhere to write, and a ``source_path``
-    outside ``data_dir`` (an MCP ``index_url`` temp download) would leave the
-    copy under a random name in a node's temp dir, so both are skipped.
+    without a ``source_path`` have nowhere to write, and a copy next to a
+    ``source_path`` outside ``data_dir`` (a file stored under an earlier
+    ``data_dir``, or a URL MCP indexed before it downloaded there) would land
+    where nothing cleans up, so both are skipped.
     Rendering and writing run together off the event loop. Best effort: a
     debugging copy must never fail the file, so an error in either is only
     logged.
@@ -944,13 +997,18 @@ def _release_image_bytes(row: MutableMapping[str, Any]) -> None:
     enrichment failure, and a failed caption makes the bytes no more useful than
     a successful one.
 
-    Only ``image_bytes`` is cleared. ``caption``, ``page_number``, ``mime_type``,
-    ``source_url`` and ``metadata`` stay — the substitution and the chunkers read
-    them.
+    ``ImageBlock.pil_image`` goes too: it is the same figure still decoded, which
+    a parser hands over instead of the bytes so that it is PNG-encoded only when
+    captioning runs. Still decoded, it is several times the size of its PNG.
+
+    Only ``image_bytes`` and ``pil_image`` are cleared. ``caption``,
+    ``page_number``, ``mime_type``, ``source_url`` and ``metadata`` stay — the
+    substitution and the chunkers read them.
     """
     processed = row.get("processed_document")
     for image in getattr(processed, "images", ()) or ():
         image.image_bytes = b""
+        image.pil_image = None
 
 
 def _release_raw_bytes(row: MutableMapping[str, Any]) -> None:

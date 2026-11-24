@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator
 
@@ -87,6 +87,8 @@ class FileLoadersConfig(ConfigMixin):
     eml: str = "EmlLoader"
     docx: str = "DocxLoader"
     pptx: str = "PPTXLoader"
+    xlsx: str = "XlsxParser"
+    xlsm: str = "XlsxParser"
     doc: str = "DocLoader"
     png: str = "ImageLoader"
     jpeg: str = "ImageLoader"
@@ -127,6 +129,14 @@ class MimetypesConfig(ConfigMixin):
         default=".pptx",
         alias="application/vnd.openxmlformats-officedocument.presentationml.presentation",
     )
+    application_xlsx: str = Field(
+        default=".xlsx",
+        alias="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    application_xlsm: str = Field(
+        default=".xlsm",
+        alias="application/vnd.ms-excel.sheet.macroEnabled.12",
+    )
     application_msword: str = Field(default=".doc", alias="application/msword")
     image_png: str = Field(default=".png", alias="image/png")
     image_jpeg: str = Field(default=".jpeg", alias="image/jpeg")
@@ -160,8 +170,26 @@ class MimetypesConfig(ConfigMixin):
 class LoaderConfig(ConfigMixin):
     csv_batch_size: int = Field(default=10_000, gt=0, strict=True)
     csv_delimiter: str | None = Field(default=None, min_length=1, max_length=1)
+    xlsx_batch_size: int = Field(default=10_000, gt=0, strict=True)
+    xlsx_limits: dict[str, Annotated[int, Field(gt=0, strict=True)]] = Field(default_factory=dict)
+    # Charts in workbooks: "full" (with all their data, hidden sources
+    # included), "without_hidden_data" (data read from hidden worksheets, rows
+    # or columns left out) or "off".
+    xlsx_charts: Literal["full", "without_hidden_data", "off"] = "full"
+
+    @field_validator("xlsx_limits")
+    @classmethod
+    def _validate_xlsx_limits(cls, value: dict[str, int]) -> dict[str, int]:
+        from dataclasses import fields
+
+        from core.indexing.parsers.tabular.xlsx_validation import XlsxLimits
+
+        unknown = set(value) - {field.name for field in fields(XlsxLimits)}
+        if unknown:
+            raise ValueError(f"Unknown xlsx_limits keys: {sorted(unknown)}")
+        return value
+
     image_captioning: bool = True
-    image_captioning_url: bool = True
     save_markdown: bool = False
     # Keep the raw uploaded file in ``paths.data_dir`` after indexation. Default
     # ``True`` — the source-download route (``/static/{extract_id}``) serves these
@@ -173,6 +201,10 @@ class LoaderConfig(ConfigMixin):
     # embedding, and storage. The upload hash is calculated while streaming the
     # file to disk, so this does not add a second read for HTTP uploads.
     content_deduplication_enabled: bool = True
+    # Where the per-file fences live (#1430). ``ray``: the TaskStateManager
+    # fences only, as before. ``postgres``: a Postgres fence too, which also
+    # covers a replace and refuses a catalog write whose fence was taken.
+    file_fences: Literal["ray", "postgres"] = "ray"
     mimetypes: MimetypesConfig = Field(default_factory=MimetypesConfig)
     local_whisper: LocalWhisperConfig = Field(default_factory=LocalWhisperConfig)
     file_loaders: FileLoadersConfig = Field(default_factory=FileLoadersConfig)

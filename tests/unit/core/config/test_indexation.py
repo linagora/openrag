@@ -34,6 +34,37 @@ def test_csv_loader_settings_can_be_overridden_by_env(monkeypatch, tmp_path):
     assert settings.loader.csv_delimiter == ";"
 
 
+def test_xlsx_loader_defaults_are_bounded_and_automatic():
+    cfg = LoaderConfig()
+
+    assert cfg.xlsx_batch_size == 10_000
+    # Header overrides were deployment-wide yet validated per file; they are
+    # not configurable until a per-file or per-partition route exists.
+    assert not {"xlsx_header_row", "xlsx_sheet_header_rows", "xlsx_sheet_headerless_schemas"} & set(
+        type(cfg).model_fields
+    )
+    assert cfg.xlsx_limits == {}
+
+
+def test_xlsx_limits_validate_names_at_config_load():
+    assert LoaderConfig(xlsx_limits={"max_tables": 3}).xlsx_limits == {"max_tables": 3}
+    with pytest.raises(ValidationError, match="max_table"):
+        LoaderConfig(xlsx_limits={"max_table": 3})
+
+
+def test_xlsx_charts_mode_defaults_to_full_and_rejects_unknown_modes():
+    assert LoaderConfig().xlsx_charts == "full"
+    assert LoaderConfig(xlsx_charts="off").xlsx_charts == "off"
+    with pytest.raises(ValidationError):
+        LoaderConfig(xlsx_charts="hidden")
+
+
+def test_xlsx_charts_mode_can_be_set_by_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("XLSX_CHARTS", "without_hidden_data")
+
+    assert load_config(config_path=tmp_path).loader.xlsx_charts == "without_hidden_data"
+
+
 def test_transcriber_config_default_direct_upload_suffixes():
     cfg = TranscriberConfig()
     assert cfg.direct_upload_suffixes == set(_DEFAULT_DIRECT_UPLOAD_SUFFIXES)
@@ -116,3 +147,8 @@ def test_marker_timeout_rejects_zero_and_negative_values():
     for bad in (0, -1):
         with pytest.raises(ValidationError):
             LoaderConfig(marker_timeout=bad)
+
+
+def test_removed_image_captioning_url_key_is_ignored():
+    # Removed in #1294: configs that still set it must keep loading.
+    assert not hasattr(LoaderConfig(image_captioning_url=True), "image_captioning_url")

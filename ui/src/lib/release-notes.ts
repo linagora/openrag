@@ -18,27 +18,24 @@ export interface Release {
  * dialog content are derived from it.
  */
 export const releaseNotes: Release = {
-  version: "2.3.3",
-  date: "2026-10-28",
+  version: "2.3.5",
+  date: "2026-11-13",
   summary:
-    "OpenRAG 2.3.3 improves indexing for CSV and multilingual documents, adds controls for image captioning, and tightens access to the Ray dashboard in Docker Compose.",
+    'OpenRAG 2.3.5 shows each file\'s indexing progress, indexes Excel workbooks (.xlsx), sorts sources by date for "the latest" questions, and upgrades Milvus to 3.0.5.',
 
   newFeatures: [
-    "CSV files are indexed in batches, including wide rows and large cells, so their contents remain searchable without creating oversized chunks.",
-    "Indexing detects a document's language from text sampled across the file, improving language selection for multilingual and long documents.",
-    "VLM endpoints can set max_image_side to reduce image dimensions before captioning, helping limit the image sent to vision models.",
-    "Ollama embedding requests are batched for more efficient embedding generation.",
-    "Document details can display topic tags.",
-    "CSV parsing handles mixed encodings and stray bytes more reliably, and oversized chunks or metadata updates are handled without failing the whole file.",
-    "URL-encoded request bodies are bounded while they are read, and URL host checks normalize hostnames before applying the safety rules.",
+    "The Jobs page shows each file's current indexing stage, its elapsed time and its stage history.",
+    "Excel workbooks (.xlsx) can now be indexed, sheet by sheet.",
+    "Questions about the latest documents get sources sorted by date, with their dates shown, for documents that carry a creation date (created_at metadata).",
+    "Figure and table captions stay attached to the block they label.",
+    "Admin console usability improvements, and failed data loads shown as errors instead of empty lists.",
   ],
-
   breakingChange: {
-    title: "Docker Compose no longer publishes the Ray dashboard port by default",
+    title: "Remote images in Markdown files are no longer captioned",
     description:
-      "OpenRAG 2.3.3 removes the Docker Compose port mapping for 8265. With the default RAY_DASHBOARD_HOST, the mapping did not reach the dashboard, and the Ray dashboard API is unauthenticated.",
+      "An image a Markdown file links to by URL (![alt](https://...)) is no longer fetched or captioned; its link stays in the text. Images embedded in the file are still captioned. The IMAGE_CAPTIONING_URL setting is removed, and a configuration that still sets it keeps loading and ignores it.",
     action:
-      "To access the dashboard with Docker Compose, add ray-dashboard.docker-compose.yaml last to the Compose command, after docker-compose.yaml and any other overlays. Expose it only on a private network or behind an authenticating proxy.",
+      "If you relied on captions of linked images, embed those images in the Markdown file, or convert the document to a format whose images are embedded, such as PDF or DOCX, and index it again.",
   },
 };
 

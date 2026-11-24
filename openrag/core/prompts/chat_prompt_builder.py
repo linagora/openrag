@@ -4,6 +4,8 @@ Pure helpers extracted from ``components/utils.py`` and ``components/pipeline.py
 
 * ``format_context``         — fit document snippets into a token budget,
                                 numbering each as ``[Source N]``.
+* ``describe_source``        — the provenance line (file name, creation date)
+                                a source block carries under its marker.
 * ``format_web_context``     — same, for web-search results, with continuous
                                 numbering across RAG and web sources.
 * ``prepend_system_prompt``  — clone a message list and prepend a system
@@ -24,8 +26,10 @@ import copy
 import json
 import re
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Protocol
 
+from core.retrieval.date_order import FUTURE_TOLERANCE
 from core.utils.text import neutralize_prompt_control_tokens, sanitize_text
 
 SOURCE_SEPARATOR = "-" * 10 + "\n\n"
@@ -47,6 +51,53 @@ class WebSourceLike(Protocol):
     content: str | None
 
 
+#: Longest file name rendered on a provenance line; the name is untrusted text.
+_MAX_FILENAME_CHARS = 150
+
+
+def describe_source(metadata: dict | None) -> str:
+    """One line of provenance for a source block: its file name and creation date.
+
+    The chunk text itself carries no date, so without this line the answering
+    LLM cannot tell yesterday's meeting notes from last year's, and "summarize
+    the last meeting" is answered from whichever one ranked first. Returns
+    ``""`` when the metadata carries neither. The values are untrusted (upload
+    metadata): the ``Created:`` field always comes first, ``unknown`` when the
+    date is missing, so a file name that spells its own ``Created:`` can only
+    follow the real one, and the name is flattened to one line, stripped of the
+    field separator and capped, so it cannot add lines under the trusted marker.
+    """
+    if not metadata:
+        return ""
+    created_at = _format_created_at(metadata.get("created_at"))
+    filename = metadata.get("filename") or metadata.get("original_filename")
+    flat = " ".join(str(filename).replace("|", " ").split())[:_MAX_FILENAME_CHARS] if filename else ""
+    if not flat:
+        return f"Created: {created_at}" if created_at else ""
+    return neutralize_prompt_control_tokens(f"Created: {created_at or 'unknown'} | File: {flat}")
+
+
+def _format_created_at(value: object) -> str:
+    """``2026-09-22 14:51 UTC`` from an ISO 8601 string or datetime; ``""`` otherwise.
+
+    Minute precision is enough to order two meetings of the same day and keeps
+    the line short; the raw ISO form with microseconds is what the API returns.
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return ""
+    else:
+        return ""
+    parsed = parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    if parsed > datetime.now(UTC) + FUTURE_TOLERANCE:
+        return ""
+    return parsed.strftime("%Y-%m-%d %H:%M UTC")
+
+
 def format_context(
     texts: list[str],
     max_context_tokens: int | None,
@@ -54,6 +105,7 @@ def format_context(
     *,
     max_sources: int | None = None,
     number_sources: bool = True,
+    headers: list[str] | None = None,
 ) -> tuple[str, list[int]]:
     """Render ``texts`` as numbered ``[Source N]`` blocks within a token budget.
 
@@ -68,6 +120,10 @@ def format_context(
         length_function: Token counter, e.g. ``llm.get_num_tokens``.
         max_sources: Maximum number of sources; ``None`` for no limit.
         number_sources: If ``True``, prefix each block with ``[Source N]\\n``.
+        headers: Optional per-text provenance line (see ``describe_source``),
+            rendered between the ``[Source N]`` marker and the content and
+            counted in the budget. Same length as ``texts``; an empty entry
+            renders nothing.
 
     Returns:
         ``(formatted_text, included_indices)`` — ``included_indices`` is the
@@ -76,6 +132,8 @@ def format_context(
     """
     if not texts:
         return EMPTY_CONTEXT_MESSAGE, []
+    if headers is not None and len(headers) != len(texts):
+        raise ValueError("headers must have one entry per text")
 
     reduced: list[str] = []
     included: list[int] = []
@@ -85,6 +143,10 @@ def format_context(
         if max_sources is not None and len(reduced) >= max_sources:
             break
         prefix = f"[Source {len(reduced) + 1}]\n" if number_sources else ""
+        header = headers[i] if headers else ""
+        if header:
+            # Already neutralized by describe_source; guard a caller-built one too.
+            prefix += f"{neutralize_prompt_control_tokens(header)}\n"
         # Neutralize control tokens so a poisoned document cannot forge a
         # [Source N] block, inject a [Sources: ...] citation tag, or fake the
         # inter-source separator. The [Source N] prefix is the only trusted marker.

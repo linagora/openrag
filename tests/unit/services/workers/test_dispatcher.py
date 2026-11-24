@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
-from core.utils.exceptions import ServiceUnavailableError
+from core.utils.exceptions import DocumentNotFoundError, ServiceUnavailableError
 from ray.exceptions import ActorUnavailableError
 from services.workers.task_state import PENDING_TASK_DETAILS, SUBMITTED_TASK_WITHOUT_REF
 
@@ -362,6 +362,7 @@ async def test_dispatch_indexing_relies_on_pool_worker_registration() -> None:
                 "filename": "report.txt",
                 "_openrag_job_created_at": "forged-created",
                 "_openrag_job_finished_at": "forged-finished",
+                "_openrag_job_outcome_pending": True,
             },
             partition="tenant-a",
             user={"id": 42},
@@ -398,6 +399,7 @@ async def test_dispatch_indexing_relies_on_pool_worker_registration() -> None:
             "filename": "report.txt",
             "_openrag_job_created_at": "forged-created",
             "_openrag_job_finished_at": "forged-finished",
+            "_openrag_job_outcome_pending": True,
         },
         partition="tenant-a",
         user={"id": 42},
@@ -444,6 +446,92 @@ async def test_dispatch_indexing_registers_completion_with_detached_tracker() ->
         )
     tracker.track.remote.assert_called_once_with("task-1", {"ref": ref})
     tsm.set_details.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_submit_reads_the_borrowed_worker_ref() -> None:
+    """#1296: dropped unread, a failed ref makes Ray print an unhandled error in this process."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = asyncio.get_running_loop().create_future()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(ref),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.read_ref_when_settled") as read:
+        assert await dispatcher._submit_indexing_task_once("task-1", {}) is ref
+
+    read.assert_called_once_with(ref)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_runs_under_a_caller_supplied_task_id() -> None:
+    """A capped upload's task id is its file-slot reservation (#664): every
+    store keys the task by it, and the worker's catalog insert consumes it."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = object()
+    pool = _pool_with_ref(ref)
+    tsm = _task_state_manager()
+    tracker = _completion_tracker()
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=tracker,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+        mock_uuid.uuid4.return_value.hex = "minted"
+        task_id = await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+            task_id="reservation-1",
+        )
+
+    assert task_id == "reservation-1"
+    assert tsm.set_queued_details_v2.remote.call_args.args[0] == "reservation-1"
+    assert pool.submit.remote.call_args.kwargs["task_id"] == "reservation-1"
+    tracker.track.remote.assert_called_once_with("reservation-1", {"ref": ref})
+
+
+@pytest.mark.asyncio
+async def test_copy_file_hands_its_reservation_to_the_catalog_insert() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    document_repo = _document_repo()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=document_repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    await dispatcher.copy_file(
+        "file-1",
+        {"file_id": "copy-1", "partition": "tenant-b"},
+        "tenant-a",
+        user={"id": 7},
+        quota_reservation_id="reservation-1",
+    )
+
+    assert document_repo.add_file_to_partition.call_args.kwargs["quota_reservation_id"] == "reservation-1"
 
 
 @pytest.mark.asyncio
@@ -827,6 +915,48 @@ async def test_dispatch_indexing_releases_claim_when_queueing_fails() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["catalog", "chunks"])
+async def test_copy_file_refuses_missing_source_without_writing(missing) -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    store = _vector_store()
+    if missing == "catalog":
+        repo.get_file_metadata.return_value = None
+    else:
+        store.query_chunks_by_filter.return_value = []
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=store,
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(DocumentNotFoundError) as exc:
+        await dispatcher.copy_file(
+            "file-1",
+            {"file_id": "copy-1", "partition": "tenant-b", "content_sha256": "abc123"},
+            "tenant-a",
+            user=None,
+        )
+
+    assert exc.value.status_code == 404
+    assert "file-1" in exc.value.message
+    assert "tenant-a" in exc.value.message
+    store.insert_entities.assert_not_awaited()
+    repo.add_file_to_partition.assert_not_awaited()
+    if missing == "catalog":
+        store.query_chunks_by_filter.assert_not_awaited()
+        repo.claim_content_sha256.assert_not_awaited()
+    else:
+        # An unsuccessful copy must release its reservation so a retry can proceed.
+        repo.release_content_sha256_claim.assert_awaited_once_with(**repo.claim_content_sha256.await_args.kwargs)
+
+
+@pytest.mark.asyncio
 async def test_copy_file_uses_non_task_content_claim_token() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
@@ -869,7 +999,10 @@ async def test_copy_file_uses_non_task_content_claim_token() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active() -> None:
+@pytest.mark.parametrize("replace", [False, True])
+async def test_dispatch_indexing_refuses_a_file_being_deleted_with_409(replace: bool) -> None:
+    """Not a 500: the client can retry once the delete is done (#1457)."""
+    from core.utils.exceptions import ConflictError
     from services.workers.dispatcher import WorkerDispatcher
 
     pool = _pool_with_ref(object())
@@ -890,19 +1023,57 @@ async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active()
         patch("services.workers.dispatcher._utc_now_iso", return_value="2026-07-20T08:00:00+00:00"),
     ):
         mock_uuid.uuid4.return_value.hex = "task-1"
-        with pytest.raises(RuntimeError, match="is being deleted"):
+        with pytest.raises(ConflictError) as caught:
             await dispatcher.dispatch_indexing(
                 path="/data/report.txt",
                 metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
                 partition="tenant-a",
                 user={"id": 42},
                 workspace_ids=["ws-1"],
-                replace=True,
+                replace=replace,
             )
 
+    assert caught.value.status_code == 409
+    assert caught.value.code == "DOCUMENT_DELETE_IN_PROGRESS"
     pool.submit.remote.assert_not_called()
     tsm.set_object_ref.remote.assert_not_called()
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_returns_service_unavailable_when_capacity_is_full() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    pool = _pool_with_ref(object())
+    tsm = _task_state_manager()
+    tsm.set_queued_details_v2.remote = AsyncMock(return_value=_queue_refused("outcome_backlog"))
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ServiceUnavailableError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=["ws-1"],
+            replace=True,
+        )
+
+    assert caught.value.code == "INDEXING_OUTCOME_BACKLOG"
+    assert caught.value.message == (
+        "Indexing is temporarily paused because task capacity is full "
+        "(queued or running work and unsaved job outcomes). Please retry shortly."
+    )
+    pool.submit.remote.assert_not_called()
+    tsm.set_object_ref.remote.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1551,6 +1722,8 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
         content_sha256=None,
         indexed_at=copied_at,
         chunk_count=1,
+        quota_reservation_id=None,
+        recheck_quota_if_slot_gone=True,
     )
     vector_store.upsert_entities.assert_awaited_once()
     vector_store.insert_entities.assert_awaited_once()
@@ -1653,12 +1826,13 @@ async def test_metadata_mutation_aborts_when_catalog_row_is_missing(operation: s
     if operation == "update":
         await dispatcher.update_file_metadata("missing", {"title": "new"}, "tenant-a", user=None)
     else:
-        await dispatcher.copy_file(
-            "missing",
-            {"file_id": "copy", "partition": "tenant-b", "content_sha256": "abc123"},
-            "tenant-a",
-            user=None,
-        )
+        with pytest.raises(DocumentNotFoundError):
+            await dispatcher.copy_file(
+                "missing",
+                {"file_id": "copy", "partition": "tenant-b", "content_sha256": "abc123"},
+                "tenant-a",
+                user=None,
+            )
 
     vector_store.query_chunks_by_filter.assert_not_awaited()
     vector_store.upsert_entities.assert_not_awaited()
@@ -1798,12 +1972,30 @@ async def test_cancel_task_does_not_cancel_terminal_task() -> None:
         collection="default",
     )
 
-    with patch("ray.cancel") as cancel:
+    with patch("ray.cancel") as cancel, patch("services.workers.dispatcher.read_ref_when_settled") as read:
         result = await dispatcher.cancel_task("task-1")
 
     assert result is False
     tsm.set_cancelled_if_active.remote.assert_called_once_with("task-1")
     cancel.assert_not_called()
+    # #1296: the ref was borrowed by the fetch and is dropped here unread.
+    read.assert_called_once_with({"ref": ref})
+
+
+@pytest.mark.asyncio
+async def test_counting_active_tasks_reads_the_refs_it_fetched() -> None:
+    """#1296: a replica that did not submit the task borrows its ref for the count, then drops it."""
+    from services.workers.task_cancellation import count_active_indexing_tasks
+    from services.workers.task_state import PENDING_TASK_DETAILS
+
+    ref = object()
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs_v2 = _remote_mock({"task-1": {"ref": ref}, "task-2": PENDING_TASK_DETAILS})
+
+    with patch("services.workers.task_cancellation.read_ref_when_settled") as read:
+        assert await count_active_indexing_tasks(tsm, partition="p") == 2
+
+    assert read.call_args_list == [call({"ref": ref}), call(PENDING_TASK_DETAILS)]
 
 
 @pytest.mark.asyncio
@@ -2076,7 +2268,7 @@ async def test_delete_file_cancels_active_matching_indexing_task_before_cleanup(
 
     tsm.get_matching_active_task_refs_v2.remote.assert_called_once_with(partition="tenant-a", file_id="file-1")
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
 
 
@@ -2108,7 +2300,7 @@ async def test_delete_file_waits_for_matching_task_ref_before_cleanup() -> None:
 
     assert tsm.get_matching_active_task_refs_v2.remote.call_count == 2
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     assert vector_store.delete_by_filter.await_count == 2
 
 
@@ -2142,7 +2334,7 @@ async def test_delete_file_rechecks_ref_less_task_before_marking_stale() -> None
     assert tsm.get_matching_active_task_refs_v2.remote.call_count == 2
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     assert vector_store.delete_by_filter.await_count == 2
 
 
@@ -2314,7 +2506,7 @@ async def test_delete_file_waits_for_cancelled_task_to_settle_before_cleanup() -
         await delete_task
 
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     assert vector_store.delete_by_filter.await_count == 2
 
 
@@ -2386,7 +2578,7 @@ async def test_delete_file_uses_legacy_task_state_lookup_when_matching_api_missi
     tsm.get_all_info.remote.assert_called_once_with()
     tsm.get_object_ref.remote.assert_called_once_with("task-1")
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_any_call("task-1")
     assert vector_store.delete_by_filter.await_count == 2
 
 
@@ -2816,6 +3008,54 @@ async def test_dispatch_indexing_marks_unknown_submission_so_upload_is_kept() ->
                 replace=False,
             )
 
+    assert indexing_worker_may_be_running(excinfo.value) is True
+
+
+@pytest.mark.parametrize(
+    "cancel_error",
+    [RuntimeError("ray.cancel failed"), TimeoutError("cancel wait timed out")],
+    ids=["cancel-raises", "cancel-times-out"],
+)
+@pytest.mark.asyncio
+async def test_dispatch_indexing_marks_a_failed_cancel_after_submission(cancel_error) -> None:
+    """A cancel that raises never confirmed the submitted worker stopped (#664).
+
+    Its error is what reaches the upload route, so it must carry the marker:
+    otherwise the route deletes the upload and releases the quota slot while
+    the worker may still insert the file.
+    """
+    from core.utils.exceptions import indexing_worker_may_be_running
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tracker = _completion_tracker()
+    tracker.track.remote.side_effect = RuntimeError("tracker unreachable")
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=tracker,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch("services.workers.dispatcher.read_ref_when_settled"),
+        patch.object(dispatcher, "_cancel_submitted_task", AsyncMock(side_effect=cancel_error)),
+    ):
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        with pytest.raises(type(cancel_error)) as excinfo:
+            await dispatcher.dispatch_indexing(
+                path="/data/report.txt",
+                metadata={"file_id": "file-1", "content_sha256": "abc123"},
+                partition="tenant-a",
+                user={"id": 42},
+                workspace_ids=None,
+                replace=False,
+            )
+
+    assert excinfo.value is cancel_error
     assert indexing_worker_may_be_running(excinfo.value) is True
 
 

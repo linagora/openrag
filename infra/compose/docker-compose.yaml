@@ -16,9 +16,12 @@ x-openrag-env: &openrag_env
   # the font at a bind-mounted dir the app user owns, so the ~15MB download
   # happens once and persists across restarts.
   FONT_PATH: ${FONT_PATH:-/app/data/fonts/GoNotoCurrent-Regular.ttf}
+  # The entrypoint uses this Compose-resolved address when the shared env file
+  # leaves UVICORN_FORWARDED_ALLOW_IPS empty.
+  OPENRAG_ADMIN_UI_PROXY_IP: ${OPENRAG_ADMIN_UI_PROXY_IP:-172.31.253.200}
 
 x-openrag: &openrag_template
-  image: linagoraai/openrag:v2.3.3
+  image: linagoraai/openrag:v2.3.5
   # Start as root so entrypoint.sh can grant GID-0 write on the bind-mounted
   # writable dirs (data/, the HF cache) — which a non-root container
   # can't write when Docker auto-creates them root-owned — then it immediately
@@ -72,6 +75,7 @@ x-openrag: &openrag_template
       aliases:
         - openrag
   env_file:
+    - ./proxy-defaults.env
     - ${SHARED_ENV:-.env}
   environment:
     <<: *openrag_env
@@ -119,7 +123,7 @@ x-vllm: &vllm_template
 services:
   # ── Admin UI (React SPA + nginx, same-origin reverse proxy to the API) ──
   admin-ui:
-    image: linagoraai/openrag-admin-ui:v2.3.3
+    image: linagoraai/openrag-admin-ui:v2.3.5
     build:
       context: ../..
       dockerfile: infra/docker/ui.Dockerfile
@@ -137,6 +141,9 @@ services:
     restart: unless-stopped
     ports:
       - "${ADMIN_UI_PORT:-8081}:8080"
+    networks:
+      default:
+        ipv4_address: ${OPENRAG_ADMIN_UI_PROXY_IP:-172.31.253.200}
     # No depends_on the API: nginx resolves the `openrag` network alias (shared by
     # the GPU and CPU API variants) at request time, so this works under any
     # profile and starts even before the backend is ready.
@@ -236,6 +243,15 @@ services:
     # For details see https://github.com/vllm-project/vllm/issues/21179
     profiles:
       - "cpu"
+
+networks:
+  default:
+    ipam:
+      config:
+        # Keep the proxy address outside the dynamic pool so it cannot be
+        # assigned to an ordinary container while the proxy is stopped.
+        - subnet: ${OPENRAG_COMPOSE_SUBNET:-172.31.253.0/24}
+          ip_range: ${OPENRAG_COMPOSE_DYNAMIC_RANGE:-172.31.253.0/25}
 
 volumes:
   appdata:
