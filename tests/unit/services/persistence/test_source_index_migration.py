@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -19,48 +20,80 @@ def migration(monkeypatch):
     )
 
 
+class _FakeContext:
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+
+    @contextmanager
+    def autocommit_block(self):
+        self.calls.append("autocommit")
+        yield
+        self.calls.append("end autocommit")
+
+
 class _FakeOp:
     def __init__(self) -> None:
-        self.executed: list[str] = []
-        self.dropped: list[str] = []
+        self.calls: list[str] = []
+        self.context = _FakeContext(self.calls)
 
-    def execute(self, sql: str) -> None:
-        self.executed.append(sql)
+    def get_context(self):
+        return self.context
 
-    def drop_index(self, name: str, table_name: str) -> None:
-        self.dropped.append(f"{table_name}.{name}")
+    def execute(self, statement) -> None:
+        self.calls.append(str(statement))
 
 
-def _install(monkeypatch, migration, *, exists: bool) -> _FakeOp:
+def _install(monkeypatch, migration, *, validity: bool | None, table: bool = True) -> _FakeOp:
     op = _FakeOp()
     monkeypatch.setattr(migration, "op", op)
-    monkeypatch.setattr(migration, "index_exists", lambda table, index: exists)
+    monkeypatch.setattr(migration, "table_exists", lambda _table: table)
+    monkeypatch.setattr(migration, "_index_validity", lambda: validity)
     return op
+
+
+CREATE = "CREATE INDEX CONCURRENTLY ix_files_source ON files ((file_metadata ->> 'source'))"
+DROP = "DROP INDEX CONCURRENTLY ix_files_source"
 
 
 def test_chains_after_the_file_fences_revision(migration):
     assert migration.down_revision == "a2b3c4d5e6f7"
 
 
-def test_upgrade_creates_the_expression_index(monkeypatch, migration):
-    op = _install(monkeypatch, migration, exists=False)
+def test_upgrade_builds_the_index_concurrently_outside_the_transaction(monkeypatch, migration):
+    op = _install(monkeypatch, migration, validity=None)
     migration.upgrade()
-    assert op.executed == ["CREATE INDEX ix_files_source ON files ((file_metadata ->> 'source'))"]
+    assert op.calls == ["autocommit", CREATE, "end autocommit"]
 
 
-def test_upgrade_skips_an_index_create_all_made(monkeypatch, migration):
-    op = _install(monkeypatch, migration, exists=True)
+def test_upgrade_keeps_an_index_create_all_made(monkeypatch, migration):
+    op = _install(monkeypatch, migration, validity=True)
     migration.upgrade()
-    assert op.executed == []
+    assert op.calls == []
 
 
-def test_downgrade_drops_only_an_existing_index(monkeypatch, migration):
-    op = _install(monkeypatch, migration, exists=True)
+def test_upgrade_rebuilds_an_index_a_failed_build_left_invalid(monkeypatch, migration):
+    op = _install(monkeypatch, migration, validity=False)
+    migration.upgrade()
+    assert op.calls == ["autocommit", DROP, "end autocommit", "autocommit", CREATE, "end autocommit"]
+
+
+def test_upgrade_without_the_table_does_nothing(monkeypatch, migration):
+    op = _install(monkeypatch, migration, validity=None, table=False)
+    migration.upgrade()
+    assert op.calls == []
+
+
+@pytest.mark.parametrize("validity", [True, False])
+def test_downgrade_drops_the_index_valid_or_not(monkeypatch, migration, validity):
+    op = _install(monkeypatch, migration, validity=validity)
     migration.downgrade()
-    assert op.dropped == ["files.ix_files_source"]
-    op = _install(monkeypatch, migration, exists=False)
+    assert op.calls == ["autocommit", DROP, "end autocommit"]
+
+
+def test_downgrade_without_the_index_does_nothing(monkeypatch, migration):
+    op = _install(monkeypatch, migration, validity=None)
     migration.downgrade()
-    assert op.dropped == []
+    assert op.calls == []
 
 
 def test_the_schema_declares_the_same_index():
