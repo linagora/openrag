@@ -22,6 +22,7 @@ from xlrd.compdoc import EOCSID, CompDoc, CompDocError
 _MAX_FILE_BYTES = 16 * 1024 * 1024
 _MAX_SHEETS = 128
 _MAX_SHEET_AREA = 2_000_000
+_MAX_HYPERLINK_CELLS = 65_536
 _MAX_WORKBOOK_AREA = 5_000_000
 _MAX_BATCH_BYTES = 2 * 1024 * 1024
 _MAX_RENDERED_BYTES = 32 * 1024 * 1024
@@ -45,8 +46,36 @@ def _limit(reason: str) -> PipelineError:
     return PipelineError(reason, code="XLS_LIMIT_EXCEEDED", status_code=422)
 
 
+_DIRECTORY_ENTRY_BYTES = 128
+_DIRECTORY_LINKS_OFFSET = 68
+_DIRECTORY_TYPE_OFFSET = 66
+_NO_DIRECTORY_ENTRY = -1
+
+
+def _validate_directory(directory: bytes) -> None:
+    """Check the reachable directory tree before xlrd traverses it recursively."""
+    count, remainder = divmod(len(directory), _DIRECTORY_ENTRY_BYTES)
+    if not count or remainder:
+        raise CompDocError("Invalid XLS directory length")
+    root_child = unpack_from("<i", directory, _DIRECTORY_LINKS_OFFSET + 8)[0]
+    pending = [root_child]
+    visited = {0}
+    while pending:
+        entry = pending.pop()
+        if entry == _NO_DIRECTORY_ENTRY:
+            continue
+        if not 0 < entry < count or entry in visited:
+            raise CompDocError("Invalid or repeated XLS directory entry")
+        visited.add(entry)
+        offset = entry * _DIRECTORY_ENTRY_BYTES
+        left, right, child = unpack_from("<iii", directory, offset + _DIRECTORY_LINKS_OFFSET)
+        pending.extend((left, right))
+        if directory[offset + _DIRECTORY_TYPE_OFFSET] == 1:  # storage
+            pending.append(child)
+
+
 class _BoundedCompoundDocument(CompDoc):
-    """Keep xlrd's short-stream reader from following an unbounded allocation chain."""
+    """Validate the compound directory and bound short-stream reads."""
 
     def _get_stream(self, mem, base, sat, sec_size, start_sid, size=None, name="", seen_id=None):
         if seen_id is None:
@@ -63,7 +92,23 @@ class _BoundedCompoundDocument(CompDoc):
                 sector = sat[sector]
             if sector != EOCSID:
                 raise CompDocError("Invalid XLS mini stream termination")
-        return super()._get_stream(mem, base, sat, sec_size, start_sid, size, name, seen_id)
+        stream = super()._get_stream(mem, base, sat, sec_size, start_sid, size, name, seen_id)
+        if name == "directory":
+            _validate_directory(stream)
+        return stream
+
+
+def _validate_workbook_bof(workbook: bytes) -> None:
+    if len(workbook) < 8:
+        raise CompDocError("Incomplete XLS workbook beginning")
+    code, length, version, stream_type = unpack_from("<HHHH", workbook)
+    if (
+        code != biffh.XL_BOF
+        or not 4 <= length <= len(workbook) - 4
+        or version not in (0x0500, 0x0600)
+        or stream_type != biffh.XL_WORKBOOK_GLOBALS
+    ):
+        raise CompDocError("Only XLS BIFF5–8 workbook streams are supported")
 
 
 def _workbook_stream(content: bytes, log: StringIO) -> bytes:
@@ -75,8 +120,8 @@ def _workbook_stream(content: bytes, log: StringIO) -> bytes:
         data, start, size = package.locate_named_stream(name)
         if data is not None:
             workbook = data[start : start + size]
-            if len(workbook) < 4 or unpack_from("<H", workbook)[0] not in biffh.bofcodes:
-                break
+            # Older BIFF readers can load worksheets eagerly even with on_demand.
+            _validate_workbook_bof(workbook)
             return workbook
     raise CompDocError("Missing XLS workbook stream")
 
@@ -106,13 +151,16 @@ def _check_sheet_area(book: xlrd.book.Book, index: int, limit: int) -> None:
 
     xlrd exposes no size hook for an unloaded sheet. Use the workbook stream
     and offsets its on-demand reader already resolved. DIMENSIONS is only a
-    hint and can be missing or stale, so check actual cell records instead.
+    hint for area, but xlrd resets its counters when it sees one. Allow one
+    nonempty dimensions record before cell data so that reset stays harmless.
+    Bound hyperlink allocations separately since those do not use cell records.
     """
     data = book.mem
     position = book._sh_abs_posn[index]
     if unpack_from("<H", data, position)[0] not in biffh.bofcodes:
         raise xlrd.XLRDError("Missing BIFF worksheet beginning")
-    rows = columns = 0
+    rows = columns = hyperlink_cells = 0
+    dimensions_seen = False
     in_embedded_object = False
     first_record = True
     while position < len(data):
@@ -130,6 +178,19 @@ def _check_sheet_area(book: xlrd.book.Book, index: int, limit: int) -> None:
         elif not in_embedded_object:
             if code in biffh.bofcodes:
                 in_embedded_object = True
+            elif code in (biffh.XL_DIMENSION, biffh.XL_DIMENSION2) and length:
+                if dimensions_seen or rows:
+                    raise xlrd.XLRDError("Repeated or misplaced XLS worksheet dimensions")
+                dimensions_seen = True
+            elif code == biffh.XL_HLINK:
+                if length < 8:
+                    raise xlrd.XLRDError("Incomplete XLS hyperlink range")
+                first_row, last_row, first_col, last_col = unpack_from("<HHHH", data, start)
+                if first_row > last_row or not first_col <= last_col < 256:
+                    raise xlrd.XLRDError("Invalid XLS hyperlink range")
+                hyperlink_cells += (last_row - first_row + 1) * (last_col - first_col + 1)
+                if hyperlink_cells > min(limit, _MAX_HYPERLINK_CELLS):
+                    raise _limit("XLS worksheet exceeds the hyperlink cell limit")
             elif code in _CELL_RECORDS:
                 if length < 4 or (code in _MULTIPLE_CELLS and length < 8):
                     raise xlrd.XLRDError("Incomplete BIFF cell record")

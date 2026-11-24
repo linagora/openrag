@@ -1,6 +1,8 @@
 """Legacy BIFF8 coverage using an xlwt-generated workbook in tests/resources."""
 
 from pathlib import Path
+from struct import pack, pack_into
+from types import SimpleNamespace
 
 import pytest
 from core.indexing.parsers.tabular import xls_parser
@@ -81,3 +83,47 @@ def test_xls_short_stream_rejects_an_invalid_chain_before_reading(allocation, si
     compound = object.__new__(xls_parser._BoundedCompoundDocument)
     with pytest.raises(xls_parser.CompDocError, match="sector|termination"):
         compound._get_stream(b"abcd", 0, allocation, 2, 0, size)
+
+
+def test_xls_checks_directory_references_before_xlrd_builds_the_tree():
+    directory = bytearray(3 * 128)
+    pack_into("<i", directory, 76, 1)
+    pack_into("<iii", directory, 128 + 68, -1, 2, -1)
+    pack_into("<iii", directory, 256 + 68, -1, -1, -1)
+    xls_parser._validate_directory(directory)
+    pack_into("<i", directory, 128 + 68, 2)
+    with pytest.raises(xls_parser.CompDocError, match="directory entry"):
+        xls_parser._validate_directory(directory)
+
+
+@pytest.mark.parametrize(
+    ("opcode", "version", "stream_type"), [(0x0409, 0x0400, 5), (0x0809, 0x0400, 5), (0x0809, 0x0600, 0x10)]
+)
+def test_xls_rejects_unsupported_workbook_bof(opcode, version, stream_type):
+    xls_parser._validate_workbook_bof(pack("<HHHH", 0x0809, 4, 0x0600, 5))
+    with pytest.raises(xls_parser.CompDocError, match="BIFF5"):
+        xls_parser._validate_workbook_bof(pack("<HHHH", opcode, 4, version, stream_type))
+
+
+def _sheet_records(*records):
+    header = pack("<HHHH", 0x0809, 4, 0x0600, 0x10)
+    body = b"".join(pack("<HH", opcode, len(payload)) + payload for opcode, payload in records)
+    return SimpleNamespace(mem=header + body + pack("<HH", 0x000A, 0), _sh_abs_posn=[0])
+
+
+def test_xls_counts_all_hyperlink_ranges_toward_the_preflight_limit():
+    first = (xls_parser.biffh.XL_HLINK, pack("<HHHH", 0, 1, 0, 1))
+    second = (xls_parser.biffh.XL_HLINK, pack("<HHHH", 2, 3, 0, 1))
+    xls_parser._check_sheet_area(_sheet_records(first, second), 0, 8)
+    with pytest.raises(PipelineError, match="hyperlink cell limit"):
+        xls_parser._check_sheet_area(_sheet_records(first, second), 0, 7)
+
+
+@pytest.mark.parametrize("repeated", [False, True])
+def test_xls_rejects_dimensions_after_cell_data_or_repeated_dimensions(repeated):
+    dimensions = (xls_parser.biffh.XL_DIMENSION, bytes(14))
+    cell = (xls_parser.biffh.XL_BLANK, pack("<HHH", 0, 0, 0))
+    xls_parser._check_sheet_area(_sheet_records(dimensions, cell), 0, 1)
+    first = dimensions if repeated else cell
+    with pytest.raises(xls_parser.xlrd.XLRDError, match="dimensions"):
+        xls_parser._check_sheet_area(_sheet_records(first, dimensions), 0, 1)
