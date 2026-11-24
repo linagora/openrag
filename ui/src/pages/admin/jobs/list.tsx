@@ -105,29 +105,27 @@ function stageProgressDisplay(task: TaskListItem): {
     progress.stage_label || progress.stage_id
   );
   const live = progress.freshness === "live";
-  const activeWithoutLiveConfirmation = isActiveState(task.state) && !live;
-  const activeStageWithoutLiveConfirmation = isActiveState(task.state) && !liveStage;
   const interrupted = !!progress.interrupted_invocation_id &&
     progress.interrupted_invocation_id === progress.current_invocation_id;
   const hasCurrentPhase = ["preparing", "between_stages", "finalizing"].includes(progress.phase ?? "");
   const stageHasNoSeparatePhase = !hasCurrentPhase;
   const statusUnconfirmed = !interrupted && (
-    (activeStageWithoutLiveConfirmation && !!label && stageHasNoSeparatePhase)
-    || (activeWithoutLiveConfirmation && hasCurrentPhase)
+    (!liveStage && !!label && stageHasNoSeparatePhase)
+    || (!live && hasCurrentPhase)
   );
-  let stage = isActiveState(task.state) ? "Waiting for stage update…" : "Stage history unavailable";
+  let stage = "Waiting for stage update…";
   if (interrupted) {
     stage = label ? `Interrupted: ${label}` : "Interrupted before a stage was recorded";
   } else if (liveStage) {
     stage = progress.stage_label ?? label ?? "Waiting for stage update…";
   } else if (progress.phase === "finalizing") {
-    stage = live || activeWithoutLiveConfirmation ? "Finalizing" : "Last observed: Finalizing";
+    stage = "Finalizing";
   } else if (progress.phase === "between_stages") {
-    stage = live || activeWithoutLiveConfirmation ? "Between stages" : "Last observed: Between stages";
+    stage = "Between stages";
   } else if (progress.phase === "preparing") {
-    stage = live || activeWithoutLiveConfirmation ? "Preparing" : "Last observed: Preparing";
+    stage = "Preparing";
   } else if (label) {
-    stage = activeStageWithoutLiveConfirmation ? label : `Last observed: ${label}`;
+    stage = label;
   } else if (progress.history_quality === "not_started") {
     stage = "No stage history recorded";
   }
@@ -276,9 +274,7 @@ function TaskStateCell({ task }: { task: TaskListItem }) {
           {progress.quality && <span className="block">{progress.quality}</span>}
         </div>
       ) : hideActiveState ? (
-        task.state === "QUEUED"
-          ? state
-          : <span className="text-xs text-muted-foreground">Waiting for stage update…</span>
+        <span className="text-xs text-muted-foreground">Waiting for stage update…</span>
       ) : null}
     </div>
   );

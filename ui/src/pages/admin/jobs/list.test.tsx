@@ -374,10 +374,11 @@ describe("JobListPage filters", () => {
     expect(embeddingLabel.closest("[data-slot='badge']")?.textContent).toBe("Embedding · <5s");
   }, 10_000);
 
-  it("waits for a stage update when an active task has no stage data", async () => {
+  it("waits for a stage update when an active task has no stage data, in every tab", async () => {
+    const runningTask = task("unknown-stage", "SERIALIZING", "unknown.pdf");
     listTasksMock.mockImplementation(async (status) => status === "active"
       ? {
-          tasks: [task("unknown-stage", "SERIALIZING", "unknown.pdf")],
+          tasks: [runningTask],
           pagination: {
             offset: 0,
             limit: 10,
@@ -386,11 +387,15 @@ describe("JobListPage filters", () => {
             available_partitions: ["docs"],
           },
         }
-      : { tasks: [task("completed", "COMPLETED", "completed.pdf")] });
+      : { tasks: [runningTask, task("completed", "COMPLETED", "completed.pdf")] });
 
     renderJobs();
 
     await screen.findByText("completed.pdf");
+    const allTabWaiting = screen.getByText("Waiting for stage update…");
+    expect(allTabWaiting.closest("tr")?.textContent).toContain("unknown.pdf");
+    expect(screen.queryByText("Active", { selector: "[data-slot='badge']" })).toBeNull();
+
     await userEvent.click(screen.getByRole("tab", { name: "Active" }));
     expect(await screen.findByText("Waiting for stage update…")).not.toBeNull();
     expect(screen.queryByText("Active", { selector: "[data-slot='badge']" })).toBeNull();
