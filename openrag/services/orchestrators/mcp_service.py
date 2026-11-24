@@ -786,7 +786,8 @@ def _download_name(filename: str, suffix: str) -> str:
         stem, suffix = stem + suffix, ""
     budget = _MAX_DOWNLOAD_NAME_BYTES - len(suffix.encode())
     stem = stem.encode()[:budget].decode(errors="ignore")
-    return make_unique_filename((stem or "download") + suffix)
+    # ``download`` stands in for an empty stem, cut like one to what the suffix leaves.
+    return make_unique_filename((stem or "download"[:budget]) + suffix)
 
 
 def _create_download_target(data_dir: Path, name: str) -> Path:

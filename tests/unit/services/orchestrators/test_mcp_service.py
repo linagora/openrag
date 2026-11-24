@@ -1066,8 +1066,10 @@ async def test_index_url_never_overwrites_a_file_in_the_data_dir(monkeypatch, da
         ("%E4%B8%AD" * 60 + ".docx", ".docx"),
         ("中" * 200 + ".pdf", ".pdf"),
         ("a." + "x" * 400, "." + "x" * 400),
+        ("." + "x" * 232, "." + "x" * 232),
+        ("é." + "x" * 231, "." + "x" * 231),
     ],
-    ids=["ascii", "percent-encoded", "multibyte", "long-extension"],
+    ids=["ascii", "percent-encoded", "multibyte", "long-extension", "no-room-for-a-stem", "no-room-for-a-char"],
 )
 def test_a_long_url_name_is_cut_to_fit_the_file_system(filename, suffix):
     name = _download_name(filename, suffix)
