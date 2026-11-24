@@ -127,3 +127,22 @@ def test_xls_rejects_dimensions_after_cell_data_or_repeated_dimensions(repeated)
     first = dimensions if repeated else cell
     with pytest.raises(xls_parser.xlrd.XLRDError, match="dimensions"):
         xls_parser._check_sheet_area(_sheet_records(first, dimensions), 0, 1)
+
+
+def test_xls_globals_disallow_embedded_sheet_headers():
+    bof = pack("<HHHH", 0x0809, 4, 0x0600, 5)
+    eof = pack("<HH", xls_parser.biffh.XL_EOF, 0)
+    xls_parser._check_workbook_globals(bof + eof)
+    with pytest.raises(xls_parser.CompDocError, match="embedded worksheet header"):
+        xls_parser._check_workbook_globals(bof + pack("<HH", xls_parser.biffh.XL_SHEETHDR, 0) + eof)
+
+
+def test_xls_uses_stored_cells_for_area_and_preserves_elapsed_time(monkeypatch):
+    fixture = WORKBOOK.with_name("legacy_workbook_formats.xls")
+    monkeypatch.setattr(xls_parser, "_MAX_SHEET_AREA", 10)
+    result = list(XlsParser().iter_batches(Document(filename="formats.xls", source_path=str(fixture))))
+    (table,) = result
+    assert table.metadata["table_row_numbers"] == [2, 3]
+    assert table.metadata["table_range"] == "'Timesheet'!A1:B3"
+    assert "| Shift | 1 day, 12:00:00 |" in table.text
+    assert "| Total | 2 days, 0:00:00 |" in table.text

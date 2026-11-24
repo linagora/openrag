@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
-from datetime import time
+from datetime import time, timedelta
 from html import escape
 from io import StringIO
 from struct import error as StructError
@@ -16,6 +16,7 @@ from core.indexing.parsers.tabular.base import TabularBatchParser, markdown_row,
 from core.indexing.validators import ENCRYPTED_OFFICE_FILE_MESSAGE
 from core.models.document import Document, ProcessedDocument, TextBlock
 from core.utils.exceptions import ConfigError, NoIndexableContentError, PipelineError
+from openpyxl.styles.numbers import is_timedelta_format
 from xlrd import biffh
 from xlrd.compdoc import EOCSID, CompDoc, CompDocError
 
@@ -111,6 +112,22 @@ def _validate_workbook_bof(workbook: bytes) -> None:
         raise CompDocError("Only XLS BIFF5–8 workbook streams are supported")
 
 
+def _check_workbook_globals(workbook: bytes) -> None:
+    """Reject BIFF4W's eager sheet loader before handing globals to xlrd."""
+    position = 4 + unpack_from("<H", workbook, 2)[0]
+    while position + 4 <= len(workbook):
+        code, length = unpack_from("<HH", workbook, position)
+        position += 4 + length
+        if position > len(workbook):
+            raise CompDocError("Incomplete XLS globals record")
+        if code == biffh.XL_SHEETHDR:
+            raise CompDocError("Unsupported XLS embedded worksheet header")
+        if code in (biffh.XL_EOF, biffh.XL_FILEPASS):
+            # xlrd rejects FILEPASS before reading any encrypted records.
+            return
+    raise CompDocError("Missing XLS globals ending")
+
+
 def _workbook_stream(content: bytes, log: StringIO) -> bytes:
     # Reject invalid sector geometry before xlrd sizes its allocation tables.
     if len(content) < 512 or unpack_from("<HH", content, 30) not in ((9, 6), (12, 6)):
@@ -122,6 +139,7 @@ def _workbook_stream(content: bytes, log: StringIO) -> bytes:
             workbook = data[start : start + size]
             # Older BIFF readers can load worksheets eagerly even with on_demand.
             _validate_workbook_bof(workbook)
+            _check_workbook_globals(workbook)
             return workbook
     raise CompDocError("Missing XLS workbook stream")
 
@@ -146,7 +164,7 @@ def _read_workbook(document: Document) -> xlrd.book.Book:
     )
 
 
-def _check_sheet_area(book: xlrd.book.Book, index: int, limit: int) -> None:
+def _check_sheet_area(book: xlrd.book.Book, index: int, limit: int) -> tuple[int, int]:
     """Read BIFF cell coordinates before xlrd can allocate a sparse sheet's padded rows.
 
     xlrd exposes no size hook for an unloaded sheet. Use the workbook stream
@@ -173,7 +191,7 @@ def _check_sheet_area(book: xlrd.book.Book, index: int, limit: int) -> None:
             first_record = False
         elif code == biffh.XL_EOF:
             if not in_embedded_object:
-                return
+                return rows, columns
             in_embedded_object = False
         elif not in_embedded_object:
             if code in biffh.bofcodes:
@@ -204,11 +222,13 @@ def _check_sheet_area(book: xlrd.book.Book, index: int, limit: int) -> None:
     raise xlrd.XLRDError("Missing BIFF worksheet ending")
 
 
-def _cell_text(value: str | float | int, kind: int, datemode: int) -> str:
+def _cell_text(value: str | float | int, kind: int, datemode: int, *, elapsed: bool = False) -> str:
     if kind == xlrd.XL_CELL_BOOLEAN:
         return "true" if value else "false"
-    if kind == xlrd.XL_CELL_DATE:
+    if elapsed or kind == xlrd.XL_CELL_DATE:
         try:
+            if elapsed:
+                return str(timedelta(days=value))
             date = xlrd.xldate_as_datetime(value, datemode)
         except (OverflowError, ValueError):
             # A date number format can be applied to any stored number.
@@ -225,8 +245,8 @@ def _cell_text(value: str | float | int, kind: int, datemode: int) -> str:
     return str(value)
 
 
-def _visible_rows(sheet: xlrd.sheet.Sheet) -> Iterator[tuple[int, list[int], list[str | float | int]]]:
-    for row in range(sheet.nrows):
+def _visible_rows(sheet: xlrd.sheet.Sheet, rows: int) -> Iterator[tuple[int, list[int], list[str | float | int]]]:
+    for row in range(min(sheet.nrows, rows)):
         info = sheet.rowinfo_map.get(row)
         hidden = info.hidden if info is not None else sheet.default_row_hidden
         if hidden:
@@ -234,13 +254,15 @@ def _visible_rows(sheet: xlrd.sheet.Sheet) -> Iterator[tuple[int, list[int], lis
         yield row, sheet.row_types(row), sheet.row_values(row)
 
 
-def _worksheet_batches(sheet: xlrd.sheet.Sheet, index: int, datemode: int, batch_size: int) -> Iterator[TextBlock]:
+def _worksheet_batches(
+    sheet: xlrd.sheet.Sheet, index: int, rows: int, elapsed_styles: set[int], batch_size: int
+) -> Iterator[TextBlock]:
     hidden_columns = {col for col, info in sheet.colinfo_map.items() if info.hidden}
     columns = set()
     first_row = last_row = None
     first_cells: dict[int, str] = {}
     first_all_text = True
-    for row, kinds, values in _visible_rows(sheet):
+    for row, kinds, values in _visible_rows(sheet, rows):
         occupied = {
             col
             for col, kind in enumerate(kinds)
@@ -303,11 +325,18 @@ def _worksheet_batches(sheet: xlrd.sheet.Sheet, index: int, datemode: int, batch
         )
 
     lines, numbers, size = [], [], base_bytes
-    for row, kinds, values in _visible_rows(sheet):
+    for row, kinds, values in _visible_rows(sheet, rows):
         if row == header_row:
             continue
         cells = [
-            _cell_text(values[col], kinds[col], datemode)
+            _cell_text(
+                values[col],
+                kinds[col],
+                sheet.book.datemode,
+                elapsed=bool(elapsed_styles)
+                and kinds[col] in (xlrd.XL_CELL_NUMBER, xlrd.XL_CELL_DATE)
+                and sheet.cell_xf_index(row, col) in elapsed_styles,
+            )
             if col < len(kinds) and kinds[col] not in _EMPTY_CELL_TYPES
             else ""
             for col in cols
@@ -359,18 +388,19 @@ class XlsParser(TabularBatchParser):
                     raise xlrd.XLRDError("Unsupported legacy Excel workbook version")
                 if book.nsheets > _MAX_SHEETS:
                     raise _limit("XLS workbook exceeds the worksheet limit")
+                elapsed_formats = {key for key, fmt in book.format_map.items() if is_timedelta_format(fmt.format_str)}
+                elapsed_styles = {i for i, xf in enumerate(book.xf_list) if xf.format_key in elapsed_formats}
                 for index in range(book.nsheets):
                     # xlrd only exposes visibility publicly on a loaded sheet.
                     if book._sheet_visibility[index]:
                         continue
-                    _check_sheet_area(book, index, min(_MAX_SHEET_AREA, _MAX_WORKBOOK_AREA - area))
+                    rows, columns = _check_sheet_area(book, index, min(_MAX_SHEET_AREA, _MAX_WORKBOOK_AREA - area))
+                    # xlrd includes merged formatting in nrows/ncols. Budget
+                    # the physical cell records checked by the preflight.
+                    area += rows * columns
                     sheet = book.sheet_by_index(index)
                     try:
-                        sheet_area = sheet.nrows * sheet.ncols
-                        area += sheet_area
-                        if sheet_area > _MAX_SHEET_AREA or area > _MAX_WORKBOOK_AREA:
-                            raise _limit("XLS workbook exceeds the worksheet area limit")
-                        for block in _worksheet_batches(sheet, index, book.datemode, self.batch_size):
+                        for block in _worksheet_batches(sheet, index, rows, elapsed_styles, self.batch_size):
                             rendered_bytes += len(block.text.encode())
                             if rendered_bytes > _MAX_RENDERED_BYTES:
                                 raise _limit("XLS workbook exceeds the rendered text limit")
