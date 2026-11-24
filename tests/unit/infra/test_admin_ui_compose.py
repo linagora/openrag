@@ -98,7 +98,9 @@ def test_compose_proxy_trust(tmp_path, scenario):
     else:
         expected_allowlist = override or f"127.0.0.1,{proxy_ip}"
     for api in ("openrag", "openrag-cpu"):
-        assert config["services"][api]["environment"]["UVICORN_FORWARDED_ALLOW_IPS"] == expected_allowlist
+        api_env = config["services"][api]["environment"]
+        assert api_env["UVICORN_FORWARDED_ALLOW_IPS"] == expected_allowlist
+        assert api_env["OPENRAG_ADMIN_UI_PROXY_IP"] == proxy_ip
 
 
 def test_admin_ui_compose_service_uses_project_scoped_container_name():

@@ -751,7 +751,11 @@ Limit values use the `<count>/<period>` format from the [`limits`](https://limit
 | `RATE_LIMIT_EXEMPT_PATHS` | `str` | `/chainlit/,/assets/` | Comma-separated path prefixes the limiter skips, matched with `startswith`. These are auth-bypassed (Chainlit does its own header auth), so requests there carry no user and can only be keyed by IP. Chainlit's Socket.IO transport also issues one HTTP request per packet when it long-polls. Keep the trailing slash so a sibling like `/chainlithack` stays rate-limited rather than being swept into the `/chainlit` exemption. Set-but-empty (`RATE_LIMIT_EXEMPT_PATHS=`) removes all exemptions; `/auth/*` is never exempt. |
 
 :::caution[Behind a reverse proxy, trust the right client IP]
-The `/auth/*` limits and failed-login budget use the client IP. If the API cannot trust a proxy's forwarding headers, requests share the proxy's IP and failure budget. The trusted proxy also supplies the original HTTPS scheme for OIDC cookies.
+The `/auth/*` limits and failed-login budget use the client IP. If the API cannot
+trust a proxy's forwarding headers, requests share the proxy's IP and failure
+budget. The OIDC cookie's `Secure` flag reads `X-Forwarded-Proto` directly (or
+`PREFERRED_URL_SCHEME`); this check is independent of Uvicorn's forwarded-IP
+trust list.
 
 - **Compose** trusts loopback and the exact admin UI proxy address by default. The admin UI proxy appends its peer address to `X-Forwarded-For`, allowing Uvicorn to select the actual client address. Do not add NPM’s address while it accepts client-supplied `X-Real-IP` from private networks.
 - **Helm** leaves trust at loopback until an administrator sets `env.config.UVICORN_FORWARDED_ALLOW_IPS` in the chart values. Use your proxy's stable addresses and update the allowlist if the addresses change.
