@@ -1098,3 +1098,45 @@ def test_chart_pieces_fit_the_ceiling_lowered_by_hard_max_tokens():
     assert len(chunks) > 1
     assert all(_words(chunk.text) <= 80 for chunk in chunks)
     assert all("| Month | Actual | Target |" in chunk.text for chunk in chunks)
+
+
+YAML_BLOCK = "```yaml\nservices:\n  api:\n    image: openrag\n    environment:\n      - RETRIEVER_TOP_K=50\n```"
+
+
+def test_split_section_keeps_code_block_indentation():
+    """A section over the ceiling is sanitized before it is split, and that
+    stripped the indentation of every code line in it, whatever the size of
+    the code block: YAML lost its nesting and Python its blocks."""
+    prose = " ".join(f"Sentence number {i} explains the deployment." for i in range(200))
+    chunker = _chunker(chunk_size=512)
+
+    chunks = chunker.chunk(_doc(f"# Guide\n\n{prose}\n\n{YAML_BLOCK}\n"))
+
+    assert len(chunks) > 1
+    assert [YAML_BLOCK in chunk.text for chunk in chunks].count(True) == 1
+
+
+def test_code_block_with_a_blank_line_is_not_cut_at_it():
+    """The blank line of a listing is not a paragraph break: cut there, the
+    second half opened a chunk as bare code, with no fence above it."""
+    listing = "```python\ndef first():\n    return 1\n\ndef second():\n    return 2\n```"
+    before = " ".join(f"b{i}" for i in range(30))
+    after = " ".join(f"a{i}" for i in range(30))
+
+    pieces = _greedy_split(f"{before}\n\n{listing}\n\n{after}", 36, 60, _words)
+
+    assert [listing in piece for piece in pieces].count(True) == 1
+
+
+def test_oversize_code_block_is_cut_between_two_lines():
+    """A listing over the ceiling went down the sentence and clause ladder,
+    whose separators match the line break after a ``:``: ``api:`` and
+    ``image: openrag`` came back joined on one line."""
+    lines = [f"{'  ' * (i % 3)}key{i}: value{i}" for i in range(40)]
+    listing = "```yaml\n" + "\n".join(lines) + "\n```"
+
+    pieces = _greedy_split(listing, 20, 30, _words)
+
+    assert len(pieces) > 1
+    assert all(_words(piece) <= 30 for piece in pieces)
+    assert "\n".join(pieces) == listing

@@ -382,6 +382,23 @@ def test_dewrap_preserves_code_fence_verbatim():
     assert "Outro wrapped across two." in lines
 
 
+def test_code_block_keeps_its_indentation_in_the_chunk():
+    """dewrap_paragraphs leaves a fenced block verbatim, but the sanitizer that
+    runs after it stripped the indentation of every line: the YAML below was
+    indexed with ``api``, ``image`` and ``environment`` at the same level."""
+    code = "```yaml\nservices:\n  api:\n    image: openrag\n    environment:\n      - RETRIEVER_TOP_K=50\n```"
+    splitter = RecursiveSplitter(chunk_size=200, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=f"The   configuration:\n\n{code}\n\nEnd of the guide.", page_number=1)],
+    )
+
+    (chunk,) = splitter.chunk(doc, partition="p1")
+
+    assert code in chunk.text
+    assert "The configuration:" in chunk.text  # prose is still normalized
+
+
 def test_placeholder_only_image_block_is_skipped():
     """A caption the VLM could make nothing of is still noise — keep skipping it."""
     from core.chunking.recursive import is_placeholder_image

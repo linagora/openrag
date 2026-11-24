@@ -322,3 +322,15 @@ def test_literal_special_token_text_is_counted_and_budgeted(monkeypatch, fallbac
     assert is_valid is False
     assert "exceeds maximum token limit" in message
     assert (request.messages[0].content if request_type == "chat" else request.prompt) == content
+
+
+def test_sanitize_text_keeps_code_indentation_when_asked():
+    from core.utils.text import sanitize_text
+
+    text = "Some   prose\n\n```yaml\nservices:\n  api:\n    image:  openrag   \n```\n  more\tprose"
+
+    assert sanitize_text(text, keep_code_indentation=True) == (
+        "Some prose\n\n```yaml\nservices:\n  api:\n    image:  openrag\n```\nmore prose"
+    )
+    # The default still flattens every line, as its other callers expect.
+    assert sanitize_text(text) == "Some prose\n\n```yaml\nservices:\napi:\nimage: openrag\n```\nmore prose"

@@ -469,6 +469,8 @@ class BaseChunker(ChunkingStrategy):
                 remove_zero_width_chars=True,
                 max_consecutive_newlines=2,
                 normalize_unicode=True,
+                # dewrap_paragraphs kept the code blocks verbatim for this.
+                keep_code_indentation=True,
             )
             # Markers closing the buffer label nothing. Left in, one could split
             # off with the replayed overlap, as a chunk with no new content.

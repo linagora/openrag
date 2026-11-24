@@ -49,6 +49,7 @@ from core.chunking.markdown_utils import (
     split_md_elements,
 )
 from core.chunking.recursive import (
+    _CODE_FENCE_RE,
     _INLINE_ELEMENT_TOKEN_THRESHOLD,
     BaseChunker,
     dewrap_paragraphs,
@@ -1243,6 +1244,29 @@ _CLAUSE_RES = (
 _SPLIT_LADDER = (_SENTENCE_RE, *_CLAUSE_RES)
 
 
+def _holds_code_fence(text: str) -> bool:
+    return any(_CODE_FENCE_RE.match(line) for line in text.split("\n"))
+
+
+def _paragraphs_keeping_code_blocks(text: str) -> list[str]:
+    """The paragraphs of *text*, a fenced code block staying in one of them.
+
+    A blank line inside a ``` / ~~~ fence separates two parts of the same
+    listing, not two paragraphs: cut there, the listing could be packed into
+    two chunks, the second one opening on code with no fence above it.
+    """
+    paragraphs: list[str] = []
+    in_fence = False
+    for paragraph in re.split(r"\n{2,}", text):
+        if in_fence:
+            paragraphs[-1] = f"{paragraphs[-1]}\n\n{paragraph}"
+        else:
+            paragraphs.append(paragraph)
+        if sum(1 for line in paragraph.split("\n") if _CODE_FENCE_RE.match(line)) % 2:
+            in_fence = not in_fence
+    return paragraphs
+
+
 def _greedy_split(text: str, target: int, max_tokens: int, length_function: Callable[[str], int]) -> list[str]:
     """Pack paragraphs (then sentences for an over-``max`` paragraph) to ``target``."""
 
@@ -1252,7 +1276,14 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
         """Split one over-``max`` item on the strongest separator it actually
         contains, then keep the weaker ones in reserve for its own oversize
         pieces. Word-wrapping is the last resort because it is the only step
-        that can cut mid-sentence."""
+        that can cut mid-sentence.
+
+        A code listing is cut between two of its lines and nowhere else: the
+        sentence and clause separators match the line break and indentation
+        after a ``:`` or a ``;``, and joining the parts with a space would put
+        ``api:`` and ``image: openrag`` on one line."""
+        if "\n" in item and _holds_code_fence(item):
+            return pack(item.split("\n"), "\n", ())
         for i, splitter in enumerate(levels):
             parts = splitter.split(item)
             if len(parts) > 1:
@@ -1282,8 +1313,8 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
             out.append(joiner.join(buf))
         return out
 
-    sanitized = sanitize_text(text, max_consecutive_newlines=2)
-    pieces = pack(re.split(r"\n{2,}", sanitized), "\n\n", _SPLIT_LADDER)
+    sanitized = sanitize_text(text, max_consecutive_newlines=2, keep_code_indentation=True)
+    pieces = pack(_paragraphs_keeping_code_blocks(sanitized), "\n\n", _SPLIT_LADDER)
 
     # A heading is eligible only when the emitted line is the same complete
     # line at the same word position in the sanitized source. This keeps

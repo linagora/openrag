@@ -80,6 +80,35 @@ def decode_bytes(raw: bytes, encoding: str | None = None) -> str:
         return raw.decode(DEFAULT_FALLBACK_ENCODING, errors="replace")
 
 
+# A ``` / ~~~ fenced-code-block delimiter line (open or close).
+_CODE_FENCE_LINE_RE = re.compile(r"^\s*(?:```|~~~)")
+
+
+def _normalize_whitespace(text: str, keep_code_indentation: bool) -> str:
+    """Collapse runs of spaces and tabs, and trim each line.
+
+    With *keep_code_indentation*, the lines of a fenced code block only lose
+    their trailing spaces: their indentation is what the code means (a YAML
+    mapping's nesting, a Python block), and their inner spacing is part of it.
+    """
+    if not keep_code_indentation:
+        text = re.sub(r" {2,}", " ", text)
+        text = re.sub(r"\t+", " ", text)
+        text = re.sub(r"(?m)^ +", "", text)
+        return re.sub(r"(?m) +$", "", text)
+    lines: list[str] = []
+    in_fence = False
+    for line in text.split("\n"):
+        is_fence = _CODE_FENCE_LINE_RE.match(line) is not None
+        if in_fence and not is_fence:
+            lines.append(line.rstrip(" "))
+        else:
+            lines.append(re.sub(r"\t+", " ", re.sub(r" {2,}", " ", line)).strip(" "))
+        if is_fence:
+            in_fence = not in_fence
+    return "\n".join(lines)
+
+
 def sanitize_text(
     text: str,
     normalize_whitespace: bool = True,
@@ -87,6 +116,7 @@ def sanitize_text(
     remove_zero_width_chars: bool = True,
     max_consecutive_newlines: int = 2,
     normalize_unicode: bool = True,
+    keep_code_indentation: bool = False,
 ) -> str:
     """Sanitize text by removing useless characters and normalizing whitespace.
 
@@ -104,6 +134,8 @@ def sanitize_text(
         remove_zero_width_chars: If True, remove zero-width spaces and similar chars
         max_consecutive_newlines: Maximum number of consecutive newlines to keep (0 = unlimited)
         normalize_unicode: If True, normalize unicode to NFC form
+        keep_code_indentation: If True, whitespace normalization leaves the
+            indentation and inner spacing of fenced code blocks untouched
 
     Returns:
         Sanitized text string
@@ -121,10 +153,7 @@ def sanitize_text(
         text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]", "", text)
 
     if normalize_whitespace:
-        text = re.sub(r" {2,}", " ", text)
-        text = re.sub(r"\t+", " ", text)
-        text = re.sub(r"(?m)^ +", "", text)
-        text = re.sub(r"(?m) +$", "", text)
+        text = _normalize_whitespace(text, keep_code_indentation)
 
     text = re.sub(r"\r\n", "\n", text)
     text = re.sub(r"\r", "\n", text)
