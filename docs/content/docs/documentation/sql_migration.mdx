@@ -68,10 +68,10 @@ docker compose \
 
 #### Option B: Docker exec (stack already running)
 
-If the stack is already running, skip the rebuild:
+If the stack is already running, skip the rebuild. `docker compose exec` starts the command as root, so run it through the image's entrypoint, which drops to the app user first:
 
 ```bash title="Apply migrations (exec)"
-docker compose exec openrag \
+docker compose exec openrag /app/entrypoint.sh \
     uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head
 ```
 
@@ -87,7 +87,7 @@ DATABASE_URL=postgresql://user:pass@localhost:5432/openrag \
 :::tip[Quick alternative: run inside a running container]
 If your stack is already running, you can apply migrations directly without rebuilding:
 ```bash title="Apply migrations via exec"
-docker compose exec -w /app/openrag openrag \
+docker compose exec -w /app/openrag openrag /app/entrypoint.sh \
   /app/.venv/bin/alembic -c services/persistence/migrations/alembic/alembic.ini upgrade head
 ```
 :::

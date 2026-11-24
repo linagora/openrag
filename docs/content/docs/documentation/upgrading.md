@@ -1125,16 +1125,18 @@ $DC stop "$SVC"
 #### 5. Run the Milvus migration
 
 The 2.3.0 image cannot run a command through its entrypoint, so the commands
-below bypass it and run as the image's app user (`--user`) rather than as root:
-run as root, `uv` leaves root-owned files in the `openrag_venv` volume, and the
-next start with another image fails with `Permission denied` while syncing it.
+below bypass it and run as the image's app user (`--user`) rather than as root,
+with the entrypoint's `umask 002`: run as root, or with the default umask, `uv`
+leaves files in the `openrag_venv` volume that another image's user cannot
+replace, and the next start with that image fails with `Permission denied` while
+syncing it.
 
 A dry run first, which changes nothing and lists the pending migrations:
 
 ```bash
 APP_UID=$($DC run --no-deps --rm -T --entrypoint printenv "$SVC" APP_UID)
-$DC run --no-deps --rm --entrypoint "" --user "$APP_UID:0" "$SVC" \
-  uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
+$DC run --no-deps --rm --entrypoint sh --user "$APP_UID:0" "$SVC" -c \
+  'umask 002 && exec uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run'
 ```
 
 The dry run prints the collection's current version:
@@ -1167,8 +1169,8 @@ Check that the plan routes every partition to an embedder field, and review any
 lose their vector. Then apply it:
 
 ```bash
-$DC run --no-deps --rm --entrypoint "" --user "$APP_UID:0" "$SVC" \
-  uv run --no-dev python services/persistence/migrations/milvus/migrate.py
+$DC run --no-deps --rm --entrypoint sh --user "$APP_UID:0" "$SVC" -c \
+  'umask 002 && exec uv run --no-dev python services/persistence/migrations/milvus/migrate.py'
 ```
 
 A failed run can be run again: until its last step drops the old `vector` field,
