@@ -163,7 +163,7 @@ class EmlParser(DocumentParser):
             content_type = part.get_content_type()
             try:
                 disposition = part.get_content_disposition()
-            except ValueError as exc:
+            except Exception as exc:
                 logger.warning("Skipping EML part with an unreadable Content-Disposition: %s", exc)
                 continue
 
