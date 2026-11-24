@@ -6,7 +6,7 @@ import re
 
 import pytest
 from core.chunking.registry import chunking_registry
-from core.chunking.structured_section import StructuredSectionChunker, _Unit
+from core.chunking.structured_section import StructuredSectionChunker, _greedy_split, _Unit
 from core.models.chunk import ChunkType
 from core.models.document import ProcessedDocument, TextBlock
 
@@ -259,6 +259,131 @@ def test_split_caption_never_ends_on_its_own_heading():
     for chunk in captions:
         last = [line for line in chunk.text.splitlines() if line.strip()][-1]
         assert not last.lstrip().startswith("#"), f"heading stranded at chunk end: {last!r}"
+
+
+def test_public_chunker_keeps_merged_text_within_character_limit(monkeypatch):
+    document = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text="beta\n\nx\n\n😀", page_number=1)],
+        metadata={},
+    )
+    chunker = _chunker(chunk_size=25, hard_max_tokens=8, length_function=len, layout="flowing")
+    original_merge = chunker._merge_small
+    merge_calls = []
+
+    def record_merge(units, filename):
+        merge_calls.append(True)
+        return original_merge(units, filename)
+
+    monkeypatch.setattr(chunker, "_merge_small", record_merge)
+    chunks = chunker.chunk(document)
+
+    assert merge_calls
+    assert all(chunk.token_count == len(chunk.text) <= 8 for chunk in chunks)
+    assert [word for chunk in chunks for word in chunk.content.split()] == ["beta", "x", "😀"]
+
+
+def test_merge_small_counts_joiners_and_updates_token_count():
+    chunker = _chunker(chunk_size=25, hard_max_tokens=8, length_function=len, layout="flowing")
+    units = [_Unit([], text, len(text), pages={1}) for text in ("beta", "x", "😀")]
+
+    merged = chunker._merge_small(units, "")
+
+    assert [unit.text for unit in merged] == ["beta\n\nx", "😀"]
+    assert all(unit.tokens == len(unit.text) <= 8 for unit in merged)
+
+
+def test_greedy_split_does_not_rehome_heading_past_max_tokens():
+    pieces = _greedy_split("alpha beta\n\n### Heading\n\ngamma delta", 2, 2, _words)
+
+    assert pieces == ["alpha beta", "### Heading", "gamma delta"]
+    assert all(_words(piece) <= 2 for piece in pieces), pieces
+
+
+def test_greedy_split_counts_joiner_when_packing_to_target():
+    pieces = _greedy_split("a\n\n### H\n\nb", 6, 6, len)
+
+    assert pieces == ["a", "### H", "b"]
+    assert all(len(piece) <= 6 for piece in pieces), pieces
+
+
+def test_greedy_split_keeps_hard_limit_when_target_is_larger():
+    pieces = _greedy_split("aa\n\nbb", 8, 4, len)
+    wrapped = _greedy_split("aa bb cc dd", 8, 4, len)
+
+    assert pieces == ["aa", "bb"]
+    assert all(len(piece) <= 4 for piece in pieces), pieces
+    assert wrapped == ["aa", "bb", "cc", "dd"]
+    assert all(len(piece) <= 4 for piece in wrapped), wrapped
+
+
+def test_greedy_split_rehomes_heading_when_receiver_still_fits():
+    pieces = _greedy_split("alpha beta\n\n### Heading\n\ngamma delta", 4, 4, _words)
+
+    assert pieces == ["alpha beta", "### Heading\n\ngamma delta"]
+    assert all(_words(piece) <= 4 for piece in pieces), pieces
+
+
+def test_greedy_split_rehomes_intact_heading_after_sentence_split_when_it_fits():
+    pieces = _greedy_split("alpha beta.\n### Heading.\ngamma delta.", 2, 4, _words)
+
+    assert pieces == ["alpha beta.", "### Heading.\n\ngamma delta."]
+    assert all(_words(piece) <= 4 for piece in pieces), pieces
+
+
+def test_greedy_split_does_not_rehome_hard_wrapped_heading_fragment():
+    pieces = _greedy_split("#### **Article L700-2 w1 details", 2, 4, _words)
+
+    assert pieces == ["#### **Article", "L700-2 w1", "details"]
+    assert all(_words(piece) <= 4 for piece in pieces), pieces
+
+
+def test_greedy_split_does_not_rehome_sentence_split_heading_fragment():
+    pieces = _greedy_split("## Scope. alpha beta. gamma delta epsilon", 2, 4, _words)
+
+    assert pieces == ["## Scope.", "alpha beta.", "gamma delta epsilon"]
+
+
+def test_greedy_split_rehomes_complete_heading_from_word_wrapped_item():
+    pieces = _greedy_split("### Heading\nalpha beta gamma", 2, 4, _words)
+
+    assert pieces == ["### Heading\n\nalpha beta", "gamma"]
+    assert all(_words(piece) <= 4 for piece in pieces), pieces
+
+
+def test_greedy_split_cascades_consecutive_headings_to_nonempty_receiver():
+    text = "### A\n\n### B\n\nbody"
+    pieces = _greedy_split(text, 2, 5, _words)
+    bounded_pieces = _greedy_split(text, 2, 4, _words)
+
+    assert pieces == [text]
+    assert bounded_pieces == ["### A", "### B\n\nbody"]
+    assert all(_words(piece) <= 4 for piece in bounded_pieces), bounded_pieces
+
+
+def test_greedy_split_rehomes_headings_packed_together_when_combined_piece_fits():
+    text = "intro\n\n### A\n\n### B\n\nbody"
+
+    pieces = _greedy_split(text, 5, 8, _words)
+
+    assert pieces == ["intro", "### A\n\n### B\n\nbody"]
+    assert all(_words(piece) <= 8 for piece in pieces), pieces
+
+
+def test_greedy_split_keeps_rehomed_heading_run_within_max_tokens():
+    text = "intro\n\n### A\n\n### B\n\nbody extra"
+
+    pieces = _greedy_split(text, 5, 5, _words)
+
+    assert pieces == ["intro\n\n### A", "### B\n\nbody extra"]
+    assert all(_words(piece) <= 5 for piece in pieces), pieces
+
+
+def test_greedy_split_distinguishes_fragment_from_duplicate_source_heading():
+    text = "#### **Article L700-2 w1 details\n\n#### **Article\n\nalpha beta"
+    pieces = _greedy_split(text, 2, 4, _words)
+
+    assert pieces == ["#### **Article", "L700-2 w1", "details", "#### **Article\n\nalpha beta"]
 
 
 def test_breakless_paragraph_splits_on_clauses_not_mid_sentence():
