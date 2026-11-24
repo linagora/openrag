@@ -67,6 +67,17 @@ else
   if [[ "${UVICORN_RELOAD}" == "true" ]]; then
     RELOAD_ARGS+=("--reload")
   fi
+  # An empty value in SHARED_ENV overrides proxy-defaults.env. Keep explicit
+  # non-empty overrides intact, but restore the safe Compose proxy default
+  # when it is blank. Non-Compose runs trust loopback only by default.
+  if [[ -z "${UVICORN_FORWARDED_ALLOW_IPS:-}" ]]; then
+    if [[ -n "${OPENRAG_ADMIN_UI_PROXY_IP:-}" ]]; then
+      UVICORN_FORWARDED_ALLOW_IPS="127.0.0.1,${OPENRAG_ADMIN_UI_PROXY_IP}"
+    else
+      UVICORN_FORWARDED_ALLOW_IPS="127.0.0.1"
+    fi
+    export UVICORN_FORWARDED_ALLOW_IPS
+  fi
   # uvicorn only honours X-Forwarded-* from peers listed in --forwarded-allow-ips
   # (default: 127.0.0.1), so a reverse proxy outside loopback — the admin-ui
   # container, a k8s ingress — is ignored: request.client.host stays the proxy's
