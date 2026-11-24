@@ -52,3 +52,15 @@ def test_xls_input_limit_applies_before_reading_workbook(monkeypatch):
     with pytest.raises(PipelineError) as error:
         list(XlsParser().iter_batches(document))
     assert error.value.code == "XLS_LIMIT_EXCEEDED"
+
+
+def test_xls_rejects_oversized_sheet_before_xlrd_materializes_it(monkeypatch):
+    def unexpected_sheet_load(*args):
+        pytest.fail("oversized sheet was loaded")
+
+    monkeypatch.setattr(xls_parser, "_MAX_SHEET_AREA", 20)
+    monkeypatch.setattr(xls_parser.xlrd.book.Book, "sheet_by_index", unexpected_sheet_load)
+    document = Document(filename="book.xls", source_path=str(WORKBOOK))
+    with pytest.raises(PipelineError) as error:
+        list(XlsParser().iter_batches(document))
+    assert error.value.code == "XLS_LIMIT_EXCEEDED"

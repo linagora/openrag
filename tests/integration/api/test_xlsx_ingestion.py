@@ -10,6 +10,7 @@ import io
 import json
 import re
 import zipfile
+from pathlib import Path
 from urllib.parse import urlparse
 
 from conftest import wait_for_task
@@ -140,3 +141,27 @@ class TestXlsxIngestion:
         tickets = [m for m in metadata if m.get("sheet_name") == "Tickets"]
         assert tickets and all(m.get("filtered_rows_included") == 15 for m in tickets)
         assert all(m.get("hidden_rows_skipped") == 1 for m in tickets)
+
+
+class TestXlsIngestion:
+    def test_legacy_workbook_upload_indexes_visible_rows_and_citations(self, api_client, created_partition):
+        workbook = Path(__file__).resolve().parents[2] / "resources" / "legacy_workbook.xls"
+        file_id = "xls-e2e-001"
+        response = api_client.post(
+            f"/indexer/partition/{created_partition}/file/{file_id}",
+            files={"file": ("legacy.xls", workbook.read_bytes(), "application/vnd.ms-excel")},
+            data={"metadata": json.dumps({})},
+        )
+        assert response.status_code in (200, 201, 202), response.text
+        wait_for_task(api_client, response.json()["task_status_url"].split("/")[-1])
+
+        chunks = _stored_chunks(api_client, created_partition, file_id)
+        text = "\n".join(chunk["page_content"] for chunk in chunks)
+        assert "René" in text and "李明" in text and "Unlabelled notes" in text
+        assert "SECRET" not in text
+        metadata = [chunk["metadata"] for chunk in chunks]
+        assert {m["tabular_format"] for m in metadata} == {"xls"}
+        assert {m["sheet_name"] for m in metadata} == {"Quarter's sales", "Single row"}
+        sales = [m for m in metadata if m["sheet_name"] == "Quarter's sales"]
+        assert {row for m in sales for row in m["table_row_numbers"]} == {4, 6, 8}
+        assert any(m["cell_range"].startswith("'Quarter''s sales'!C") for m in sales)

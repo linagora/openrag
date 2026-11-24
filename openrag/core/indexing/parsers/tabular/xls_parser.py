@@ -8,6 +8,7 @@ from datetime import time
 from html import escape
 from io import StringIO
 from struct import error as StructError
+from struct import unpack_from
 
 import xlrd
 from core.indexing.parsers.registry import parser_registry
@@ -15,6 +16,7 @@ from core.indexing.parsers.tabular.base import TabularBatchParser, markdown_row,
 from core.indexing.validators import ENCRYPTED_OFFICE_FILE_MESSAGE
 from core.models.document import Document, ProcessedDocument, TextBlock
 from core.utils.exceptions import ConfigError, NoIndexableContentError, PipelineError
+from xlrd import biffh
 from xlrd.compdoc import CompDocError
 
 _MAX_FILE_BYTES = 16 * 1024 * 1024
@@ -24,6 +26,19 @@ _MAX_WORKBOOK_AREA = 5_000_000
 _MAX_BATCH_BYTES = 2 * 1024 * 1024
 _MAX_RENDERED_BYTES = 32 * 1024 * 1024
 _EMPTY_CELL_TYPES = {xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK}
+# Cell records xlrd materializes for BIFF5–8, including formatting-only blanks.
+_MULTIPLE_CELLS = {biffh.XL_MULRK, biffh.XL_MULBLANK}
+_CELL_RECORDS = {
+    biffh.XL_NUMBER,
+    biffh.XL_LABELSST,
+    biffh.XL_LABEL,
+    biffh.XL_RSTRING,
+    biffh.XL_RK,
+    biffh.XL_BOOLERR,
+    biffh.XL_BLANK,
+    *biffh.XL_FORMULA_OPCODES,
+    *_MULTIPLE_CELLS,
+}
 
 
 def _limit(reason: str) -> PipelineError:
@@ -43,6 +58,48 @@ def _read_workbook(document: Document) -> xlrd.book.Book:
     return xlrd.open_workbook(
         file_contents=content, on_demand=True, formatting_info=True, ragged_rows=True, logfile=StringIO()
     )
+
+
+def _check_sheet_area(book: xlrd.book.Book, index: int, limit: int) -> None:
+    """Read BIFF cell coordinates before xlrd can allocate a sparse sheet's padded rows.
+
+    xlrd exposes no size hook for an unloaded sheet. Use the workbook stream
+    and offsets its on-demand reader already resolved. DIMENSIONS is only a
+    hint and can be missing or stale, so check actual cell records instead.
+    """
+    data = book.mem
+    position = book._sh_abs_posn[index]
+    if unpack_from("<H", data, position)[0] not in biffh.bofcodes:
+        raise xlrd.XLRDError("Missing BIFF worksheet beginning")
+    rows = columns = 0
+    in_embedded_object = False
+    first_record = True
+    while position < len(data):
+        code, length = unpack_from("<HH", data, position)
+        start = position + 4
+        position = start + length
+        if position > len(data):
+            raise xlrd.XLRDError("Incomplete BIFF worksheet record")
+        if first_record:
+            first_record = False
+        elif code == biffh.XL_EOF:
+            if not in_embedded_object:
+                return
+            in_embedded_object = False
+        elif not in_embedded_object:
+            if code in biffh.bofcodes:
+                in_embedded_object = True
+            elif code in _CELL_RECORDS:
+                if length < 4 or (code in _MULTIPLE_CELLS and length < 8):
+                    raise xlrd.XLRDError("Incomplete BIFF cell record")
+                row, column = unpack_from("<HH", data, start)
+                if code in _MULTIPLE_CELLS:
+                    column = unpack_from("<H", data, position - 2)[0]
+                rows = max(rows, row + 1)
+                columns = max(columns, column + 1)
+                if rows * columns > limit:
+                    raise _limit("XLS workbook exceeds the worksheet area limit")
+    raise xlrd.XLRDError("Missing BIFF worksheet ending")
 
 
 def _cell_text(value: str | float | int, kind: int, datemode: int) -> str:
@@ -190,13 +247,17 @@ class XlsParser(TabularBatchParser):
         area = rendered_bytes = 0
         try:
             with _read_workbook(document) as book:
+                if not book.on_demand or book.biff_version < 50:
+                    raise xlrd.XLRDError("Unsupported legacy Excel workbook version")
                 if book.nsheets > _MAX_SHEETS:
                     raise _limit("XLS workbook exceeds the worksheet limit")
                 for index in range(book.nsheets):
+                    # xlrd only exposes visibility publicly on a loaded sheet.
+                    if book._sheet_visibility[index]:
+                        continue
+                    _check_sheet_area(book, index, min(_MAX_SHEET_AREA, _MAX_WORKBOOK_AREA - area))
                     sheet = book.sheet_by_index(index)
                     try:
-                        if sheet.visibility:
-                            continue
                         sheet_area = sheet.nrows * sheet.ncols
                         area += sheet_area
                         if sheet_area > _MAX_SHEET_AREA or area > _MAX_WORKBOOK_AREA:
