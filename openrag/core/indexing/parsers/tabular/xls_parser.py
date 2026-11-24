@@ -106,10 +106,16 @@ def _cell_text(value: str | float | int, kind: int, datemode: int) -> str:
     if kind == xlrd.XL_CELL_BOOLEAN:
         return "true" if value else "false"
     if kind == xlrd.XL_CELL_DATE:
-        date = xlrd.xldate_as_datetime(value, datemode)
-        if 0 <= value < 1:
-            return date.time().isoformat()
-        return date.date().isoformat() if date.time() == time() else date.isoformat()
+        try:
+            date = xlrd.xldate_as_datetime(value, datemode)
+        except (OverflowError, ValueError):
+            # A date number format can be applied to any stored number.
+            # Preserve the number when it cannot represent a Python date.
+            pass
+        else:
+            if 0 <= value < 1:
+                return date.time().isoformat()
+            return date.date().isoformat() if date.time() == time() else date.isoformat()
     if kind == xlrd.XL_CELL_ERROR:
         return xlrd.error_text_from_code.get(value, "#ERROR!")
     if isinstance(value, float) and value.is_integer():

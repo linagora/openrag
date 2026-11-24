@@ -24,7 +24,8 @@ async def test_xls_dispatcher_extracts_visible_sheets_with_physical_coordinates(
     assert first.metadata["table_columns"] == ["ID", "ID_2", "Amount", "Paid", "Due"]
     assert first.metadata["cell_range"] == "'Quarter''s sales'!C4:G8"
     assert "René &#124; Paris | 17.25 | true | 2026-11-24" in first.text
-    assert "李明 | 0 | false" in first.text
+    assert "李明 | 0 | false | 5000000" in first.text
+    assert "Zoë | 42 | false | -5000000.5" in first.text
     assert second.metadata["sheet_name"] == "Single row"
     assert second.metadata["table_header_row"] is None
     assert "Unlabelled notes" in second.text
