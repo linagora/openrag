@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import traceback
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from core.models.catalog import DocumentStatus, IndexationJob, normalize_degraded_stages
+from core.models.catalog import (
+    FILE_FENCE_RENEW_INTERVAL_SECONDS,
+    FILE_FENCE_TTL_SECONDS,
+    DocumentStatus,
+    IndexationJob,
+    normalize_degraded_stages,
+)
 from core.models.document import Document, DocumentType
 from core.models.stage_progress import StageProgressWorkerSnapshot, StageTaskPhase
 from core.observability.ray_metrics import initialize_stage_writer_counters
@@ -66,6 +72,7 @@ class IndexerWorker:
         job_repo: Any = None,
         stage_snapshot_sink: Any = None,
         stage_writer_max_active_tasks: int = 1,
+        file_fence_repo: Any = None,
     ) -> None:
         self._pipeline = pipeline
         self._tsm = task_state_manager
@@ -74,6 +81,7 @@ class IndexerWorker:
         self._vector_store = vector_store
         self._collection = collection
         self._job_repo = job_repo
+        self._file_fence_repo = file_fence_repo
         initialize_stage_writer_counters()
         self._stage_writer = (
             StageEventWriter(
@@ -84,6 +92,53 @@ class IndexerWorker:
             if job_repo is not None
             else None
         )
+
+    async def release_file_fence(self, *, partition: str, file_id: str, holder_id: str | None) -> None:
+        """Free the file after its last write (#1430).
+
+        On success that is before the outcome is reported, and after the
+        workspace attachment when one follows, so a client that sees the task
+        settle may replace the file at once. The pool's own release, when the
+        task settles, is a backstop.
+        """
+        if self._file_fence_repo is None or not holder_id or not file_id:
+            return
+        try:
+            await self._file_fence_repo.release(partition=partition, file_id=file_id, holder_id=holder_id)
+        except Exception as exc:  # noqa: BLE001 - the pool releases it again, and the lease expires
+            logger.bind(file_id=file_id, partition=partition).warning(
+                "Failed to release the file fence", error=str(exc)
+            )
+
+    async def keep_file_fence_alive(self, *, partition: str, file_id: str, holder_id: str | None) -> None:
+        """Renew this task's fence while the worker runs it (#1430).
+
+        The pool renews it too, but only while the pool actor lives; this
+        renewal runs where the work runs. It stops once the fence is no longer
+        this task's: the catalog write refuses the task then anyway.
+        """
+        if self._file_fence_repo is None or not holder_id or not file_id:
+            return
+        while True:
+            await asyncio.sleep(FILE_FENCE_RENEW_INTERVAL_SECONDS)
+            try:
+                renewed = await self._file_fence_repo.renew(
+                    partition=partition, file_id=file_id, holder_id=holder_id, ttl_seconds=FILE_FENCE_TTL_SECONDS
+                )
+            except Exception as exc:  # noqa: BLE001 - the next round retries, and the lease outlasts three misses
+                logger.bind(file_id=file_id, partition=partition).warning(
+                    "Failed to renew the file fence; retrying.", error=str(exc)
+                )
+                continue
+            if not renewed:
+                return
+
+    async def holds_file_fence(self, *, partition: str, file_id: str, holder_id: str | None) -> bool:
+        """Whether this task still holds the file's fence; always True without fences."""
+        if self._file_fence_repo is None or not holder_id or not file_id:
+            return True
+        fence = await self._file_fence_repo.get(partition=partition, file_id=file_id)
+        return fence is not None and fence.holder_id == holder_id
 
     async def close_stage_writer(self) -> None:
         if self._stage_writer is not None:
@@ -171,6 +226,8 @@ class IndexerWorker:
         require_existing_partition: bool = False,
         resolved_prompts: dict[str, str] | None = None,
         on_failure_report: Callable[[], None] | None = None,
+        fence_holder_id: str | None = None,
+        before_success: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """Run one file through the indexing pipeline.
 
@@ -184,6 +241,14 @@ class IndexerWorker:
 
         *on_failure_report* is called once the failed run is cleaned up, right
         before its failure is reported.
+
+        With *fence_holder_id*, the catalog write is refused unless this task
+        still holds the file's fence (#1430); the failure path then removes the
+        vectors it stored. *before_success* runs the caller's own last writes
+        (the workspace attachment) after the catalog write and while the fence
+        is still held, so the fence is released, the task completed and the
+        callback sent only once the file is fully written. If it raises, the
+        run fails like any other.
         """
         file_id = metadata.get("file_id", "")
         log = logger.bind(file_id=file_id, partition=partition, task_id=task_id)
@@ -256,6 +321,7 @@ class IndexerWorker:
             if self._document_repo is not None:
                 wrote_catalog = await _write_catalog_record(
                     doc_repo=self._document_repo,
+                    task_id=task_id,
                     metadata=metadata,
                     partition=partition,
                     user=user,
@@ -267,6 +333,7 @@ class IndexerWorker:
                     workspace_ids=workspace_ids,
                     embedder_fingerprint=row.get("embedder_fingerprint"),
                     degraded_stages=degraded_stages,
+                    fence_holder_id=fence_holder_id,
                 )
                 if not wrote_catalog:
                     raise RuntimeError("Catalog row was not written after vector indexing")
@@ -284,6 +351,9 @@ class IndexerWorker:
                     partition=partition,
                     indexation_config=indexation_config,
                 )
+            if before_success is not None:
+                await before_success()
+            await self.release_file_fence(partition=partition, file_id=file_id, holder_id=fence_holder_id)
             finish_stage_tracker_once()
             completion_outcome = await retry_idempotent_ray_actor_method(
                 lambda: self._tsm.complete_with_degraded_stages.remote(task_id, degraded_stages),
@@ -326,6 +396,7 @@ class IndexerWorker:
                         partition=partition,
                         task_id=task_id,
                     )
+                await self.release_file_fence(partition=partition, file_id=file_id, holder_id=fence_holder_id)
                 tb = traceback.format_exc()
                 if on_failure_report is not None:
                     on_failure_report()
@@ -415,6 +486,7 @@ async def _write_catalog_record(
     *,
     doc_repo: Any,
     metadata: dict[str, Any],
+    task_id: str | None = None,
     partition: str,
     user: dict[str, Any] | None,
     replace: bool,
@@ -425,12 +497,17 @@ async def _write_catalog_record(
     workspace_ids: list[str] | None = None,
     embedder_fingerprint: dict[str, str | None] | None = None,
     degraded_stages: list[str] | None = None,
+    fence_holder_id: str | None = None,
 ) -> bool:
     """Record an indexed file in the catalog, which is what makes it visible.
 
     With ``embedder_fingerprint``, the repo first checks that the partition's
     embedder is still the config the vectors were built with, and refuses the
     file otherwise (#958); the caller's failure path then removes its vectors.
+
+    A new file consumes the file slot reserved under ``task_id``: a
+    quota-capped upload runs under its reservation's id (#664). Any other task
+    holds no slot, and the insert counts the file instead.
     """
     file_id = metadata.get("file_id", "")
     file_metadata = {key: value for key, value in metadata.items() if key != "page"}
@@ -438,6 +515,8 @@ async def _write_catalog_record(
     config_kwargs = {"indexation_config": indexation_config} if indexation_config is not None else {}
     if embedder_fingerprint is not None:
         config_kwargs["embedder_fingerprint"] = embedder_fingerprint
+    if fence_holder_id is not None:
+        config_kwargs["fence_holder_id"] = fence_holder_id
     if replace:
         return await doc_repo.update_file_in_partition(
             file_id=file_id,
@@ -464,6 +543,7 @@ async def _write_catalog_record(
         # Stay protected until the outer worker has completed every attachment.
         independently_indexed=True,
         content_sha256=metadata.get("content_sha256"),
+        quota_reservation_id=task_id,
         **config_kwargs,
     )
 

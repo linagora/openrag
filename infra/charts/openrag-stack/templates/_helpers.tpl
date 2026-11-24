@@ -311,3 +311,29 @@ Otherwise the Secret is opaque here and env.config is all the chart can read.
 {{- end -}}
 {{- tpl (printf "%v" $raw) . | trim -}}
 {{- end }}
+
+{{/*
+The env Secret's values as the chart renders them, as JSON: each env.secrets
+value through tpl, except POSTGRES_PASSWORD, read from postgresql.auth.password
+when the chart runs Postgres. secrets-env.yaml renders the Secret from it, and
+the API pod's checksum/secret hashes it, so the pods roll exactly when the
+Secret's content changes. Only meaningful when the chart renders that Secret:
+no env.existingSecret and the "values" provider.
+*/}}
+{{- define "openrag-stack.envSecretValues" -}}
+{{- $values := dict -}}
+{{- range $key, $rawValue := (.Values.env.secrets | default dict) -}}
+{{- /* postgresql.auth.password is the actual credential Postgres enforces:
+   read it live instead of trusting env.secrets.POSTGRES_PASSWORD's YAML
+   anchor, which only resolves within values.yaml itself and goes stale the
+   moment postgresql.auth.password is overridden via --set/-f (anchors don't
+   survive Helm's values merge). Falls back to the literal for external
+   Postgres (postgresql.enabled=false), where this key is set directly. */ -}}
+{{- if and (eq $key "POSTGRES_PASSWORD") $.Values.postgresql.enabled -}}
+{{- $_ := set $values $key (printf "%v" $.Values.postgresql.auth.password) -}}
+{{- else -}}
+{{- $_ := set $values $key (tpl (printf "%v" $rawValue) $) -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $values -}}
+{{- end }}
