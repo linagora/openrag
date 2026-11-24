@@ -61,6 +61,46 @@ const documents = [
   { id: "doc-006", filename: "corrupted-file.pdf", content_type: "application/pdf", partition: "legal-docs", chunk_count: 0, file_size_bytes: 45000, status: "FAILED", error_message: "Unable to parse PDF: file appears to be corrupted or password-protected", job_id: "job-001", created_at: "2025-01-15T10:30:00Z", updated_at: "2025-01-15T10:31:00Z", indexed_at: null },
 ];
 
+type MockWorkspace = {
+  workspace_id: string;
+  partition_name: string;
+  display_name: string | null;
+  created_by: number;
+  created_at: string | null;
+};
+
+const mockWorkspaces: MockWorkspace[] = [
+  {
+    workspace_id: "contracts",
+    partition_name: "legal-docs",
+    display_name: "Contracts",
+    created_by: 1,
+    created_at: "2025-01-10T09:00:00Z",
+  },
+  {
+    workspace_id: "api-guides",
+    partition_name: "technical-manuals",
+    display_name: "API guides",
+    created_by: 1,
+    created_at: "2025-01-11T09:00:00Z",
+  },
+];
+
+const mockWorkspaceFiles = new Map<string, string[]>([
+  ["legal-docs/contracts", ["doc-001"]],
+  ["technical-manuals/api-guides", ["doc-003"]],
+]);
+const mockWorkspaceKey = (partition: string, workspaceId: string) => `${partition}/${workspaceId}`;
+
+function workspaceGenerationMismatch(
+  workspace: MockWorkspace,
+  expectedCreatedAt: string | null,
+  expectedCreatedAtIsNull: boolean,
+): boolean {
+  if (expectedCreatedAtIsNull) return workspace.created_at !== null;
+  return expectedCreatedAt !== null && workspace.created_at !== expectedCreatedAt;
+}
+
 const users = [
   { id: 1, external_user_id: null, email: "admin@example.com", display_name: "System Admin", is_admin: true, file_quota: -1, file_count: 0, created_at: "2024-12-01T00:00:00Z" },
   { id: 2, external_user_id: "kc-alice-uuid", email: "alice@example.com", display_name: "Alice Johnson", is_admin: true, file_quota: null, file_count: 12, created_at: "2025-01-05T10:00:00Z" },
@@ -224,6 +264,157 @@ export const handlers = [
       })),
     }),
   ),
+
+  http.get(`${API}/partition/:partition/workspaces`, ({ params }) => {
+    const partition = params.partition as string;
+    if (!partitions.some((item) => item.name === partition)) {
+      return HttpResponse.json({ detail: "Partition not found" }, { status: 404 });
+    }
+    return HttpResponse.json({
+      workspaces: mockWorkspaces.filter((workspace) => workspace.partition_name === partition),
+    });
+  }),
+
+  http.post(`${API}/partition/:partition/workspaces`, async ({ params, request }) => {
+    const partition = params.partition as string;
+    const body = (await request.json()) as { workspace_id: string; display_name?: string };
+    if (!partitions.some((item) => item.name === partition)) {
+      return HttpResponse.json({ detail: "Partition not found" }, { status: 404 });
+    }
+    if (mockWorkspaces.some((workspace) => workspace.partition_name === partition && workspace.workspace_id === body.workspace_id)) {
+      return HttpResponse.json({ detail: "Workspace already exists" }, { status: 409 });
+    }
+    const workspace: MockWorkspace = {
+      workspace_id: body.workspace_id,
+      partition_name: partition,
+      display_name: body.display_name ?? null,
+      created_by: 1,
+      created_at: new Date().toISOString(),
+    };
+    mockWorkspaces.push(workspace);
+    mockWorkspaceFiles.set(mockWorkspaceKey(partition, workspace.workspace_id), []);
+    return HttpResponse.json({ status: "created", workspace_id: workspace.workspace_id }, { status: 201 });
+  }),
+
+  http.get(`${API}/partition/:partition/workspaces/:workspaceId/files`, ({ params, request }) => {
+    const partition = params.partition as string;
+    const workspaceId = params.workspaceId as string;
+    const key = mockWorkspaceKey(partition, workspaceId);
+    const workspace = mockWorkspaces.find(
+      (item) => item.partition_name === partition && item.workspace_id === workspaceId,
+    );
+    if (!workspace) {
+      return HttpResponse.json({ detail: "Workspace not found" }, { status: 404 });
+    }
+    const url = new URL(request.url);
+    if (
+      workspaceGenerationMismatch(
+        workspace,
+        url.searchParams.get("expected_created_at"),
+        url.searchParams.get("expected_created_at_is_null") === "true",
+      )
+    ) {
+      return HttpResponse.json(
+        { detail: "Workspace changed after it was loaded. Refresh and retry." },
+        { status: 409 },
+      );
+    }
+    return HttpResponse.json({ file_ids: mockWorkspaceFiles.get(key) ?? [] });
+  }),
+
+  http.post(`${API}/partition/:partition/workspaces/:workspaceId/files`, async ({ params, request }) => {
+    const partition = params.partition as string;
+    const workspaceId = params.workspaceId as string;
+    const key = mockWorkspaceKey(partition, workspaceId);
+    const body = (await request.json()) as {
+      file_ids: string[];
+      expected_created_at?: string;
+      expected_created_at_is_null?: boolean;
+    };
+    const workspace = mockWorkspaces.find(
+      (item) => item.partition_name === partition && item.workspace_id === workspaceId,
+    );
+    if (!workspace) return HttpResponse.json({ detail: "Workspace not found" }, { status: 404 });
+    if (
+      workspaceGenerationMismatch(
+        workspace,
+        body.expected_created_at ?? null,
+        body.expected_created_at_is_null ?? false,
+      )
+    ) {
+      return HttpResponse.json(
+        { detail: "Workspace changed after it was loaded. Refresh and retry." },
+        { status: 409 },
+      );
+    }
+    const existing = mockWorkspaceFiles.get(key);
+    if (!existing) return HttpResponse.json({ detail: "Workspace not found" }, { status: 404 });
+    const files = body.file_ids.map((fileId) => documents.find((document) => document.id === fileId && document.partition === partition));
+    if (files.some((file) => !file)) {
+      return HttpResponse.json({ detail: "File not found in partition" }, { status: 404 });
+    }
+    const next = new Set([...existing, ...body.file_ids]);
+    mockWorkspaceFiles.set(key, [...next]);
+    return HttpResponse.json({ status: "added", file_ids: body.file_ids });
+  }),
+
+  http.delete(`${API}/partition/:partition/workspaces/:workspaceId/files/:fileId`, ({ params, request }) => {
+    const partition = params.partition as string;
+    const workspaceId = params.workspaceId as string;
+    const fileId = params.fileId as string;
+    const key = mockWorkspaceKey(partition, workspaceId);
+    const workspace = mockWorkspaces.find(
+      (item) => item.partition_name === partition && item.workspace_id === workspaceId,
+    );
+    if (!workspace) return HttpResponse.json({ detail: "Workspace not found" }, { status: 404 });
+    const url = new URL(request.url);
+    if (
+      workspaceGenerationMismatch(
+        workspace,
+        url.searchParams.get("expected_created_at"),
+        url.searchParams.get("expected_created_at_is_null") === "true",
+      )
+    ) {
+      return HttpResponse.json(
+        { detail: "Workspace changed after it was loaded. Refresh and retry." },
+        { status: 409 },
+      );
+    }
+    const existing = mockWorkspaceFiles.get(key);
+    if (!existing || !existing.includes(fileId)) {
+      return HttpResponse.json({ detail: "File not found in workspace" }, { status: 404 });
+    }
+    mockWorkspaceFiles.set(key, existing.filter((id) => id !== fileId));
+    return HttpResponse.json({ status: "removed" });
+  }),
+
+  http.delete(`${API}/partition/:partition/workspaces/:workspaceId`, ({ params, request }) => {
+    const partition = params.partition as string;
+    const workspaceId = params.workspaceId as string;
+    const url = new URL(request.url);
+    const expectedCreatedAt = url.searchParams.get("expected_created_at");
+    const expectedCreatedAtIsNull = url.searchParams.get("expected_created_at_is_null") === "true";
+    const index = mockWorkspaces.findIndex(
+      (workspace) => workspace.partition_name === partition && workspace.workspace_id === workspaceId,
+    );
+    if (index < 0) return HttpResponse.json({ detail: "Workspace not found" }, { status: 404 });
+    if (workspaceGenerationMismatch(mockWorkspaces[index], expectedCreatedAt, expectedCreatedAtIsNull)) {
+      // A stale confirmation: the workspace was recreated under the same ID.
+      // Refuse to mutate either collection so the UI exercises its 409 refresh.
+      return HttpResponse.json(
+        { detail: "Workspace changed after it was loaded. Refresh and confirm deletion again." },
+        { status: 409 },
+      );
+    }
+    mockWorkspaces.splice(index, 1);
+    mockWorkspaceFiles.delete(mockWorkspaceKey(partition, workspaceId));
+    return HttpResponse.json({
+      status: "deleted",
+      orphaned_files_deleted: 0,
+      orphaned_files_failed: [],
+      kept_files: 0,
+    });
+  }),
 
   http.get(`${API}/partition/:name/config`, ({ params }) => {
     const name = params.name as string;

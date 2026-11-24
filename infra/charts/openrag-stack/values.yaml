@@ -1159,6 +1159,9 @@ env:
 
     # App
     APP_PORT: "8080"
+    # Set this to the addresses of the proxies that forward to the API.
+    # Reconcile the allowlist when those addresses change.
+    UVICORN_FORWARDED_ALLOW_IPS: "127.0.0.1"
     # Optional white-label name for casual introductions; empty is neutral.
     ASSISTANT_NAME: ""
     # Requires ray.enabled=true (a separate RayCluster with its own "serve" port
