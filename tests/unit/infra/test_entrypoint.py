@@ -97,8 +97,13 @@ def test_documented_commands_keep_the_entrypoint(path: str) -> None:
         f"{path}: overriding the entrypoint runs uv as root (see #1066)"
     )
     # `docker compose exec` skips the entrypoint and starts as root, so it must
-    # call it explicitly before anything that runs Python from the venv.
+    # call it explicitly before anything that runs Python from the venv, or (for
+    # images up to 2.3.5, whose entrypoint ignores its arguments) do what it does:
+    # run as the app user with umask 002.
     commands = re.sub(r"\\\n\s*", " ", text).splitlines()
     for command in commands:
         if re.search(r"\bexec\b.*\b(?:uv run|alembic)\b", command) and "compose exec" in command:
-            assert "/app/entrypoint.sh" in command, f"{path}: `{command.strip()}` runs as root (see #1066)"
+            as_app_user = "--user" in command and "umask 002" in command
+            assert "/app/entrypoint.sh" in command or as_app_user, (
+                f"{path}: `{command.strip()}` runs as root (see #1066)"
+            )

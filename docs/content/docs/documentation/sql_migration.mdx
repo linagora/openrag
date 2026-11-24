@@ -75,6 +75,16 @@ docker compose exec openrag /app/entrypoint.sh \
     uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head
 ```
 
+:::caution[Images up to 2.3.5]
+This command and the exec tip below need OpenRAG 2.3.6 or later. Older entrypoints ignore their arguments, so the command starts a second OpenRAG instead of migrating. With those images, run the migration as the app user with the entrypoint's umask:
+
+```bash title="Apply migrations (exec, up to 2.3.5)"
+APP_UID=$(docker compose exec -T openrag printenv APP_UID)
+docker compose exec --user "$APP_UID:0" openrag sh -c \
+    'umask 002 && exec uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head'
+```
+:::
+
 #### Option C: Local (development)
 
 Run alembic directly with your local venv — no Docker needed:
