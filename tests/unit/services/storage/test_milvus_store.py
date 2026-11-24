@@ -29,6 +29,7 @@ from core.models.chunk import Chunk, ChunkType
 from core.models.retrieval_trace import TraceCandidate
 from core.retrieval.trace import RetrievalDiagnosticsContext, RetrievalTraceBuilder
 from core.utils.exceptions import (
+    UnexpectedVDBError,
     VDBConnectionError,
     VDBCreateOrLoadCollectionError,
     VDBInsertError,
@@ -38,13 +39,16 @@ from core.utils.exceptions import (
 from core.vector_stores import VectorStore
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from pymilvus import DataType, MilvusException
+from pymilvus import DataType, MilvusClient, MilvusException
 from pymilvus.client.entity_helper import convert_to_json
+from pymilvus.client.prepare import Prepare
 from services.storage.milvus_store import (
     MAX_SECTION_ID,
     SCHEMA_VERSION_PROPERTY_KEY,
     MilvusVectorStore,
     _changed_by_float64,
+    _estimated_row_bytes,
+    _finish_write,
     _milvus_preserves_dynamic_int64,
     analyzer_params,
 )
@@ -1606,6 +1610,229 @@ class TestCollectionArgDiscipline:
 
 
 # ---------------------------------------------------------------------------
+# Writes in batches
+# ---------------------------------------------------------------------------
+
+
+def _wide_chunk(index: int, *, dimension: int = 256) -> Chunk:
+    """A spreadsheet-like chunk: long text and content, table metadata, a vector."""
+    columns = [f"Column {i} with a readable name" for i in range(12)]
+    return Chunk(
+        id=f"c{index}",
+        document_id="open-data.xlsx",
+        partition="p1",
+        chunk_type=ChunkType.TABLE,
+        text=f"row {index} " + "valeur « é » " * 120,
+        content="cell | " * 200,
+        embedding=[0.25] * dimension,
+        metadata={"table_columns": columns, "csv_columns": columns, "cell_range": f"A{index}:L{index}"},
+    )
+
+
+def _count_rows() -> AsyncMock:
+    async def write(*, collection_name: str, data: list[dict[str, Any]], **kwargs: Any) -> dict[str, int]:
+        return {"insert_count": len(data), "upsert_count": len(data)}
+
+    return AsyncMock(side_effect=write)
+
+
+class TestWriteBatches:
+    """Milvus refuses a request over its proxy's ``serverMaxRecvSize``; a file's rows are not bounded."""
+
+    def _limit(self, store: MilvusVectorStore, **limits: int) -> None:
+        store._config = store._config.model_copy(update=limits)
+
+    async def test_upsert_splits_a_large_file_into_requests_under_the_budget(self, store: MilvusVectorStore) -> None:
+        budget = 40_000
+        self._limit(store, insert_batch_max_bytes=budget)
+        store._async_client.insert = _count_rows()
+        chunks = [_wide_chunk(i) for i in range(30)]
+
+        assert await store.upsert(chunks, vector_field=FIELD) == 30
+
+        batches = [call.kwargs["data"] for call in store._async_client.insert.await_args_list]
+        assert len(batches) > 1
+        for batch in batches:
+            assert sum(_estimated_row_bytes(row) for row in batch) <= budget
+        rows = [row for batch in batches for row in batch]
+        assert [row["text"] for row in rows] == [chunk.text for chunk in chunks]
+        # Neighbour links are drawn over the whole file, across the batches.
+        for previous, row in zip(rows, rows[1:], strict=False):
+            assert previous["next_section_id"] == row["section_id"]
+            assert row["prev_section_id"] == previous["section_id"]
+
+    async def test_a_batch_also_ends_at_the_row_cap(self, store: MilvusVectorStore) -> None:
+        self._limit(store, insert_batch_max_rows=3)
+        store._async_client.insert = _count_rows()
+
+        assert await store.upsert([_make_chunk(text=f"t{i}") for i in range(7)], vector_field=FIELD) == 7
+
+        sizes = [len(call.kwargs["data"]) for call in store._async_client.insert.await_args_list]
+        assert sizes == [3, 3, 1]
+
+    async def test_a_row_over_the_budget_is_sent_on_its_own(self, store: MilvusVectorStore) -> None:
+        self._limit(store, insert_batch_max_bytes=10)
+        store._async_client.insert = _count_rows()
+
+        assert await store.upsert([_make_chunk(text=f"t{i}") for i in range(3)], vector_field=FIELD) == 3
+
+        sizes = [len(call.kwargs["data"]) for call in store._async_client.insert.await_args_list]
+        assert sizes == [1, 1, 1]
+
+    async def test_a_file_under_the_budget_is_one_request(self, store: MilvusVectorStore) -> None:
+        store._async_client.insert = AsyncMock(return_value={"insert_count": 30})
+
+        assert await store.upsert([_wide_chunk(i) for i in range(30)], vector_field=FIELD) == 30
+
+        store._async_client.insert.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        ("error", "raised", "message"),
+        [
+            (
+                MilvusException(message="message larger than max"),
+                VDBInsertError,
+                r"Milvus insert failed \(batch 2 of 3\)",
+            ),
+            (RuntimeError("connection reset"), UnexpectedVDBError, r"during Milvus insert \(batch 2 of 3\)"),
+        ],
+    )
+    async def test_a_failed_batch_stops_the_write_and_raises(
+        self, store: MilvusVectorStore, error: Exception, raised: type[Exception], message: str
+    ) -> None:
+        self._limit(store, insert_batch_max_rows=2)
+        store._async_client.insert = AsyncMock(side_effect=[{"insert_count": 2}, error, {"insert_count": 2}])
+
+        with pytest.raises(raised, match=message):
+            await store.upsert([_make_chunk(text=f"t{i}") for i in range(6)], vector_field=FIELD)
+
+        # The third batch is not sent: the caller cleans up a failed file.
+        assert store._async_client.insert.await_count == 2
+
+    async def test_a_cancel_lets_the_batch_in_flight_finish(self, store: MilvusVectorStore) -> None:
+        # Milvus can apply a request its caller gave up on, after the caller's
+        # cleanup deleted the file's rows: the cancel waits for it.
+        self._limit(store, insert_batch_max_rows=2)
+        in_flight, release = asyncio.Event(), asyncio.Event()
+        finished: list[int] = []
+
+        async def insert(**kwargs: Any) -> dict[str, int]:
+            if len(finished) == 1:
+                in_flight.set()
+                await release.wait()
+            finished.append(len(kwargs["data"]))
+            return {"insert_count": len(kwargs["data"])}
+
+        store._async_client.insert = insert
+        write = asyncio.create_task(store.upsert([_make_chunk(text=f"t{i}") for i in range(6)], vector_field=FIELD))
+        try:
+            # Fails instead of hanging if batch 2 never starts.
+            await asyncio.wait_for(in_flight.wait(), timeout=5)
+            for _ in range(2):  # a second cancel does not cut the wait short
+                write.cancel()
+                await asyncio.sleep(0)
+            assert not write.done()
+        finally:
+            release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(write, timeout=5)
+        # Batch 2 finished, and batch 3 was not sent.
+        assert finished == [2, 2]
+
+    async def test_every_batch_carries_the_configured_deadline(
+        self, store: MilvusVectorStore, vdb_config: VectorDBConfig
+    ) -> None:
+        # PyMilvus applies the client's timeout only when connecting: a write
+        # Milvus never answers would otherwise keep a cancel waiting for ever.
+        self._limit(store, insert_batch_max_rows=2)
+        store._async_client.insert = _count_rows()
+        store._async_client.upsert = _count_rows()
+        _section_ids(store, [])
+        entities = [{"_id": i, "text": f"t{i}", "file_id": "f", "partition": "p", FIELD: [0.1] * 8} for i in range(3)]
+
+        await store.upsert([_make_chunk(text=f"t{i}") for i in range(3)], vector_field=FIELD)
+        await store.insert_entities(entities)
+        await store.upsert_entities(entities)
+        await store.write_vectors("vector_bge_m3", {str(i): [0.1, 0.2] for i in range(3)})
+
+        calls = store._async_client.insert.await_args_list + store._async_client.upsert.await_args_list
+        assert len(calls) == 8
+        assert {call.kwargs["timeout"] for call in calls} == {vdb_config.timeout}
+
+    async def test_a_cancelled_request_ends_the_wait(self) -> None:
+        # At shutdown the event loop cancels the request itself; the wait must not outlive it.
+        request = asyncio.ensure_future(asyncio.sleep(3600))
+        caller = asyncio.create_task(_finish_write(request))
+        await asyncio.sleep(0)
+        caller.cancel()
+        await asyncio.sleep(0)
+        request.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(caller, timeout=1)
+
+    @pytest.mark.parametrize(
+        ("method_name", "client_method"),
+        [("insert_entities", "insert"), ("upsert_entities", "upsert")],
+    )
+    async def test_raw_entity_writes_are_batched(
+        self, store: MilvusVectorStore, method_name: str, client_method: str
+    ) -> None:
+        # A copy or a metadata change sends every row of the file, like its indexing did.
+        self._limit(store, insert_batch_max_rows=4)
+        client = _count_rows()
+        setattr(store._async_client, client_method, client)
+        entities = [{"_id": i, "text": f"t{i}", "file_id": "f", "partition": "p", FIELD: [0.1] * 8} for i in range(10)]
+
+        assert await getattr(store, method_name)(entities) == 10
+
+        assert [len(call.kwargs["data"]) for call in client.await_args_list] == [4, 4, 2]
+
+    async def test_vectors_written_to_a_new_field_are_batched(self, store: MilvusVectorStore) -> None:
+        self._limit(store, insert_batch_max_rows=2)
+        _section_ids(store, [])
+        store._async_client.upsert = _count_rows()
+
+        assert await store.write_vectors("vector_bge_m3", {str(i): [0.1, 0.2] for i in range(5)}) == 5
+
+        calls = store._async_client.upsert.await_args_list
+        assert [len(call.kwargs["data"]) for call in calls] == [2, 2, 1]
+        assert all(call.kwargs["partial_update"] is True for call in calls)
+
+    async def test_metadata_under_a_vector_name_is_counted_as_json(self, store: MilvusVectorStore) -> None:
+        # Rows indexed before 2.3.0 can carry metadata keys named like a vector
+        # field; a copy or a metadata change writes them back.
+        store._async_client.upsert = _count_rows()
+        metadata = {"_id": 1, "text": "t", "vector_rank": 5, "vector_tags": ["finance", "2024"], "vector_note": None}
+        row = {**metadata, FIELD: [0.1] * 8}
+
+        assert _estimated_row_bytes(row) == 4 * 8 + len(convert_to_json(metadata))
+        assert await store.upsert_entities([row]) == 1
+
+    def test_the_estimate_is_not_below_the_request_milvus_receives(self) -> None:
+        schema = MilvusClient.create_schema(enable_dynamic_field=True)
+        schema.add_field(field_name="_id", datatype=DataType.INT64, is_primary=True, auto_id=True)
+        schema.add_field(field_name="text", datatype=DataType.VARCHAR, max_length=65_535)
+        schema.add_field(field_name="partition", datatype=DataType.VARCHAR, max_length=65_535, is_partition_key=True)
+        schema.add_field(field_name="file_id", datatype=DataType.VARCHAR, max_length=65_535)
+        schema.add_field(field_name=FIELD, datatype=DataType.FLOAT_VECTOR, dim=1024, nullable=True)
+        schema.add_field(field_name="created_at", datatype=DataType.TIMESTAMPTZ, nullable=True)
+        orders = MilvusVectorStore._gen_chunk_order_metadata(50)
+        rows = [
+            MilvusVectorStore._chunk_to_entity(
+                _wide_chunk(i, dimension=1024), indexed_at="2026-11-24T00:00:00+00:00", order=order, vector_field=FIELD
+            )
+            for i, order in enumerate(orders)
+        ]
+
+        request = Prepare.row_insert_param("c", rows, "", schema.to_dict()["fields"], enable_dynamic=True)
+
+        estimate = sum(_estimated_row_bytes(row) for row in rows)
+        assert request.ByteSize() <= estimate < 1.2 * request.ByteSize()
+
+
+# ---------------------------------------------------------------------------
 # Hybrid dispatch
 # ---------------------------------------------------------------------------
 
@@ -2994,6 +3221,7 @@ class TestWriteVectors:
             # A partial upsert: every field it does not name keeps its value,
             # and None clears the vector. Milvus's primary key is INT64.
             data=[{"_id": 11, "vector_bge_m3": [0.1, 0.2]}, {"_id": 12, "vector_bge_m3": None}],
+            timeout=store._config.timeout,
             partial_update=True,
         )
         store._client.get_server_version.assert_not_called()

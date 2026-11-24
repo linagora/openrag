@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import numbers
 import re
 import secrets
 import time
@@ -301,6 +302,54 @@ def _changed_by_float64(value: Any) -> bool:
 def _json_bytes(value: Any) -> int:
     """Size of *value* using the serializer PyMilvus uses for dynamic fields."""
     return len(convert_to_json(value))
+
+
+def _is_dense_vector(value: Any) -> bool:
+    return isinstance(value, (list, tuple)) and (not value or isinstance(value[0], numbers.Real))
+
+
+def _estimated_row_bytes(entity: Mapping[str, Any]) -> int:
+    """A row's share of an insert or upsert request, erring high.
+
+    A dense vector travels as float32, four bytes a dimension. The rest is
+    counted as JSON, which is what the dynamic fields are sent as, and is larger
+    than the protobuf encoding of the static ones (key names, quotes). A value
+    under a vector field's name that is not a list of numbers is metadata:
+    rows indexed before 2.3.0 can carry such keys.
+    """
+    vector_bytes = 0
+    other: dict[str, Any] = {}
+    for key, value in entity.items():
+        if is_vector_field_key(key) and _is_dense_vector(value):
+            vector_bytes += 4 * len(value)
+        else:
+            other[key] = value
+    try:
+        return vector_bytes + len(convert_to_json(other))
+    except (MilvusException, TypeError, ValueError, RecursionError):
+        # The write reports the real problem; the estimate only has to be large enough.
+        return vector_bytes + len(str(other).encode("utf-8"))
+
+
+async def _finish_write(request: asyncio.Future[Any]) -> Any:
+    """Return the write's result; a cancelled caller waits for the request to finish first.
+
+    Milvus can apply a request whose caller gave up on it, after the caller has
+    deleted what it wrote. The deadline each write carries bounds the wait.
+    """
+    cancelled = False
+    while not request.done():
+        try:
+            await asyncio.shield(request)
+        except asyncio.CancelledError:
+            if request.cancelled():
+                raise  # the event loop is closing and cancelled the request itself
+            cancelled = True
+        except BaseException:
+            break  # the request failed: its error is read below
+    if cancelled:
+        raise asyncio.CancelledError
+    return request.result()
 
 
 def _json_string_bytes(value: str, *, ensure_ascii: bool = False) -> int:
@@ -1406,6 +1455,81 @@ class MilvusVectorStore(VectorStore):
         )
         return entity
 
+    def _write_batches(self, entities: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        """Split *entities* into requests Milvus accepts.
+
+        Milvus refuses a request larger than its ``proxy.grpc.serverMaxRecvSize``
+        (128 MiB by default), and a file's rows are not bounded: one worksheet
+        can make tens of thousands of chunks, about 10 KB each with a
+        1024-dimension vector. Well below that limit, a 56 MiB request put
+        Milvus 3.0.5's WAL rate limiter (``streaming.walRateLimit.recoveryStorage``)
+        into recovery, and the next write waited about a minute. A batch ends
+        before its estimated size passes ``insert_batch_max_bytes`` (16 MiB) or
+        its row count ``insert_batch_max_rows``. A row over the byte budget on
+        its own is sent alone.
+        """
+        max_bytes = self._config.insert_batch_max_bytes
+        max_rows = self._config.insert_batch_max_rows
+        batches: list[list[dict[str, Any]]] = []
+        batch: list[dict[str, Any]] = []
+        batch_bytes = 0
+        for entity in entities:
+            row_bytes = _estimated_row_bytes(entity)
+            if batch and (batch_bytes + row_bytes > max_bytes or len(batch) >= max_rows):
+                batches.append(batch)
+                batch, batch_bytes = [], 0
+            batch.append(entity)
+            batch_bytes += row_bytes
+        if batch:
+            batches.append(batch)
+        return batches
+
+    async def _write_in_batches(
+        self,
+        write: Callable[..., Awaitable[Any]],
+        entities: list[dict[str, Any]],
+        *,
+        operation: str,
+        count_key: str,
+        **kwargs: Any,
+    ) -> int:
+        """Send *entities* through *write*, one batch after the other; return the rows written.
+
+        A failed batch raises, and the batches before it stay written. Indexing
+        and copies mark their rows with the task and delete them by that mark
+        when the task fails, a metadata change writes the file's rows back as
+        they were, and a vector write is completed by sending it again. A cancel stops the write once the batch in flight has
+        finished, so no batch lands after that delete.
+
+        Each batch carries ``vectordb.timeout`` as its deadline: PyMilvus applies
+        the client's own timeout only when connecting, and a write without one
+        would keep a cancel waiting for as long as Milvus does not answer.
+        """
+        batches = self._write_batches(entities)
+        written = 0
+        for number, batch in enumerate(batches, 1):
+            where = f" (batch {number} of {len(batches)})" if len(batches) > 1 else ""
+            try:
+                result = await _finish_write(
+                    asyncio.ensure_future(
+                        write(collection_name=self._collection_name, data=batch, timeout=self._timeout, **kwargs)
+                    )
+                )
+            except MilvusException as e:
+                raise VDBInsertError(
+                    f"Milvus {operation} failed{where}: {e!s}",
+                    collection_name=self._collection_name,
+                ) from e
+            except Exception as e:
+                raise UnexpectedVDBError(
+                    f"Unexpected error during Milvus {operation}{where}: {e!s}",
+                    collection_name=self._collection_name,
+                ) from e
+            # Milvus 3.0 returns {"insert_count": N, "ids": [...], "cost": ...};
+            # count the batch if the server omits the count.
+            written += int(result.get(count_key, len(batch))) if isinstance(result, dict) else len(batch)
+        return written
+
     # ------------------------------------------------------------------
     # VectorStore ABC — writes
     # ------------------------------------------------------------------
@@ -1429,6 +1553,8 @@ class MilvusVectorStore(VectorStore):
         ``indexed_at`` lets the caller pin a single indexation timestamp so the
         Milvus chunks and the Postgres ``files`` row agree; when omitted it
         defaults to the current time (legacy behaviour).
+
+        Large inputs are written in several requests (:meth:`_write_batches`).
         """
         self._resolve_collection(collection)
         if not chunks:
@@ -1457,26 +1583,11 @@ class MilvusVectorStore(VectorStore):
             for c, o in zip(chunks, order_metadata, strict=True)
         ]
 
-        try:
-            result = await self._async_client.insert(
-                collection_name=self._collection_name,
-                data=entities,
-            )
-        except MilvusException as e:
-            raise VDBInsertError(
-                f"Milvus insert failed: {e!s}",
-                collection_name=self._collection_name,
-            ) from e
-        except Exception as e:
-            raise UnexpectedVDBError(
-                f"Unexpected error during Milvus insert: {e!s}",
-                collection_name=self._collection_name,
-            ) from e
-
+        inserted = await self._write_in_batches(
+            self._async_client.insert, entities, operation="insert", count_key="insert_count"
+        )
         await self._flush_new_fields([field])
-        # Milvus 3.0 returns {"insert_count": N, "ids": [...], "cost": ...}.
-        # Fall back to len(entities) if the server omits insert_count.
-        return int(result.get("insert_count", len(entities))) if isinstance(result, dict) else len(entities)
+        return inserted
 
     def _parse_search_response(self, response: Any) -> list[dict[str, Any]]:
         """Normalise a Milvus 3.0 search/hybrid_search response to raw dicts.
@@ -2394,27 +2505,11 @@ class MilvusVectorStore(VectorStore):
         if not entities:
             return 0
         fitted_entities = self._fit_raw_entities(entities, protected_metadata=protected_metadata)
-
-        try:
-            result = await self._async_client.upsert(
-                collection_name=self._collection_name,
-                data=fitted_entities,
-            )
-        except MilvusException as e:
-            raise VDBInsertError(
-                f"Milvus raw entity upsert failed: {e!s}",
-                collection_name=self._collection_name,
-            ) from e
-        except Exception as e:
-            raise UnexpectedVDBError(
-                f"Unexpected error during Milvus raw entity upsert: {e!s}",
-                collection_name=self._collection_name,
-            ) from e
-
-        await self._flush_new_fields(fitted_entities[0])
-        return (
-            int(result.get("upsert_count", len(fitted_entities))) if isinstance(result, dict) else len(fitted_entities)
+        upserted = await self._write_in_batches(
+            self._async_client.upsert, fitted_entities, operation="raw entity upsert", count_key="upsert_count"
         )
+        await self._flush_new_fields(fitted_entities[0])
+        return upserted
 
     async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
         """Partial upsert of ``{_id, field}`` per chunk.
@@ -2468,11 +2563,6 @@ class MilvusVectorStore(VectorStore):
                     rounded.setdefault(str(row.get("file_id")), set()).update(keys)
             if rounded and await self._server_preserves_dynamic_int64():
                 rounded.clear()
-            result = await self._async_client.upsert(
-                collection_name=self._collection_name,
-                data=list(entities.values()),
-                partial_update=True,
-            )
         except MilvusException as e:
             raise VDBInsertError(
                 f"Milvus partial upsert into `{field}` failed: {e!s}",
@@ -2483,6 +2573,15 @@ class MilvusVectorStore(VectorStore):
                 f"Unexpected error during Milvus partial upsert into `{field}`: {e!s}",
                 collection_name=self._collection_name,
             ) from e
+        # Rewriting a batch that went through is harmless: a retry after a
+        # refused batch sends the same vectors again.
+        written = await self._write_in_batches(
+            self._async_client.upsert,
+            list(entities.values()),
+            operation=f"partial upsert into `{field}`",
+            count_key="upsert_count",
+            partial_update=True,
+        )
 
         if rounded:
             logger.bind(
@@ -2494,7 +2593,7 @@ class MilvusVectorStore(VectorStore):
                 "chunk metadata may be rounded by partial upsert. Postgres keeps each file's exact upload metadata."
             )
         await self._flush_new_fields([field])
-        return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
+        return written
 
     async def _server_preserves_dynamic_int64(self) -> bool:
         """Probe Milvus's version; briefly cache failures to avoid serial retries."""
@@ -2544,27 +2643,11 @@ class MilvusVectorStore(VectorStore):
         if not entities:
             return 0
         fitted_entities = self._fit_raw_entities(entities, protected_metadata=protected_metadata)
-
-        try:
-            result = await self._async_client.insert(
-                collection_name=self._collection_name,
-                data=fitted_entities,
-            )
-        except MilvusException as e:
-            raise VDBInsertError(
-                f"Milvus raw entity insert failed: {e!s}",
-                collection_name=self._collection_name,
-            ) from e
-        except Exception as e:
-            raise UnexpectedVDBError(
-                f"Unexpected error during Milvus raw entity insert: {e!s}",
-                collection_name=self._collection_name,
-            ) from e
-
-        await self._flush_new_fields(fitted_entities[0])
-        return (
-            int(result.get("insert_count", len(fitted_entities))) if isinstance(result, dict) else len(fitted_entities)
+        inserted = await self._write_in_batches(
+            self._async_client.insert, fitted_entities, operation="raw entity insert", count_key="insert_count"
         )
+        await self._flush_new_fields(fitted_entities[0])
+        return inserted
 
     async def make_searchable(self, field: str) -> None:
         """Flush, then wait until ``field`` answers a search.
