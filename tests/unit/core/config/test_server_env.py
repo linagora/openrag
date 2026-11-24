@@ -65,3 +65,9 @@ def test_metrics_token_is_left_out_of_repr():
     server = ServerConfig(metrics_token="prom-scrape-secret")
 
     assert "prom-scrape-secret" not in repr(server)
+
+
+def test_preferred_url_scheme_is_normalized_to_lowercase():
+    server = ServerConfig(preferred_url_scheme="HTTPS")
+
+    assert server.preferred_url_scheme == "https"

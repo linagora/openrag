@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from api.dependencies.build_url import build_url
 
 from api.dependencies.auth import (
     check_user_file_quota,
@@ -75,15 +76,6 @@ def _validate_callback_url(callback_url: str | None, config) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="callback_url must be a public http(s) URL",
         )
-
-
-def build_url(request: Request, route_name: str, *, preferred_url_scheme: str | None = None, **path_params) -> str:
-    """Build a URL using the preferred scheme if configured."""
-    url = request.url_for(route_name, **path_params)
-    if preferred_url_scheme:
-        url = url.replace(scheme=preferred_url_scheme)
-    return str(url)
-
 
 async def _point_conflict_at_running_task(
     exc: BaseException,
