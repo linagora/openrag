@@ -13,6 +13,7 @@ import asyncio
 
 from core.indexing.image_preprocessor import normalize_data_uri_images
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
+from selectolax.lexbor import LexborHTMLParser
 
 from ..text_preprocessor import decode_bytes
 from .document_parser import DocumentParser
@@ -60,4 +61,5 @@ class HtmlParser(DocumentParser):
     def _to_markdown(html: str) -> str:
         from html_to_markdown import convert
 
-        return convert(html)
+        normalized_html = LexborHTMLParser(html).html
+        return convert(normalized_html)
