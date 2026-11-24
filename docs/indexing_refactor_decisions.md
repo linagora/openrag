@@ -128,7 +128,7 @@ Choices made in the indexing refactor (#1428, #1429, #1430, #1431 and the issues
 
 - **Decision:** `OriginalsCleaner` deletes a path, with its `.md`, only if it resolves under `data_dir` (symlinks followed) and `referenced_sources` no longer names it. The `.md` is checked too, and a `.md` stays while its upload is referenced. If the check fails, the whole batch stays.
 - **Why:** a copy keeps its source's `source`, possibly in another partition. The resolve keeps a bad path from reaching outside the data directory.
-- **Impact:** an MCP `index_url` original, which sits in the node's temp directory, is never deleted by this change. It's kept only with `SAVE_UPLOADED_FILES=true`, until #1474 (closing #1003) moves it into `data_dir`.
+- **Impact:** since #1474 (closing #1003), an MCP `index_url` download is stored in `data_dir` like an upload, and deleted like one. A URL indexed before that kept its download in the node's temp directory, which is left alone.
 
 ## D11. Originals are deleted only with `FILE_FENCES=postgres`
 

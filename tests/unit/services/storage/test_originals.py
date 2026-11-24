@@ -102,8 +102,8 @@ async def test_a_missing_original_is_not_an_error(data_dir):
 
 
 async def test_never_deletes_outside_the_data_directory(data_dir, tmp_path):
-    outside = tmp_path / "index_url_download.pdf"
-    outside.write_bytes(b"temp download")
+    outside = tmp_path / "earlier_data_dir_upload.pdf"
+    outside.write_bytes(b"content")
     cleaner = OriginalsCleaner(FakeDocumentRepo(), data_dir)
     assert await cleaner.delete_unreferenced([str(outside), str(data_dir)]) == 0
     assert outside.exists() and data_dir.is_dir()

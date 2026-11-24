@@ -14,8 +14,8 @@ Two rules make that safe:
   just before the delete. That holds for each file deleted: an original, its
   ``.md`` copy, and a ``.md`` copy whose upload a row still references.
 * **Only under ``data_dir``.** The path is resolved, symlinks included, and
-  must stay inside it. Anything else (an MCP ``index_url`` download in the
-  node's temp directory, a row from an older ``DATA_DIR``) is left alone.
+  must stay inside it. Anything else (a row from an older ``DATA_DIR``, or a
+  URL MCP indexed before its downloads moved into it) is left alone.
 
 Deleting is best effort: it runs after the user's operation has committed, so
 a failure is logged and the file stays, for the orphan script to find later.
