@@ -103,7 +103,7 @@ _MAX_TERMINAL_TASKS = 2_000
 # backlog if catalog persistence stops after tasks have been admitted.
 _MAX_RESERVED_JOB_OUTCOMES = 2_000
 _DEFAULT_MAX_ADMITTED_BYTES = 1_073_741_824
-_UPLOAD_ADMISSION_RESERVATION_TTL_SECONDS = 30 * 60
+_UPLOAD_ADMISSION_RESERVATION_TTL_SECONDS = 5 * 60
 _UPLOAD_RESERVED_STATE = "UPLOAD_RESERVED"
 _MAX_TASK_ERROR_CHARS = 8_000
 STALE_REFLESS_TASK_ERROR = (
@@ -938,10 +938,9 @@ class TaskStateManager:
         nothing else would settle its record, and its pickup is refused anyway.
         A cancellation keeps its state, which refuses the pickup already.
         """
-        abandoned = getattr(info, "worker_abandoned", False)
         baseline = getattr(info, "worker_restarts_baseline", None)
         settled = _worker_ref_has_settled(info) if ignore_finished_stamp else _worker_has_settled(info)
-        if abandoned or not getattr(info, "worker_abandoned", False):
+        if not getattr(info, "worker_abandoned", False):
             if baseline is None and getattr(info, "worker_restarts_baseline", None) is not None:
                 # A baseline taken from a fresh read must survive a restart of
                 # this actor, or a later read would stand in for it.
@@ -962,6 +961,12 @@ class TaskStateManager:
             info = self.tasks.get(task_id)
             if info is not None:
                 self._expire_refless_task_if_stale_locked(task_id, info)
+
+    def _settle_abandoned_admission_tasks_locked(self) -> None:
+        """Persist worker-abandoned active tasks before counting admission usage."""
+        for task_id, info in list(self.tasks.items()):
+            if info.state in CANCELLABLE_INDEXING_STATES:
+                self._worker_settled_locked(task_id, info)
 
     @ray.method(concurrency_group="set")
     async def begin_file_delete(self, *, partition: str, file_id: str, fence_id: str | None = None) -> None:
@@ -1224,6 +1229,7 @@ class TaskStateManager:
         """Reserve shared count and byte capacity before an upload is copied to disk."""
         with self.lock:
             self._expire_upload_reservations_locked()
+            self._settle_abandoned_admission_tasks_locked()
             self._evict_terminal_tasks_locked()
             existing = self.tasks.get(task_id)
             if existing is not None:
@@ -1410,6 +1416,7 @@ class TaskStateManager:
         max_admitted_bytes: int | None,
     ) -> dict[str, Any]:
         self._expire_upload_reservations_locked()
+        self._settle_abandoned_admission_tasks_locked()
         previous = self.tasks.get(task_id)
         if require_upload_reservation and previous is None:
             return _queue_refused(QUEUE_REFUSED_UPLOAD_RESERVATION_EXPIRED)
@@ -1741,11 +1748,14 @@ class TaskStateManager:
     @ray.method(concurrency_group="get")
     async def get_state(self, task_id: str) -> str | None:
         with self.lock:
+            self._expire_upload_reservations_locked()
             self._evict_terminal_tasks_locked()
             info = self.tasks.get(task_id)
             if info is not None:
                 self._expire_refless_task_if_stale_locked(task_id, info)
-            return info.state if info else None
+            if info is None or info.state == _UPLOAD_RESERVED_STATE:
+                return None
+            return info.state
 
     @ray.method(concurrency_group="get")
     async def get_error(self, task_id: str) -> str | None:

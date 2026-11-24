@@ -9,6 +9,7 @@ def test_ray_indexer_config_defaults() -> None:
     cfg = RayIndexerConfig()
     assert cfg.pool_size == 1
     assert cfg.max_tasks_per_worker == 50
+    assert cfg.max_admitted_tasks == 50
 
 
 @pytest.mark.parametrize("field", ["pool_size", "max_tasks_per_worker"])

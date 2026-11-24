@@ -45,7 +45,7 @@ space`, choose an unused range and set `OPENRAG_COMPOSE_SUBNET`,
 TLS overlay, set `OPENRAG_NPM_PROXY_IP` as well. Keep both proxy addresses
 inside the subnet and outside the dynamic range.
 
-## Bounded indexing admission
+## Bounded indexing admission (v2.3.6)
 
 Before upgrading, set `MAX_UPLOAD_SIZE_MB` to a positive value no larger than
 `RAY_MAX_ADMITTED_BYTES` in MiB. Earlier deployments may have used zero or a
@@ -53,12 +53,14 @@ negative value for unlimited uploads, or allowed files larger than the new
 shared budget. Update those settings before starting the new version, otherwise
 the API stops at startup with a configuration error.
 
-The default admission limit is 50 indexing tasks at a time. When capacity is
-full, uploads receive `429` with a `Retry-After` header. Update bulk API clients
-to wait and retry refused uploads, or configure a different task limit for the
-deployment. The byte limit applies after the API has received the multipart
-upload. Temporary files used while receiving requests need separate storage
-capacity and are outside this limit.
+The default admission limit is 50 queued plus running indexing tasks across all
+partitions and API replicas. A busy partition can temporarily fill this shared
+budget, so uploads from other partitions may also receive `429` with a
+`Retry-After` header. Update bulk API clients to wait and retry refused uploads,
+or configure a different task limit for the deployment. Stale upload
+reservations expire after five minutes. The byte limit applies after the API
+has received the multipart upload. Temporary files used while receiving
+requests need separate storage capacity and are outside this limit.
 
 Before deploying this version, stop new uploads and wait for all indexing jobs to
 finish. Stop all old API replicas before starting the new version. The upgrade

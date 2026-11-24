@@ -2622,6 +2622,27 @@ async def test_a_queued_orphan_settled_by_a_restart_is_refused_at_pickup(clock, 
 
 
 @pytest.mark.asyncio
+async def test_admission_scan_records_failure_when_it_first_observes_abandoned_queued_task(clock, actor_table) -> None:
+    manager = _task_state_manager()
+    await _orphaned_queued_task_for_file_1(manager, restarts_at_submission=0)
+    actor_table.alive = False
+
+    admission = await manager.reserve_upload_admission(
+        "upload-2",
+        file_id="file-2",
+        partition="tenant-a",
+        admitted_bytes=1,
+        max_admitted_tasks=2,
+        max_admitted_bytes=10,
+    )
+
+    assert admission["accepted"] is True
+    assert await manager.get_state("task-1") == "FAILED"
+    assert await manager.get_error("task-1") == task_state_module.ABANDONED_QUEUED_TASK_ERROR
+    assert await manager.get_active_indexing_task_for_file(partition="tenant-a", file_id="file-1") is None
+
+
+@pytest.mark.asyncio
 async def test_a_queued_orphan_settled_by_has_worker_settled_is_refused_at_pickup(clock, actor_table) -> None:
     manager = _task_state_manager()
     await _orphaned_queued_task_for_file_1(manager, restarts_at_submission=0)
@@ -2861,6 +2882,18 @@ async def test_upload_renewal_reports_delete_after_reservation(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_upload_reservation_is_hidden_from_task_state() -> None:
+    manager = _task_state_manager()
+    assert (
+        await manager.reserve_upload_admission(
+            "upload-1", file_id="file-1", partition="tenant-a", admitted_bytes=1
+        )
+    )["accepted"]
+
+    assert await manager.get_state("upload-1") is None
+
+
+@pytest.mark.asyncio
 async def test_upload_admission_enforces_count_and_bytes_and_releases_capacity() -> None:
     manager = _task_state_manager()
 
@@ -3008,7 +3041,7 @@ async def test_expired_upload_reservation_cannot_transfer_and_releases_capacity(
             "old", file_id="old", partition="tenant-a", admitted_bytes=4, max_admitted_tasks=1, max_admitted_bytes=4
         )
     )["accepted"]
-    clock.now += task_state_module._UPLOAD_ADMISSION_RESERVATION_TTL_SECONDS + 1
+    clock.now += 5 * 60 + 1
     result = await manager.set_queued_details_v2(
         "old", file_id="old", partition="tenant-a", metadata={}, user_id=1, require_upload_reservation=True
     )

@@ -340,8 +340,8 @@ ray:
     # Indexing capacity = pool_size (worker actors) × max_tasks_per_worker (files per worker).
     pool_size: 1
     max_tasks_per_worker: 50
-    # Unset uses the worker execution capacity; raise only to allow a bounded queue.
-    max_admitted_tasks: null
+    # Shared maximum queued plus running indexing tasks across partitions.
+    max_admitted_tasks: 50
     # Keep this >= MAX_UPLOAD_SIZE_MB; reduce that limit and drain old API
     # replicas before lowering this cap.
     max_admitted_bytes: 1073741824

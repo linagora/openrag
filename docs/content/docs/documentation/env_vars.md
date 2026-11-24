@@ -588,7 +588,7 @@ Ray is used for distributed task processing and parallel execution in the RAG pi
 |----------|------|---------|-------------|
 | `RAY_POOL_SIZE` | `int` | 1 | Number of indexer worker actors in the pool. Total indexing capacity = `RAY_POOL_SIZE` × `RAY_MAX_TASKS_PER_WORKER`. |
 | `RAY_MAX_TASKS_PER_WORKER` | `int` | 50 | Maximum number of files processed concurrently per indexer worker actor |
-| `RAY_MAX_ADMITTED_TASKS` | `int` | worker-pool capacity | Maximum active indexing tasks across API replicas. Unset means `RAY_POOL_SIZE` × `RAY_MAX_TASKS_PER_WORKER`; raising it allows a bounded worker queue. |
+| `RAY_MAX_ADMITTED_TASKS` | `int` | `50` | Maximum queued plus running indexing tasks across all partitions and API replicas. Saturated capacity returns `429` with `Retry-After`; bulk clients should wait and retry. |
 | `RAY_MAX_ADMITTED_BYTES` | `int` | 1,073,741,824 | Maximum aggregate raw upload bytes reserved by active indexing tasks. A single file above this limit is rejected with `413`; saturated capacity returns `429` with `Retry-After`. Keep it at least as large as `MAX_UPLOAD_SIZE_MB` × 1 MiB. Before lowering it, first lower `MAX_UPLOAD_SIZE_MB` on every API replica and drain old replicas. This does not estimate parser memory expansion. |
 | `RAY_DASHBOARD_PORT` | `int` | 8265 | Host port the Compose overlay `ray-dashboard.docker-compose.yaml` publishes the embedded Ray dashboard on, on `127.0.0.1`; inside the container the dashboard listens on Ray's default, 8265. In a [Ray cluster](/openrag/documentation/deploy_ray_cluster/), it is also the head node's `--dashboard-port`. The base Compose file does not publish the dashboard. See [Ray dashboard](/openrag/installation/docker/#ray-dashboard). |
 | `RAY_DASHBOARD_HOST` | `str` | `127.0.0.1` | Interface the **embedded** Ray dashboard binds to. Defaults to loopback because the Ray dashboard/job-submission API is **unauthenticated** ([CVE-2023-48022](https://nvd.nist.gov/vuln/detail/CVE-2023-48022)). Set to `0.0.0.0` only when the dashboard port is firewalled or sits behind an authenticating proxy. The Compose overlay `ray-dashboard.docker-compose.yaml` sets it to `0.0.0.0`, since a published port does not reach the container's loopback. Ignored when `RAY_ADDRESS` is set. |
@@ -608,7 +608,7 @@ The following environment variables control Ray's logging behavior, task retry s
 | `RAY_ENABLE_UV_RUN_RUNTIME_ENV` | `number` | `0` | Controls UV runtime environment integration. **Critical**: Must be set to `0` when using the newest version of UV to avoid compatibility issues. |
 |`RAY_memory_monitor_refresh_ms`| `number` | 250 ms | To control the frequency of memory usage checks and task or actor termination if needed. If you set this value to 0, task killing is disabled. |
 
-Keep `RAY_MAX_ADMITTED_TASKS` and `RAY_MAX_ADMITTED_BYTES` identical across API replicas. New limits apply on the next reservation: raising them makes capacity available while jobs are active, while lowering them blocks new admission until current usage fits.
+Keep `RAY_MAX_ADMITTED_TASKS` and `RAY_MAX_ADMITTED_BYTES` identical across API replicas. The task limit is shared across partitions, so one busy partition can temporarily fill the budget for others. New limits apply on the next reservation: raising them makes capacity available while jobs are active, while lowering them blocks new admission until current usage fits. Stale upload reservations expire after five minutes.
 
 #### Ray Serve Configuration
 
