@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
@@ -128,6 +129,7 @@ _RECENT_AUTHENTICATED_TOKEN_CACHE_MAX_ENTRIES = 1024
 _CredentialKind = Literal["session", "token"]
 _Credential = tuple[str, _CredentialKind]
 _Authenticated = tuple[Any, Any]
+_GENERATED_USER_TOKEN_PATTERN = re.compile(r"or-[0-9a-f]{32}")
 
 
 class AuthFailureRateLimiter:
@@ -250,6 +252,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         return True
 
     def _remember_authenticated_token(self, identity: str, token: str, kind: _CredentialKind) -> None:
+        if kind == "token" and _GENERATED_USER_TOKEN_PATTERN.fullmatch(token) is None:
+            return
+
         cache_key = (identity, self._token_fingerprint(token), kind)
         now = time.monotonic()
         cache = self._recently_authenticated_tokens

@@ -27,6 +27,8 @@ from core.config.auth import (
 from fastapi import FastAPI, Request
 from starlette.responses import Response
 
+_GENERATED_TOKEN = "or-0123456789abcdef0123456789abcdef"
+
 # ---------------------------------------------------------------------------
 # Defaults match the legacy hardcoded sets
 # ---------------------------------------------------------------------------
@@ -372,7 +374,7 @@ async def test_failed_bearer_limit_blocks_before_token_lookup(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_only_recently_authenticated_tokens_pass_exhausted_failure_bucket(monkeypatch) -> None:
+async def test_only_generated_recent_tokens_pass_exhausted_failure_bucket(monkeypatch) -> None:
     from unittest.mock import AsyncMock
 
     monkeypatch.setenv("AUTH_MODE", "token")
@@ -383,32 +385,37 @@ async def test_only_recently_authenticated_tokens_pass_exhausted_failure_bucket(
     user = {"id": 7, "display_name": "Token User"}
 
     async def get_user(token):
-        return user if token in {"known-user-token", "configured-admin-token"} else None
+        return user if token in {_GENERATED_TOKEN, "configured-admin-token"} else None
 
     svc = type("S", (), {})()
     svc.get_user_by_token_for_request = AsyncMock(side_effect=get_user)
     svc.list_user_partitions_for_request = AsyncMock(return_value=[])
     middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
 
-    known_token = await middleware.dispatch(
-        _request(headers={"authorization": "Bearer known-user-token"}), _unused_call_next
+    generated_token = await middleware.dispatch(
+        _request(headers={"authorization": f"Bearer {_GENERATED_TOKEN}"}), _unused_call_next
     )
-    failed_token = await middleware.dispatch(_request(headers={"authorization": "Bearer bad-token"}), _unused_call_next)
-    known_token_after_lockout = await middleware.dispatch(
-        _request(headers={"authorization": "Bearer known-user-token"}), _unused_call_next
-    )
-    never_seen_admin_token = await middleware.dispatch(
+    hand_chosen_token = await middleware.dispatch(
         _request(headers={"authorization": "Bearer configured-admin-token"}), _unused_call_next
     )
+    failed_token = await middleware.dispatch(_request(headers={"authorization": "Bearer bad-token"}), _unused_call_next)
+    hand_chosen_token_after_lockout = await middleware.dispatch(
+        _request(headers={"authorization": "Bearer configured-admin-token"}), _unused_call_next
+    )
+    generated_token_after_lockout = await middleware.dispatch(
+        _request(headers={"authorization": f"Bearer {_GENERATED_TOKEN}"}), _unused_call_next
+    )
 
-    assert known_token.status_code == 200
+    assert generated_token.status_code == 200
+    assert hand_chosen_token.status_code == 200
     assert failed_token.status_code == 403
-    assert known_token_after_lockout.status_code == 200
-    assert never_seen_admin_token.status_code == 429
+    assert hand_chosen_token_after_lockout.status_code == 429
+    assert generated_token_after_lockout.status_code == 200
     assert [call.args[0] for call in svc.get_user_by_token_for_request.await_args_list] == [
-        "known-user-token",
+        _GENERATED_TOKEN,
+        "configured-admin-token",
         "bad-token",
-        "known-user-token",
+        _GENERATED_TOKEN,
     ]
 
 
@@ -424,7 +431,7 @@ async def test_recently_authenticated_token_does_not_bypass_another_ip_bucket(mo
     user = {"id": 7, "display_name": "Token User"}
 
     async def get_user(token):
-        return user if token == "known-user-token" else None
+        return user if token == _GENERATED_TOKEN else None
 
     svc = type("S", (), {})()
     svc.get_user_by_token_for_request = AsyncMock(side_effect=get_user)
@@ -433,7 +440,7 @@ async def test_recently_authenticated_token_does_not_bypass_another_ip_bucket(mo
 
     known_token = await middleware.dispatch(
         _request(
-            headers={"authorization": "Bearer known-user-token"},
+            headers={"authorization": f"Bearer {_GENERATED_TOKEN}"},
             client=("192.0.2.10", 12345),
         ),
         _unused_call_next,
@@ -444,7 +451,7 @@ async def test_recently_authenticated_token_does_not_bypass_another_ip_bucket(mo
     )
     cross_ip_token = await middleware.dispatch(
         _request(
-            headers={"authorization": "Bearer known-user-token"},
+            headers={"authorization": f"Bearer {_GENERATED_TOKEN}"},
             client=("192.0.2.20", 12345),
         ),
         _unused_call_next,
@@ -454,7 +461,7 @@ async def test_recently_authenticated_token_does_not_bypass_another_ip_bucket(mo
     assert failed_token.status_code == 403
     assert cross_ip_token.status_code == 429
     assert [call.args[0] for call in svc.get_user_by_token_for_request.await_args_list] == [
-        "known-user-token",
+        _GENERATED_TOKEN,
         "bad-token",
     ]
 
@@ -475,9 +482,9 @@ async def test_concurrent_revoked_token_requests_share_one_lookup(monkeypatch) -
     user = {"id": 7, "display_name": "Token User"}
 
     async def get_user(token):
-        if token == "known-user-token" and token_is_valid:
+        if token == _GENERATED_TOKEN and token_is_valid:
             return user
-        if token == "known-user-token":
+        if token == _GENERATED_TOKEN:
             lookup_started.set()
             await finish_lookup.wait()
         return None
@@ -489,7 +496,7 @@ async def test_concurrent_revoked_token_requests_share_one_lookup(monkeypatch) -
     client = ("192.0.2.30", 12345)
 
     known = await middleware.dispatch(
-        _request(headers={"authorization": "Bearer known-user-token"}, client=client), _unused_call_next
+        _request(headers={"authorization": f"Bearer {_GENERATED_TOKEN}"}, client=client), _unused_call_next
     )
     failed = await middleware.dispatch(
         _request(headers={"authorization": "Bearer bad-token"}, client=client), _unused_call_next
@@ -501,7 +508,7 @@ async def test_concurrent_revoked_token_requests_share_one_lookup(monkeypatch) -
     tasks = [
         asyncio.create_task(
             middleware.dispatch(
-                _request(headers={"authorization": "Bearer known-user-token"}, client=client), _unused_call_next
+                _request(headers={"authorization": f"Bearer {_GENERATED_TOKEN}"}, client=client), _unused_call_next
             )
         )
     ]
@@ -511,7 +518,7 @@ async def test_concurrent_revoked_token_requests_share_one_lookup(monkeypatch) -
         original_cache_check = middleware._has_recently_authenticated_token
 
         def count_second_precheck(identity, credential, kind):
-            if credential == "known-user-token":
+            if credential == _GENERATED_TOKEN:
                 second_precheck_seen.set()
             return original_cache_check(identity, credential, kind)
 
@@ -519,7 +526,7 @@ async def test_concurrent_revoked_token_requests_share_one_lookup(monkeypatch) -
         tasks.append(
             asyncio.create_task(
                 middleware.dispatch(
-                    _request(headers={"authorization": "Bearer known-user-token"}, client=client), _unused_call_next
+                    _request(headers={"authorization": f"Bearer {_GENERATED_TOKEN}"}, client=client), _unused_call_next
                 )
             )
         )
@@ -533,9 +540,9 @@ async def test_concurrent_revoked_token_requests_share_one_lookup(monkeypatch) -
 
     assert [response.status_code for response in responses] == [429, 429]
     assert [call.args[0] for call in svc.get_user_by_token_for_request.await_args_list] == [
-        "known-user-token",
+        _GENERATED_TOKEN,
         "bad-token",
-        "known-user-token",
+        _GENERATED_TOKEN,
     ]
     assert middleware._credential_locks == {}
 
@@ -553,21 +560,21 @@ async def test_revoked_recent_token_is_removed_after_failed_revalidation(monkeyp
     user = {"id": 7, "display_name": "Token User"}
 
     async def get_user(token):
-        return user if token == "known-user-token" and token_is_valid else None
+        return user if token == _GENERATED_TOKEN and token_is_valid else None
 
     svc = type("S", (), {})()
     svc.get_user_by_token_for_request = AsyncMock(side_effect=get_user)
     svc.list_user_partitions_for_request = AsyncMock(return_value=[])
     middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
 
-    first = await middleware.dispatch(_request(headers={"authorization": "Bearer known-user-token"}), _unused_call_next)
+    first = await middleware.dispatch(_request(headers={"authorization": f"Bearer {_GENERATED_TOKEN}"}), _unused_call_next)
     failed = await middleware.dispatch(_request(headers={"authorization": "Bearer bad-token"}), _unused_call_next)
     token_is_valid = False
     revoked = await middleware.dispatch(
-        _request(headers={"authorization": "Bearer known-user-token"}), _unused_call_next
+        _request(headers={"authorization": f"Bearer {_GENERATED_TOKEN}"}), _unused_call_next
     )
     revoked_retry = await middleware.dispatch(
-        _request(headers={"authorization": "Bearer known-user-token"}), _unused_call_next
+        _request(headers={"authorization": f"Bearer {_GENERATED_TOKEN}"}), _unused_call_next
     )
 
     assert first.status_code == 200
@@ -575,9 +582,9 @@ async def test_revoked_recent_token_is_removed_after_failed_revalidation(monkeyp
     assert revoked.status_code == 429
     assert revoked_retry.status_code == 429
     assert [call.args[0] for call in svc.get_user_by_token_for_request.await_args_list] == [
-        "known-user-token",
+        _GENERATED_TOKEN,
         "bad-token",
-        "known-user-token",
+        _GENERATED_TOKEN,
     ]
 
 
@@ -588,14 +595,14 @@ def test_recent_token_cache_covers_late_failure_window(monkeypatch) -> None:
 
     now = [100.0]
     monkeypatch.setattr("api.middleware.auth.time.monotonic", lambda: now[0])
-    middleware._remember_authenticated_token("ip:unknown", "known-user-token", "token")
+    middleware._remember_authenticated_token("ip:unknown", _GENERATED_TOKEN, "token")
 
     # A failure bucket can fill at the end of the first 60-second window and
     # remain exhausted until that last failure expires near the 120-second mark.
     now[0] = 219.9
-    assert middleware._has_recently_authenticated_token("ip:unknown", "known-user-token", "token")
+    assert middleware._has_recently_authenticated_token("ip:unknown", _GENERATED_TOKEN, "token")
     now[0] = 220.0
-    assert not middleware._has_recently_authenticated_token("ip:unknown", "known-user-token", "token")
+    assert not middleware._has_recently_authenticated_token("ip:unknown", _GENERATED_TOKEN, "token")
 
 
 def test_recent_token_cache_evicts_oldest_entry_at_capacity(monkeypatch) -> None:
@@ -605,11 +612,11 @@ def test_recent_token_cache_evicts_oldest_entry_at_capacity(monkeypatch) -> None
     identity = "ip:unknown"
 
     for index in range(1025):
-        middleware._remember_authenticated_token(identity, f"token-{index}", "token")
+        middleware._remember_authenticated_token(identity, f"or-{index:032x}", "token")
 
     assert len(middleware._recently_authenticated_tokens) == 1024
-    assert not middleware._has_recently_authenticated_token(identity, "token-0", "token")
-    assert middleware._has_recently_authenticated_token(identity, "token-1024", "token")
+    assert not middleware._has_recently_authenticated_token(identity, f"or-{0:032x}", "token")
+    assert middleware._has_recently_authenticated_token(identity, f"or-{1024:032x}", "token")
 
 
 def test_recent_token_cache_purges_expired_entries_in_validation_order(monkeypatch) -> None:
@@ -620,16 +627,16 @@ def test_recent_token_cache_purges_expired_entries_in_validation_order(monkeypat
 
     now = [100.0]
     monkeypatch.setattr("api.middleware.auth.time.monotonic", lambda: now[0])
-    middleware._remember_authenticated_token(identity, "older", "token")
+    middleware._remember_authenticated_token(identity, "or-00000000000000000000000000000002", "token")
     now[0] = 110.0
-    middleware._remember_authenticated_token(identity, "newer", "token")
-    assert middleware._has_recently_authenticated_token(identity, "older", "token")
+    middleware._remember_authenticated_token(identity, "or-00000000000000000000000000000003", "token")
+    assert middleware._has_recently_authenticated_token(identity, "or-00000000000000000000000000000002", "token")
 
     now[0] = 220.0
-    middleware._remember_authenticated_token(identity, "latest", "token")
+    middleware._remember_authenticated_token(identity, "or-00000000000000000000000000000004", "token")
 
     assert len(middleware._recently_authenticated_tokens) == 2
-    assert middleware._has_recently_authenticated_token(identity, "newer", "token")
+    assert middleware._has_recently_authenticated_token(identity, "or-00000000000000000000000000000003", "token")
 
 
 @pytest.mark.asyncio
@@ -684,8 +691,8 @@ async def test_oidc_cookie_miss_preserves_programmatic_token_eligibility(monkeyp
     svc.get_user_by_token_for_request = AsyncMock(return_value={"id": 7})
     svc.list_user_partitions_for_request = AsyncMock(return_value=[])
     middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
-    bearer = _request(headers={"authorization": "Bearer programmatic-token"})
-    cookie = _request(path="/", headers={"cookie": f"{SESSION_COOKIE_NAME}=programmatic-token"})
+    bearer = _request(headers={"authorization": f"Bearer {_GENERATED_TOKEN}"})
+    cookie = _request(path="/", headers={"cookie": f"{SESSION_COOKIE_NAME}={_GENERATED_TOKEN}"})
 
     assert (await middleware.dispatch(bearer, _unused_call_next)).status_code == 200
     assert (await middleware.dispatch(cookie, _unused_call_next)).status_code == 302
@@ -960,15 +967,15 @@ async def test_oidc_bearer_fallback_rechecks_eligibility_after_cookie_lookup(mon
     svc.get_user_by_token_for_request = AsyncMock(return_value={"id": 7})
     svc.list_user_partitions_for_request = AsyncMock(return_value=[])
     middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
-    request = _request(path="/", headers={"cookie": f"{SESSION_COOKIE_NAME}=cookie", "authorization": "Bearer bearer"})
+    request = _request(path="/", headers={"cookie": f"{SESSION_COOKIE_NAME}=cookie", "authorization": f"Bearer {_GENERATED_TOKEN}"})
     limiter = middleware._auth_failure_limiter
     identity = limiter._identity(request)
     middleware._remember_authenticated_token(identity, "cookie", "session")
-    middleware._remember_authenticated_token(identity, "bearer", "token")
+    middleware._remember_authenticated_token(identity, _GENERATED_TOKEN, "token")
     await limiter.record_failure(request)
 
     async def lookup_cookie(_token):
-        middleware._forget_authenticated_token(identity, "bearer", "token")
+        middleware._forget_authenticated_token(identity, _GENERATED_TOKEN, "token")
         return None
 
     svc.get_oidc_session_by_token_for_request = AsyncMock(side_effect=lookup_cookie)
@@ -979,10 +986,10 @@ async def test_oidc_bearer_fallback_rechecks_eligibility_after_cookie_lookup(mon
 
     if bucket_reopened:
         assert response.status_code == 200
-        svc.get_user_by_token_for_request.assert_awaited_once_with("bearer")
+        svc.get_user_by_token_for_request.assert_awaited_once_with(_GENERATED_TOKEN)
         assert [call.args[0] for call in svc.get_oidc_session_by_token_for_request.await_args_list] == [
             "cookie",
-            "bearer",
+            _GENERATED_TOKEN,
         ]
     else:
         assert response.status_code == 429
@@ -1046,10 +1053,10 @@ async def test_cookie_precedence_is_restored_if_bucket_reopens_during_bearer_loo
     middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
     request = _request(
         path="/indexer/files",
-        headers={"cookie": f"{SESSION_COOKIE_NAME}=valid-cookie", "authorization": "Bearer api-token"},
+        headers={"cookie": f"{SESSION_COOKIE_NAME}=valid-cookie", "authorization": f"Bearer {_GENERATED_TOKEN}"},
     )
     limiter = middleware._auth_failure_limiter
-    middleware._remember_authenticated_token(limiter._identity(request), "api-token", "token")
+    middleware._remember_authenticated_token(limiter._identity(request), _GENERATED_TOKEN, "token")
     monkeypatch.setattr(limiter, "is_limited", AsyncMock(side_effect=[True, True, False]))
 
     async def return_user_id(req):
@@ -1059,7 +1066,7 @@ async def test_cookie_precedence_is_restored_if_bucket_reopens_during_bearer_loo
 
     assert response.status_code == 200
     assert response.body == b"1"
-    svc.get_user_by_token_for_request.assert_awaited_once_with("api-token")
+    svc.get_user_by_token_for_request.assert_awaited_once_with(_GENERATED_TOKEN)
     svc.get_oidc_session_by_token_for_request.assert_awaited_once_with("valid-cookie")
 
 
@@ -1079,7 +1086,7 @@ async def test_successful_cached_cookie_needs_no_lower_priority_retry(monkeypatc
     middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
     request = _request(
         path="/indexer/files",
-        headers={"cookie": f"{SESSION_COOKIE_NAME}=valid-cookie", "authorization": "Bearer api-token"},
+        headers={"cookie": f"{SESSION_COOKIE_NAME}=valid-cookie", "authorization": f"Bearer {_GENERATED_TOKEN}"},
     )
     limiter = middleware._auth_failure_limiter
     middleware._remember_authenticated_token(limiter._identity(request), "valid-cookie", "session")
@@ -1158,8 +1165,8 @@ async def test_failed_cached_oidc_ui_credential_rechecks_failure_bucket(monkeypa
     ("recent", "status", "lookups"),
     [
         ((("cookie", "session"),), 429, ["cookie"]),
-        ((("bearer", "token"),), 200, []),
-        ((("cookie", "session"), ("bearer", "token")), 200, ["cookie"]),
+        (((_GENERATED_TOKEN, "token"),), 200, []),
+        ((("cookie", "session"), (_GENERATED_TOKEN, "token")), 200, ["cookie"]),
     ],
 )
 async def test_oidc_lockout_only_validates_cached_credentials(monkeypatch, recent, status, lookups) -> None:
@@ -1174,7 +1181,7 @@ async def test_oidc_lockout_only_validates_cached_credentials(monkeypatch, recen
     svc.list_user_partitions_for_request = AsyncMock(return_value=[])
     middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
 
-    request = _request(headers={"cookie": f"{SESSION_COOKIE_NAME}=cookie", "authorization": "Bearer bearer"})
+    request = _request(headers={"cookie": f"{SESSION_COOKIE_NAME}=cookie", "authorization": f"Bearer {_GENERATED_TOKEN}"})
     limiter = middleware._auth_failure_limiter
     await limiter.record_failure(request)
     for token, kind in recent:
@@ -1187,7 +1194,7 @@ async def test_oidc_lockout_only_validates_cached_credentials(monkeypatch, recen
     if status == 429:
         svc.get_user_by_token_for_request.assert_not_awaited()
     else:
-        svc.get_user_by_token_for_request.assert_awaited_once_with("bearer")
+        svc.get_user_by_token_for_request.assert_awaited_once_with(_GENERATED_TOKEN)
 
 
 @pytest.mark.asyncio
@@ -1205,7 +1212,7 @@ async def test_lockout_rechecks_bucket_and_only_uses_locked_credentials(monkeypa
     svc.list_user_partitions_for_request = AsyncMock(return_value=[])
     middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
 
-    request = _request(headers={"cookie": f"{SESSION_COOKIE_NAME}=cookie", "authorization": "Bearer bearer"})
+    request = _request(headers={"cookie": f"{SESSION_COOKIE_NAME}=cookie", "authorization": f"Bearer {_GENERATED_TOKEN}"})
     limiter = middleware._auth_failure_limiter
     await limiter.record_failure(request)
     middleware._remember_authenticated_token(limiter._identity(request), "cookie", "session")
@@ -1215,7 +1222,7 @@ async def test_lockout_rechecks_bucket_and_only_uses_locked_credentials(monkeypa
     async def lock_after_cache_changed(identity, credentials):
         assert credentials == ("cookie",)
         middleware._forget_authenticated_token(identity, "cookie", "session")
-        middleware._remember_authenticated_token(identity, "bearer", "token")
+        middleware._remember_authenticated_token(identity, _GENERATED_TOKEN, "token")
         async with original_lock(identity, credentials):
             yield
 
@@ -1226,7 +1233,7 @@ async def test_lockout_rechecks_bucket_and_only_uses_locked_credentials(monkeypa
 
     assert response.status_code == (200 if bucket_reopened else 429)
     assert [call.args[0] for call in svc.get_oidc_session_by_token_for_request.await_args_list] == (
-        ["cookie", "bearer"] if bucket_reopened else []
+        ["cookie", _GENERATED_TOKEN] if bucket_reopened else []
     )
     assert middleware._credential_locks == {}
 
