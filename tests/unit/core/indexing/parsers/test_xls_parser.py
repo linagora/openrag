@@ -65,3 +65,19 @@ def test_xls_rejects_oversized_sheet_before_xlrd_materializes_it(monkeypatch):
     with pytest.raises(PipelineError) as error:
         list(XlsParser().iter_batches(document))
     assert error.value.code == "XLS_LIMIT_EXCEEDED"
+
+
+def test_xls_short_stream_accepts_a_chain_ending_at_its_declared_length():
+    compound = object.__new__(xls_parser._BoundedCompoundDocument)
+    assert compound._get_stream(b"abcd", 0, [1, xls_parser.EOCSID], 2, 0, 3) == b"abc"
+
+
+@pytest.mark.parametrize(("allocation", "size"), [([1, 2], 3), ([1, xls_parser.EOCSID], 2)])
+def test_xls_short_stream_rejects_an_invalid_chain_before_reading(allocation, size, monkeypatch):
+    def unexpected_read(*args):
+        pytest.fail("invalid sector chain was passed to xlrd")
+
+    monkeypatch.setattr(xls_parser.CompDoc, "_get_stream", unexpected_read)
+    compound = object.__new__(xls_parser._BoundedCompoundDocument)
+    with pytest.raises(xls_parser.CompDocError, match="sector|termination"):
+        compound._get_stream(b"abcd", 0, allocation, 2, 0, size)

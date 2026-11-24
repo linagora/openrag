@@ -17,7 +17,7 @@ from core.indexing.validators import ENCRYPTED_OFFICE_FILE_MESSAGE
 from core.models.document import Document, ProcessedDocument, TextBlock
 from core.utils.exceptions import ConfigError, NoIndexableContentError, PipelineError
 from xlrd import biffh
-from xlrd.compdoc import CompDocError
+from xlrd.compdoc import EOCSID, CompDoc, CompDocError
 
 _MAX_FILE_BYTES = 16 * 1024 * 1024
 _MAX_SHEETS = 128
@@ -45,6 +45,42 @@ def _limit(reason: str) -> PipelineError:
     return PipelineError(reason, code="XLS_LIMIT_EXCEEDED", status_code=422)
 
 
+class _BoundedCompoundDocument(CompDoc):
+    """Keep xlrd's short-stream reader from following an unbounded allocation chain."""
+
+    def _get_stream(self, mem, base, sat, sec_size, start_sid, size=None, name="", seen_id=None):
+        if seen_id is None:
+            # xlrd already checks for repeated sectors in the standard stream.
+            # For the mini stream, validate the chain against its declared
+            # length before delegating to the reader.
+            if size is None or not 0 <= size <= len(mem) - base:
+                raise CompDocError("Invalid XLS mini stream length")
+            sectors = (size + sec_size - 1) // sec_size
+            sector = start_sid
+            for _ in range(sectors):
+                if not 0 <= sector < len(sat) or base + (sector + 1) * sec_size > len(mem):
+                    raise CompDocError("Invalid XLS mini stream sector")
+                sector = sat[sector]
+            if sector != EOCSID:
+                raise CompDocError("Invalid XLS mini stream termination")
+        return super()._get_stream(mem, base, sat, sec_size, start_sid, size, name, seen_id)
+
+
+def _workbook_stream(content: bytes, log: StringIO) -> bytes:
+    # Reject invalid sector geometry before xlrd sizes its allocation tables.
+    if len(content) < 512 or unpack_from("<HH", content, 30) not in ((9, 6), (12, 6)):
+        raise CompDocError("Invalid XLS compound document sector size")
+    package = _BoundedCompoundDocument(content, logfile=log)
+    for name in ("Workbook", "Book"):
+        data, start, size = package.locate_named_stream(name)
+        if data is not None:
+            workbook = data[start : start + size]
+            if len(workbook) < 4 or unpack_from("<H", workbook)[0] not in biffh.bofcodes:
+                break
+            return workbook
+    raise CompDocError("Missing XLS workbook stream")
+
+
 def _read_workbook(document: Document) -> xlrd.book.Book:
     if document.source_path:
         with open(document.source_path, "rb") as stream:
@@ -55,8 +91,13 @@ def _read_workbook(document: Document) -> xlrd.book.Book:
         raise _limit("XLS workbook exceeds the 16 MiB file limit")
     if not content.startswith(xlrd.XLS_SIGNATURE):
         raise PipelineError("File is not a valid binary XLS workbook", code="INVALID_XLS", status_code=422)
+    log = StringIO()
     return xlrd.open_workbook(
-        file_contents=content, on_demand=True, formatting_info=True, ragged_rows=True, logfile=StringIO()
+        file_contents=_workbook_stream(content, log),
+        on_demand=True,
+        formatting_info=True,
+        ragged_rows=True,
+        logfile=log,
     )
 
 
@@ -282,7 +323,17 @@ class XlsParser(TabularBatchParser):
                     ENCRYPTED_OFFICE_FILE_MESSAGE, code="ENCRYPTED_OFFICE_FILE", status_code=422
                 ) from None
             raise PipelineError("File is not a valid XLS workbook", code="INVALID_XLS", status_code=422) from None
-        except (CompDocError, OSError, ValueError, IndexError, KeyError, OverflowError, StructError, AssertionError):
+        except (
+            CompDocError,
+            OSError,
+            ValueError,
+            IndexError,
+            KeyError,
+            OverflowError,
+            StructError,
+            AssertionError,
+            RecursionError,
+        ):
             raise PipelineError("File is not a valid XLS workbook", code="INVALID_XLS", status_code=422) from None
         if rendered_bytes == 0:
             raise NoIndexableContentError("XLS contains no visible worksheet with indexable content")
