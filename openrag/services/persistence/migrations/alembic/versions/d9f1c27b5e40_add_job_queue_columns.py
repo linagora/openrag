@@ -1,7 +1,7 @@
 """Add queue fields to existing indexing jobs.
 
 Revision ID: d9f1c27b5e40
-Revises: 4d7e2b9c1f35
+Revises: a2b3c4d5e6f7
 """
 
 from collections.abc import Sequence
@@ -13,7 +13,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql.elements import TextClause
 
 revision: str = "d9f1c27b5e40"
-down_revision: str | Sequence[str] | None = "4d7e2b9c1f35"
+down_revision: str | Sequence[str] | None = "a2b3c4d5e6f7"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

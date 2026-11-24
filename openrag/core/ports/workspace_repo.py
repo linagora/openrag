@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from contextlib import AbstractAsyncContextManager
+from datetime import datetime
 
 from core.models.workspace import Workspace
 
@@ -49,11 +50,21 @@ class WorkspaceRepository(ABC):
     async def list_workspaces(self, partition: str) -> list[Workspace]: ...
 
     @abstractmethod
-    async def delete_workspace(self, partition: str, workspace_id: str, *, keep_files: bool = False) -> list[str]:
+    async def delete_workspace(
+        self,
+        partition: str,
+        workspace_id: str,
+        *,
+        keep_files: bool = False,
+        expected_created_at: datetime | None = None,
+        expected_created_at_is_null: bool = False,
+    ) -> list[str] | None:
         """Delete a workspace and return claimed workspace-owned orphan IDs.
 
         With keep_files, retain its files as independently indexed instead.
         The returned candidates still describe what would have been deleted.
+        Return ``None`` when the workspace no longer matches the generation
+        supplied by a confirmation flow.
         """
         ...
 
@@ -85,15 +96,46 @@ class WorkspaceRepository(ABC):
     # ── Workspace ↔ file membership ───────────────────────────────────
 
     @abstractmethod
-    async def add_files_to_workspace(self, partition: str, workspace_id: str, file_ids: list[str]) -> list[str]:
-        """Attach files to a workspace. Returns the file_ids that could not be resolved."""
+    async def add_files_to_workspace(
+        self,
+        partition: str,
+        workspace_id: str,
+        file_ids: list[str],
+        *,
+        expected_created_at: datetime | None = None,
+        expected_created_at_is_null: bool = False,
+    ) -> list[str] | None:
+        """Attach files to a workspace. Returns the file_ids that could not be resolved.
+
+        Returns ``None`` when a generation precondition is supplied and the
+        workspace no longer matches it (a same-ID replacement).
+        """
         ...
 
     @abstractmethod
-    async def remove_file_from_workspace(self, partition: str, workspace_id: str, file_id: str) -> bool: ...
+    async def remove_file_from_workspace(
+        self,
+        partition: str,
+        workspace_id: str,
+        file_id: str,
+        *,
+        expected_created_at: datetime | None = None,
+        expected_created_at_is_null: bool = False,
+    ) -> bool | None:
+        """Return None when the workspace generation no longer matches."""
+        ...
 
     @abstractmethod
-    async def list_workspace_files(self, partition: str, workspace_id: str) -> list[str]: ...
+    async def list_workspace_files(
+        self,
+        partition: str,
+        workspace_id: str,
+        *,
+        expected_created_at: datetime | None = None,
+        expected_created_at_is_null: bool = False,
+    ) -> list[str] | None:
+        """List membership, returning None when the workspace is missing or stale."""
+        ...
 
     @abstractmethod
     async def get_file_workspaces(self, file_id: str, partition: str) -> list[str]: ...
