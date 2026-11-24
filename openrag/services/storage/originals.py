@@ -173,7 +173,7 @@ class OriginalsCleaner:
     def _is_under_data_dir(self, path: Path) -> bool:
         try:
             resolved = path.resolve()
-        except OSError:
+        except (OSError, RuntimeError):  # Python 3.12 raises RuntimeError on a symlink loop
             return False
         return resolved != self._data_dir and resolved.is_relative_to(self._data_dir)
 

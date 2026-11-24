@@ -119,6 +119,15 @@ async def test_a_symlinked_directory_cannot_lead_out_of_the_data_directory(data_
     assert (outside / "secret.pdf").exists()
 
 
+async def test_a_symlink_loop_is_skipped_and_the_others_still_go(data_dir):
+    loop = data_dir / "1_loop.pdf"
+    loop.symlink_to(loop)
+    free = upload(data_dir, "2_report.pdf")
+    cleaner = OriginalsCleaner(FakeDocumentRepo(), data_dir)
+    assert await cleaner.delete_unreferenced([str(loop), free]) == 1
+    assert loop.is_symlink() and not Path(free).exists()
+
+
 async def test_a_relative_data_directory_is_resolved(data_dir, monkeypatch):
     monkeypatch.chdir(data_dir.parent)
     source = upload(data_dir, "1713700000000_a1b2_report.pdf")
