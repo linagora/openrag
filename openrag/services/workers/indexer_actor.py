@@ -684,13 +684,9 @@ async def _load_document(
         # is off.
         #
         # Placeable only when that file is on shared storage, which is a
-        # property of the caller, not of this function. The upload routes save
-        # under ``config.paths.data_dir`` (Helm RWX volume, Compose bind
-        # mount), so they are. ``MCPService.index_url`` downloads to a
-        # ``NamedTemporaryFile`` in the node's own temp dir, so it is not — on
-        # a multi-node cluster a worker elsewhere cannot open it. That is the
-        # pre-existing #911 behaviour for that route rather than a regression,
-        # and closing it means downloading into ``data_dir``.
+        # property of the caller, not of this function. The upload routes and
+        # ``MCPService.index_url`` save under ``config.paths.data_dir`` (Helm
+        # RWX volume, Compose bind mount), so they are.
         source_path=str(p),
         content_type=content_type,
         partition=partition,
