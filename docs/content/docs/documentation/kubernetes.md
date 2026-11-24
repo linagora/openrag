@@ -402,6 +402,76 @@ counts without exposing partition or preset names.
   and an empty `BASE_URL` does not remove it, even with `MODEL_ENDPOINT_SYNC_ON_BOOT=true`. Chat keeps
   failing with `Connection error` until you repoint or remove that LLM endpoint in the admin UI.
 
+## Rotating a secret
+
+What restarts the pods after a credential in the env Secret changes (`AUTH_TOKEN`,
+`POSTGRES_PASSWORD`, `METRICS_TOKEN`, an API key) depends on where that Secret comes from:
+
+- **`env.secrets`** (the default `values` provider): from OpenRAG 2.3.6, a `helm upgrade`
+  that changes any of them, or `postgresql.auth.password`, rolls the API Deployment. Its pod
+  template carries a checksum of the Secret's values. With the chart of an earlier release,
+  nothing rolls: restart the API as for `env.existingSecret` below.
+
+  With the bundled PostgreSQL (`postgresql.enabled: true`), changing
+  `postgresql.auth.password` changes only the password the API sends. PostgreSQL sets the
+  role's password when it creates its volume and ignores the value after that, so the
+  restarted API pods can't connect until the database has the new password too. Do one of:
+
+  - Change it in the database just before the `helm upgrade`: open `psql` as the
+    application role (`postgresql.auth.username`, `root` by default), run `\password`,
+    and type the new password. The command below reads the role and its current password
+    from the PostgreSQL container, whether `postgresql.auth.usePasswordFiles` is on (the
+    default) or off.
+
+    ```bash
+    kubectl exec -it -n <release namespace> <fullname>-postgresql-0 -- sh -c 'PGPASSWORD="${POSTGRES_PASSWORD:-$(cat "$POSTGRES_PASSWORD_FILE")}" psql -h 127.0.0.1 -U "${POSTGRES_USER:-postgres}" -d postgres'
+    ```
+
+  - Or set `postgresql.passwordUpdateJob.enabled: true` in the `helm upgrade` that changes
+    the password, and turn it off afterwards. The sub-chart then runs a Helm `pre-upgrade`
+    hook that changes it in the database, signing in with the old password from the Secret
+    already deployed. Use it with `helm upgrade` only: applying `helm template` output with
+    `kubectl` creates the job without that ordering, and it has not been tested under Argo
+    CD, which runs the hook as PreSync. The job also sets the `postgres` superuser's password
+    and refuses to render without `postgresql.auth.postgresPassword`: set it to the current
+    one, or the job changes it too.
+
+    ```bash
+    kubectl get secret -n <release namespace> <fullname>-postgresql -o jsonpath='{.data.postgres-password}' | base64 -d
+    ```
+
+  Either way, connections the old pods open between the database change and the end of the
+  rollout are refused.
+- **`env.secretsProvider.type: vaultStaticSecret`**: the Vault Secrets Operator rolls the
+  API Deployment itself once it has written the new value.
+- **`env.secretsProvider.type: externalSecret`** or **`env.existingSecret`**: the chart
+  never sees the values, so nothing rolls. Once the Secret holds the new value (the External
+  Secrets Operator refreshes it on its `refreshInterval`), restart the API, or run a
+  controller such as Reloader that does it:
+
+  ```bash
+  kubectl rollout restart -n <release namespace> deploy/<fullname>-openrag
+  ```
+
+Until it restarts, a pod keeps the value it started with: Prometheus scrapes fail with 403
+after a `METRICS_TOKEN` change. `AUTH_TOKEN` is different: the admin token is stored in the
+database, and each OpenRAG process that initializes with an `AUTH_TOKEN` writes its own value
+there. The old token works until a process starts with the new value. During a rolling
+update, or while old Ray pods still serve the API, a process that starts with the old value
+puts the old token back. Once no old pod is left, check that the old token is refused; if it
+still works, restart the API once more.
+
+With `ray.enabled: true`, also delete the Ray pods after any rotation, whichever provider
+you use. KubeRay never replaces a running Ray pod when the cluster's spec changes, so the
+head (which runs the API under Ray Serve) and the workers keep the old values until they
+are recreated:
+
+```bash
+kubectl delete pod -n <release namespace> -l ray.io/cluster=<fullname>-raycluster
+```
+
+`<fullname>` is `openrag` with the default `fullnameOverride`.
+
 ## Operator-managed accounts
 
 Service accounts whose token comes from your secret store (cozy-stack's, for example) are
@@ -445,9 +515,8 @@ The Secret value is hashed exactly as stored, as for `AUTH_TOKEN`: a trailing ne
 (common with `echo` piped into `base64`) becomes part of the token and the client's bearer
 no longer matches. Use `printf '%s'` or `stringData` when writing the Secret.
 
-Restarting the pods automatically when an External Secrets Operator Secret rotates
-(Reloader, or a Secret checksum annotation) is not done here; it is tracked in
-[#985](https://github.com/linagora/openrag/issues/985).
+What restarts the pods when the token rotates depends on the secrets provider: see
+[Rotating a secret](#rotating-a-secret).
 
 ## Monitoring
 
