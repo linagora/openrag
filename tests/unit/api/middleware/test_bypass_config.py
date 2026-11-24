@@ -27,7 +27,7 @@ from core.config.auth import (
 from fastapi import FastAPI, Request
 from starlette.responses import Response
 
-_GENERATED_TOKEN = "or-0123456789abcdef0123456789abcdef"
+_GENERATED_TOKEN = "or-" + "0123456789abcdef" * 2
 
 # ---------------------------------------------------------------------------
 # Defaults match the legacy hardcoded sets
@@ -567,7 +567,9 @@ async def test_revoked_recent_token_is_removed_after_failed_revalidation(monkeyp
     svc.list_user_partitions_for_request = AsyncMock(return_value=[])
     middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
 
-    first = await middleware.dispatch(_request(headers={"authorization": f"Bearer {_GENERATED_TOKEN}"}), _unused_call_next)
+    first = await middleware.dispatch(
+        _request(headers={"authorization": f"Bearer {_GENERATED_TOKEN}"}), _unused_call_next
+    )
     failed = await middleware.dispatch(_request(headers={"authorization": "Bearer bad-token"}), _unused_call_next)
     token_is_valid = False
     revoked = await middleware.dispatch(
@@ -967,7 +969,9 @@ async def test_oidc_bearer_fallback_rechecks_eligibility_after_cookie_lookup(mon
     svc.get_user_by_token_for_request = AsyncMock(return_value={"id": 7})
     svc.list_user_partitions_for_request = AsyncMock(return_value=[])
     middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
-    request = _request(path="/", headers={"cookie": f"{SESSION_COOKIE_NAME}=cookie", "authorization": f"Bearer {_GENERATED_TOKEN}"})
+    request = _request(
+        path="/", headers={"cookie": f"{SESSION_COOKIE_NAME}=cookie", "authorization": f"Bearer {_GENERATED_TOKEN}"}
+    )
     limiter = middleware._auth_failure_limiter
     identity = limiter._identity(request)
     middleware._remember_authenticated_token(identity, "cookie", "session")
@@ -1181,7 +1185,9 @@ async def test_oidc_lockout_only_validates_cached_credentials(monkeypatch, recen
     svc.list_user_partitions_for_request = AsyncMock(return_value=[])
     middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
 
-    request = _request(headers={"cookie": f"{SESSION_COOKIE_NAME}=cookie", "authorization": f"Bearer {_GENERATED_TOKEN}"})
+    request = _request(
+        headers={"cookie": f"{SESSION_COOKIE_NAME}=cookie", "authorization": f"Bearer {_GENERATED_TOKEN}"}
+    )
     limiter = middleware._auth_failure_limiter
     await limiter.record_failure(request)
     for token, kind in recent:
@@ -1212,7 +1218,9 @@ async def test_lockout_rechecks_bucket_and_only_uses_locked_credentials(monkeypa
     svc.list_user_partitions_for_request = AsyncMock(return_value=[])
     middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
 
-    request = _request(headers={"cookie": f"{SESSION_COOKIE_NAME}=cookie", "authorization": f"Bearer {_GENERATED_TOKEN}"})
+    request = _request(
+        headers={"cookie": f"{SESSION_COOKIE_NAME}=cookie", "authorization": f"Bearer {_GENERATED_TOKEN}"}
+    )
     limiter = middleware._auth_failure_limiter
     await limiter.record_failure(request)
     middleware._remember_authenticated_token(limiter._identity(request), "cookie", "session")
