@@ -216,6 +216,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self._bypass_config = bypass_config or AuthBypassConfig()
         self._auth_failure_limiter = AuthFailureRateLimiter()
         self._recently_authenticated_tokens: OrderedDict[tuple[str, bytes, _CredentialKind], float] = OrderedDict()
+        self._recently_rejected_sessions: OrderedDict[tuple[str, bytes], float] = OrderedDict()
         self._credential_locks: dict[tuple[str, bytes], tuple[asyncio.Lock, int]] = {}
         # A bucket can fill near the end of one window; retain the last
         # successful token through the remaining lockout window too.
@@ -271,6 +272,32 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     def _forget_authenticated_token(self, identity: str, token: str, kind: _CredentialKind) -> None:
         self._recently_authenticated_tokens.pop((identity, self._token_fingerprint(token), kind), None)
+
+    def _has_recently_rejected_session(self, identity: str, token: str) -> bool:
+        cache_key = (identity, self._token_fingerprint(token))
+        expires_at = self._recently_rejected_sessions.get(cache_key)
+        if expires_at is None:
+            return False
+        if expires_at <= time.monotonic():
+            self._recently_rejected_sessions.pop(cache_key, None)
+            return False
+        return True
+
+    def _remember_rejected_session(self, identity: str, token: str) -> None:
+        cache_key = (identity, self._token_fingerprint(token))
+        now = time.monotonic()
+        cache = self._recently_rejected_sessions
+
+        while cache and next(iter(cache.values())) <= now:
+            cache.popitem(last=False)
+
+        cache[cache_key] = now + self._recently_authenticated_token_ttl
+        cache.move_to_end(cache_key)
+        while len(cache) > _RECENT_AUTHENTICATED_TOKEN_CACHE_MAX_ENTRIES:
+            cache.popitem(last=False)
+
+    def _forget_rejected_session(self, identity: str, token: str) -> None:
+        self._recently_rejected_sessions.pop((identity, self._token_fingerprint(token)), None)
 
     def _lock_recently_authenticated_tokens(
         self, identity: str, credentials: tuple[str, ...]
@@ -364,12 +391,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
                                 logger.bind(error=str(exc)).warning("Failed to revoke invalid OIDC session")
                 if session is None:
                     self._forget_authenticated_token(identity, token, "session")
+                    self._remember_rejected_session(identity, token)
                     return None, None
                 user = await auth_service.get_user_for_request(session["user_id"])
                 if user is not None:
+                    self._forget_rejected_session(identity, token)
                     self._remember_authenticated_token(identity, token, "session")
                     return user, session
                 self._forget_authenticated_token(identity, token, "session")
+                self._remember_rejected_session(identity, token)
                 return None, None
 
         if session is not None:
@@ -379,9 +409,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if user is not None:
                 if limited and not self._has_recently_authenticated_token(identity, token, "session"):
                     return None
+                self._forget_rejected_session(identity, token)
                 self._remember_authenticated_token(identity, token, "session")
                 return user, session
         self._forget_authenticated_token(identity, token, "session")
+        self._remember_rejected_session(identity, token)
         return None, None
 
     async def _validate_credentials(
@@ -476,10 +508,19 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         index for index, credential in enumerate(credentials) if credential in eligible
                     )
                     eligible_values = {value for value, _kind in eligible}
-                    if any(
-                        credential not in eligible and credential[0] not in eligible_values
-                        for credential in credentials[:first_eligible_index]
-                    ):
+                    blocked_by_earlier_credential = False
+                    for value, kind in credentials[:first_eligible_index]:
+                        if value in eligible_values:
+                            continue
+                        if kind == "session" and self._has_recently_rejected_session(identity, value):
+                            # A rejected cookie has no identity precedence to
+                            # preserve. Renew it while skipped so a long
+                            # lockout does not eventually block a valid token.
+                            self._remember_rejected_session(identity, value)
+                            continue
+                        blocked_by_earlier_credential = True
+                        break
+                    if blocked_by_earlier_credential:
                         limited = await limiter.is_limited(request)
                         # Do not let a lower-priority credential replace an
                         # earlier, distinct credential that cannot be checked
@@ -506,7 +547,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if await limiter.is_limited(request):
                 if result is None:
                     return await limiter.limited_response(request)
-                if selected is not None and any(skipped_credential[0] != selected[0] for skipped_credential in skipped):
+                blocked_by_skipped_credential = False
+                if selected is not None:
+                    for skipped_token, kind in skipped:
+                        if skipped_token == selected[0]:
+                            continue
+                        if kind == "session" and self._has_recently_rejected_session(identity, skipped_token):
+                            self._remember_rejected_session(identity, skipped_token)
+                            continue
+                        blocked_by_skipped_credential = True
+                        break
+                if blocked_by_skipped_credential:
                     return await limiter.limited_response(request)
             elif skipped:
                 # Earlier skipped candidates can take precedence after the

@@ -660,6 +660,29 @@ def test_recent_token_cache_purges_expired_entries_in_validation_order(monkeypat
     assert middleware._has_recently_authenticated_token(identity, "or-00000000000000000000000000000003", "token")
 
 
+def test_recently_rejected_session_cache_is_bounded_and_renewable(monkeypatch) -> None:
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: None)
+    identity = "ip:unknown"
+    now = [100.0]
+    monkeypatch.setattr("api.middleware.auth.time.monotonic", lambda: now[0])
+
+    for index in range(1025):
+        middleware._remember_rejected_session(identity, f"session-{index}")
+
+    assert len(middleware._recently_rejected_sessions) == 1024
+    assert not middleware._has_recently_rejected_session(identity, "session-0")
+    assert middleware._has_recently_rejected_session(identity, "session-1024")
+
+    now[0] = 219.9
+    middleware._remember_rejected_session(identity, "session-1024")
+    now[0] = 339.8
+    assert middleware._has_recently_rejected_session(identity, "session-1024")
+    now[0] = 340.0
+    assert not middleware._has_recently_rejected_session(identity, "session-1024")
+
+
 @pytest.mark.asyncio
 async def test_recent_oidc_cookie_passes_exhausted_failure_bucket(monkeypatch) -> None:
     from unittest.mock import AsyncMock
@@ -1265,6 +1288,52 @@ async def test_uncached_cookie_blocks_cached_bearer_during_lockout(monkeypatch) 
     svc.get_oidc_session_by_token_for_request.assert_not_awaited()
     svc.get_user_for_request.assert_not_awaited()
     svc.get_user_by_token_for_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_refused_oidc_cookie_does_not_block_cached_bearer_during_lockout(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    now = [100.0]
+    monkeypatch.setattr("api.middleware.auth.time.monotonic", lambda: now[0])
+    session = {"id": 3, "user_id": 1}
+    session_state = {"revoked-cookie": session}
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(side_effect=lambda token: session_state.get(token))
+    svc.oidc_session_needs_refresh = lambda _session: False
+    svc.get_user_for_request = AsyncMock(return_value={"id": 1})
+    svc.get_user_by_token_for_request = AsyncMock(return_value={"id": 2})
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    cookie_request = _request(
+        path="/indexer/files",
+        headers={"cookie": f"{SESSION_COOKIE_NAME}=revoked-cookie", "authorization": f"Bearer {_GENERATED_TOKEN}"},
+    )
+    bearer_request = _request(path="/indexer/files", headers={"authorization": f"Bearer {_GENERATED_TOKEN}"})
+
+    # Both credentials were valid before the OIDC session was revoked.
+    assert (await middleware.dispatch(bearer_request, _unused_call_next)).status_code == 200
+    assert (await middleware.dispatch(cookie_request, _unused_call_next)).status_code == 200
+
+    session_state.clear()
+    limiter = middleware._auth_failure_limiter
+    await limiter.record_failure(cookie_request)
+    await limiter.record_failure(cookie_request)
+
+    first_after_revocation = await middleware.dispatch(cookie_request, _unused_call_next)
+    now[0] = 219.9
+    next_after_revocation = await middleware.dispatch(cookie_request, _unused_call_next)
+    now[0] = 339.8
+    later_after_revocation = await middleware.dispatch(cookie_request, _unused_call_next)
+
+    assert first_after_revocation.status_code == 200
+    assert next_after_revocation.status_code == 200
+    assert later_after_revocation.status_code == 200
+    assert middleware._has_recently_rejected_session(limiter._identity(cookie_request), "revoked-cookie")
+    assert svc.get_user_by_token_for_request.await_count == 4
 
 
 @pytest.mark.asyncio
