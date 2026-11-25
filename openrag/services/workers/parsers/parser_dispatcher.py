@@ -60,6 +60,7 @@ _EML_ATTACHMENT_TYPES: dict[str, DocumentType] = {
     "htm": DocumentType.HTML,
     "eml": DocumentType.EML,
     "docx": DocumentType.DOCX,
+    "xls": DocumentType.XLS,
     "xlsx": DocumentType.XLSX,
     "xlsm": DocumentType.XLSX,
     "doc": DocumentType.DOC,
@@ -335,6 +336,7 @@ _BUILDERS: dict[str, Any] = {
         batch_size=d._config.loader.csv_batch_size,
         delimiter=d._config.loader.csv_delimiter,
     ),
+    "xls": lambda d: _create("core.indexing.parsers.tabular.xls_parser", "xls"),
     "xlsx": lambda d: _create(
         "core.indexing.parsers.tabular.xlsx_parser",
         "xlsx",

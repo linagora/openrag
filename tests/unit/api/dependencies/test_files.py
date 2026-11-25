@@ -279,6 +279,22 @@ async def test_validate_file_format_accepts_matching_content():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "metadata"),
+    [("report.XLS", {}), ("report", {"mimetype": "application/vnd.ms-excel"})],
+)
+async def test_validate_file_format_accepts_legacy_excel_by_extension_or_mimetype(filename, metadata):
+    from core.config.indexation import LoaderConfig
+
+    fixture = Path(__file__).resolve().parents[3] / "resources" / "legacy_workbook.xls"
+    body = fixture.read_bytes()
+    upload = UploadFile(file=io.BytesIO(body), filename=filename)
+    config = type("Config", (), {"loader": LoaderConfig()})
+    assert await files_dep.validate_file_format(file=upload, metadata=metadata, config=config) is upload
+    assert await upload.read() == body
+
+
+@pytest.mark.asyncio
 async def test_reading_the_head_leaves_the_stream_intact_for_the_save(tmp_path: Path):
     """The check reads the head and rewinds. If it did not, the file written to
     disk afterwards would be silently truncated by however much was sniffed."""
