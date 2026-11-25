@@ -1374,6 +1374,117 @@ async def test_refused_oidc_cookie_does_not_block_cached_bearer_during_lockout(m
 
 
 @pytest.mark.asyncio
+async def test_bearer_session_probe_does_not_make_matching_cookie_exempt_during_lockout(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    configured_token = "hand-chosen-admin-token"
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
+    svc.get_user_by_token_for_request = AsyncMock(return_value={"id": 2})
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    bearer_request = _request(headers={"authorization": f"Bearer {configured_token}"})
+    attacker_request = _request(
+        headers={
+            "cookie": f"{SESSION_COOKIE_NAME}={configured_token}",
+            "authorization": f"Bearer {_GENERATED_TOKEN}",
+        }
+    )
+    limiter = middleware._auth_failure_limiter
+    identity = limiter._identity(attacker_request)
+
+    assert (await middleware.dispatch(bearer_request, _unused_call_next)).status_code == 200
+    assert not middleware._has_recently_rejected_session(identity, configured_token)
+    assert (
+        await middleware.dispatch(_request(headers={"authorization": f"Bearer {_GENERATED_TOKEN}"}), _unused_call_next)
+    ).status_code == 200
+    await limiter.record_failure(attacker_request)
+    await limiter.record_failure(attacker_request)
+
+    response = await middleware.dispatch(attacker_request, _unused_call_next)
+
+    assert response.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_refused_cookie_keeps_precedence_when_cookie_and_bearer_match(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
+    svc.get_user_by_token_for_request = AsyncMock(return_value={"id": 2})
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    request = _request(
+        headers={
+            "cookie": f"{SESSION_COOKIE_NAME}={_GENERATED_TOKEN}",
+            "authorization": f"Bearer {_GENERATED_TOKEN}",
+        }
+    )
+    limiter = middleware._auth_failure_limiter
+
+    assert (await middleware.dispatch(request, _unused_call_next)).status_code == 200
+    assert middleware._has_recently_rejected_session(limiter._identity(request), _GENERATED_TOKEN)
+    await limiter.record_failure(request)
+    await limiter.record_failure(request)
+
+    response = await middleware.dispatch(request, _unused_call_next)
+
+    assert response.status_code == 200
+    assert svc.get_user_by_token_for_request.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_session_revocation_does_not_allow_cached_bearer_fallback(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    session = {"id": 3, "user_id": 1, "needs_refresh": False}
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(
+        side_effect=lambda token: session if token == "active-cookie" else None
+    )
+    svc.oidc_session_needs_refresh = lambda value: value["needs_refresh"]
+    svc.oidc_session_was_refreshed_since = lambda _old, _new: False
+    svc.refresh_session_if_needed = AsyncMock(return_value=None)
+    svc.revoke_oidc_session_by_id_for_request = AsyncMock(side_effect=RuntimeError("database unavailable"))
+    svc.get_user_for_request = AsyncMock(return_value={"id": 1})
+    svc.get_user_by_token_for_request = AsyncMock(return_value={"id": 2})
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    cookie_request = _request(headers={"cookie": f"{SESSION_COOKIE_NAME}=active-cookie"})
+    bearer_request = _request(headers={"authorization": f"Bearer {_GENERATED_TOKEN}"})
+    locked_request = _request(
+        headers={
+            "cookie": f"{SESSION_COOKIE_NAME}=active-cookie",
+            "authorization": f"Bearer {_GENERATED_TOKEN}",
+        }
+    )
+    limiter = middleware._auth_failure_limiter
+    identity = limiter._identity(locked_request)
+
+    assert (await middleware.dispatch(cookie_request, _unused_call_next)).status_code == 200
+    assert (await middleware.dispatch(bearer_request, _unused_call_next)).status_code == 200
+    session["needs_refresh"] = True
+    await limiter.record_failure(locked_request)
+    await limiter.record_failure(locked_request)
+
+    response = await middleware.dispatch(locked_request, _unused_call_next)
+
+    svc.revoke_oidc_session_by_id_for_request.assert_awaited_once_with(3)
+    assert not middleware._has_recently_rejected_session(identity, "active-cookie")
+    assert response.status_code == 429
+
+
+@pytest.mark.asyncio
 async def test_expired_oidc_ui_credentials_redirect_without_exhausting_the_bucket(monkeypatch) -> None:
     from unittest.mock import AsyncMock
 
