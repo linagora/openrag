@@ -392,7 +392,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         enc_key: str,
         identity: str,
         eligible: set[_Credential] | None = None,
-    ) -> tuple[_Authenticated | None, tuple[_Credential, ...]]:
+    ) -> tuple[_Authenticated | None, tuple[_Credential, ...], _Credential | None]:
         skipped: list[_Credential] = []
         for credential in credentials:
             token, kind = credential
@@ -419,8 +419,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     self._forget_authenticated_token(identity, token, kind)
 
             if user is not None:
-                return (user, session), tuple(skipped)
-        return None, tuple(skipped)
+                return (user, session), tuple(skipped), credential
+        return None, tuple(skipped), None
 
     async def _authenticate_request(
         self,
@@ -491,7 +491,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         auth_service, unavailable = self._resolve_auth_service(request)
                         if unavailable is not None:
                             return unavailable
-                        result, skipped = await self._validate_credentials(
+                        result, skipped, selected = await self._validate_credentials(
                             auth_service, credentials, enc_key=enc_key, identity=identity, eligible=eligible
                         )
 
@@ -499,15 +499,23 @@ class AuthMiddleware(BaseHTTPMiddleware):
             auth_service, unavailable = self._resolve_auth_service(request)
             if unavailable is not None:
                 return unavailable
-            result, _ = await self._validate_credentials(auth_service, credentials, enc_key=enc_key, identity=identity)
+            result, _, _ = await self._validate_credentials(
+                auth_service, credentials, enc_key=enc_key, identity=identity
+            )
         elif skipped or result is None:
             if await limiter.is_limited(request):
                 if result is None:
                     return await limiter.limited_response(request)
+                if selected is not None and any(
+                    skipped_credential[0] != selected[0] for skipped_credential in skipped
+                ):
+                    return await limiter.limited_response(request)
             elif skipped:
                 # Earlier skipped candidates can take precedence after the
                 # bucket reopens. Keep a successful result if none validate.
-                retry, _ = await self._validate_credentials(auth_service, skipped, enc_key=enc_key, identity=identity)
+                retry, _, _ = await self._validate_credentials(
+                    auth_service, skipped, enc_key=enc_key, identity=identity
+                )
                 if retry is not None:
                     result = retry
 
