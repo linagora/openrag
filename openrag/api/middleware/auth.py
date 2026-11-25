@@ -375,6 +375,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         session = await auth_service.get_oidc_session_by_token_for_request(token)
         if session is not None and auth_service.oidc_session_needs_refresh(session):
             observed_session = session
+            revocation_failed = False
             # Rotation is per session, independent of IP or transport. Read
             # again under the lock so we act on the latest stored tokens.
             # The lock is held through the user lookup and the cache renewal:
@@ -393,11 +394,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             try:
                                 await auth_service.revoke_oidc_session_by_id_for_request(session_id)
                             except Exception as exc:
+                                revocation_failed = True
                                 logger.bind(error=str(exc)).warning("Failed to revoke invalid OIDC session")
                 if session is None:
                     self._forget_authenticated_token(identity, token, "session")
-                    if remember_rejection:
+                    if remember_rejection and not revocation_failed:
                         self._remember_rejected_session(identity, token)
+                    if revocation_failed:
+                        # The session may still be active; preserve its
+                        # precedence rather than treating it as rejected.
+                        return None
                     return None, None
                 user = await auth_service.get_user_for_request(session["user_id"])
                 if user is not None:
