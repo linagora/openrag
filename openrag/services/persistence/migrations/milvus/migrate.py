@@ -11,19 +11,19 @@ Usage (from infra/compose, with DC and SVC set as in the upgrade guide:
 your ``-f`` overlays to DC if you start the stack with them):
 
     # Dry-run — inspect what would change, no writes:
-    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+    $DC run --no-deps --rm "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 
     # Upgrade to latest:
-    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+    $DC run --no-deps --rm "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py
 
     # Upgrade to a specific version:
-    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+    $DC run --no-deps --rm "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py --target 2
 
     # Downgrade to version 2 (a downgrade always needs --target):
-    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+    $DC run --no-deps --rm "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 
 The image must carry this checkout's migrations: the "Discovered N migration(s)" line
