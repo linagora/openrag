@@ -35,7 +35,9 @@ _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 #
 # The label up to its colon, with marks allowed before and after each bracket
 # and around "Sources".
-_SOURCES_LABEL_PREFIX = r"\n?(?<![ \t])[ \t]*+(?<![*_`])[*_`]*+\[?[*_`]*+(?<![^\W_])(?<![^\W_]_)Sources?[*_`]*+\]?[*_`]*+\s*+"
+_SOURCES_LABEL_PREFIX = (
+    r"\n?(?<![ \t])[ \t]*+(?<![*_`])[*_`]*+\[?[*_`]*+(?<![^\W_])(?<![^\W_]_)Sources?[*_`]*+\]?[*_`]*+\s*+"
+)
 _SOURCES_LABEL_VALUE_PREFIX = r"\s*+[*_`]*+\[?[ \t]*+"
 _SOURCES_LABEL = _SOURCES_LABEL_PREFIX + r":" + _SOURCES_LABEL_VALUE_PREFIX
 # The parser accepts separators (including line breaks and emphasis) before
