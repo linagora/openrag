@@ -372,6 +372,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         limited: bool,
         remember_rejection: bool,
     ) -> _Authenticated | None:
+        if limited and not self._has_recently_authenticated_token(identity, token, "session"):
+            return None
         session = await auth_service.get_oidc_session_by_token_for_request(token)
         if session is not None and auth_service.oidc_session_needs_refresh(session):
             observed_session = session
@@ -416,8 +418,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 return None, None
 
         if session is not None:
+            if limited and not self._has_recently_authenticated_token(identity, token, "session"):
+                return None
             user = await auth_service.get_user_for_request(session["user_id"])
             if user is not None:
+                if limited and not self._has_recently_authenticated_token(identity, token, "session"):
+                    return None
                 self._forget_rejected_session(identity, token)
                 self._remember_authenticated_token(identity, token, "session")
                 return user, session
@@ -505,7 +511,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
             # Serialize limited revalidation so waiters observe cache eviction
             # before repeating a failed lookup.
-            async with self._lock_recently_authenticated_tokens(identity, tuple(value for value, _ in recent)):
+            # Token checks share a client-scoped cache entry, so serialize them
+            # to avoid duplicate validation after eviction. OIDC sessions use
+            # their own lock only when refresh is needed; fresh session reads
+            # must remain concurrent under lockout.
+            recent_tokens = tuple(value for value, kind in recent if kind == "token")
+            async with self._lock_recently_authenticated_tokens(identity, recent_tokens):
                 limited = await limiter.is_limited(request)
                 if limited:
                     eligible = {
