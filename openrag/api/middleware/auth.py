@@ -363,7 +363,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return None, JSONResponse(status_code=503, content={"detail": "Service unavailable"})
 
     async def _authenticate_oidc_session(
-        self, auth_service: Any, identity: str, token: str, enc_key: str, *, limited: bool
+        self,
+        auth_service: Any,
+        identity: str,
+        token: str,
+        enc_key: str,
+        *,
+        limited: bool,
+        remember_rejection: bool,
     ) -> _Authenticated | None:
         session = await auth_service.get_oidc_session_by_token_for_request(token)
         if session is not None and auth_service.oidc_session_needs_refresh(session):
@@ -389,7 +396,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                                 logger.bind(error=str(exc)).warning("Failed to revoke invalid OIDC session")
                 if session is None:
                     self._forget_authenticated_token(identity, token, "session")
-                    self._remember_rejected_session(identity, token)
+                    if remember_rejection:
+                        self._remember_rejected_session(identity, token)
                     return None, None
                 user = await auth_service.get_user_for_request(session["user_id"])
                 if user is not None:
@@ -397,7 +405,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     self._remember_authenticated_token(identity, token, "session")
                     return user, session
                 self._forget_authenticated_token(identity, token, "session")
-                self._remember_rejected_session(identity, token)
+                if remember_rejection:
+                    self._remember_rejected_session(identity, token)
                 return None, None
 
         if session is not None:
@@ -407,7 +416,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 self._remember_authenticated_token(identity, token, "session")
                 return user, session
         self._forget_authenticated_token(identity, token, "session")
-        self._remember_rejected_session(identity, token)
+        if remember_rejection:
+            self._remember_rejected_session(identity, token)
         return None, None
 
     async def _validate_credentials(
@@ -417,6 +427,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         *,
         enc_key: str,
         identity: str,
+        cookie_token: str | None,
         eligible: set[_Credential] | None = None,
     ) -> tuple[_Authenticated | None, tuple[_Credential, ...], _Credential | None]:
         skipped: list[_Credential] = []
@@ -430,7 +441,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
             if kind == "session":
                 result = await self._authenticate_oidc_session(
-                    auth_service, identity, token, enc_key, limited=eligible is not None
+                    auth_service,
+                    identity,
+                    token,
+                    enc_key,
+                    limited=eligible is not None,
+                    remember_rejection=kind == "session" and bool(cookie_token) and token == cookie_token,
                 )
                 if result is None:
                     skipped.append(credential)
@@ -501,7 +517,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     for value, kind in credentials[:first_eligible_index]:
                         if value in eligible_values:
                             continue
-                        if kind == "session" and self._has_recently_rejected_session(identity, value):
+                        if (
+                            kind == "session"
+                            and bool(cookie_token)
+                            and value == cookie_token
+                            and self._has_recently_rejected_session(identity, value)
+                        ):
                             # A rejected cookie has no identity precedence to
                             # preserve. Renew it while skipped so a long
                             # lockout does not eventually block a valid token.
@@ -522,7 +543,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         if unavailable is not None:
                             return unavailable
                         result, skipped, selected = await self._validate_credentials(
-                            auth_service, credentials, enc_key=enc_key, identity=identity, eligible=eligible
+                            auth_service,
+                            credentials,
+                            enc_key=enc_key,
+                            identity=identity,
+                            cookie_token=cookie_token,
+                            eligible=eligible,
                         )
 
         if not limited:
@@ -530,7 +556,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if unavailable is not None:
                 return unavailable
             result, _, _ = await self._validate_credentials(
-                auth_service, credentials, enc_key=enc_key, identity=identity
+                auth_service, credentials, enc_key=enc_key, identity=identity, cookie_token=cookie_token
             )
         elif skipped or result is None:
             if await limiter.is_limited(request):
@@ -541,7 +567,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     for skipped_token, kind in skipped:
                         if skipped_token == selected[0]:
                             continue
-                        if kind == "session" and self._has_recently_rejected_session(identity, skipped_token):
+                        if (
+                            kind == "session"
+                            and bool(cookie_token)
+                            and skipped_token == cookie_token
+                            and self._has_recently_rejected_session(identity, skipped_token)
+                        ):
                             self._remember_rejected_session(identity, skipped_token)
                             continue
                         blocked_by_skipped_credential = True
@@ -552,7 +583,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 # Earlier skipped candidates can take precedence after the
                 # bucket reopens. Keep a successful result if none validate.
                 retry, _, _ = await self._validate_credentials(
-                    auth_service, skipped, enc_key=enc_key, identity=identity
+                    auth_service, skipped, enc_key=enc_key, identity=identity, cookie_token=cookie_token
                 )
                 if retry is not None:
                     result = retry
