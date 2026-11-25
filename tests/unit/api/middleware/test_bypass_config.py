@@ -419,6 +419,25 @@ async def test_only_generated_recent_tokens_pass_exhausted_failure_bucket(monkey
     ]
 
 
+@pytest.mark.parametrize(
+    ("token", "is_eligible"),
+    [
+        (_GENERATED_TOKEN, True),
+        ("or-" + "a" * 31, False),
+        ("or-" + "a" * 33, False),
+        ("or-" + "a" * 31 + "A", False),
+        (_GENERATED_TOKEN + "suffix", False),
+        ("prefix" + _GENERATED_TOKEN, False),
+    ],
+)
+def test_recent_token_cache_requires_exact_generated_format(token, is_eligible) -> None:
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: None)
+
+    middleware._remember_authenticated_token("ip:example", token, "token")
+
+    assert middleware._has_recently_authenticated_token("ip:example", token, "token") is is_eligible
+
+
 @pytest.mark.asyncio
 async def test_recently_authenticated_token_does_not_bypass_another_ip_bucket(monkeypatch) -> None:
     from unittest.mock import AsyncMock
