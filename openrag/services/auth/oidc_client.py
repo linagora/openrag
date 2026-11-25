@@ -376,15 +376,21 @@ class OIDCClient:
             raise ValueError("logout_token without exp is too old")
 
         # jti is REQUIRED and is what enables replay detection by the caller.
-        if not decoded.get("jti"):
+        jti = decoded.get("jti")
+        if not isinstance(jti, str) or not jti:
             raise ValueError("logout_token missing jti claim")
 
-        events = decoded.get("events") or {}
-        if "http://schemas.openid.net/event/backchannel-logout" not in events:
+        events = decoded.get("events")
+        if not isinstance(events, dict) or "http://schemas.openid.net/event/backchannel-logout" not in events:
             raise ValueError("logout_token missing required back-channel-logout event claim")
 
         if "nonce" in decoded:
             raise ValueError("logout_token must not contain nonce")
+
+        for claim_name in ("sub", "sid"):
+            value = decoded.get(claim_name)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(f"logout_token {claim_name} claim must be a non-empty string")
 
         if not decoded.get("sub") and not decoded.get("sid"):
             raise ValueError("logout_token must contain sub or sid")
