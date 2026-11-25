@@ -15,6 +15,15 @@ split `$DC` into `docker compose`, so the commands below fail.
 
 ## OpenRAG 2.3.6
 
+During a failed-auth IP lockout, a recently validated `AUTH_TOKEN` can be
+revalidated only when it uses the generated format: `or-` plus 32 lowercase
+hex digits. A hand-chosen token outside that format still works normally, but
+gets `429` during lockout. New Compose environments get the generated format
+from `scripts/gen_env.py`; if you need admin calls to keep working through a
+shared-IP lockout with an existing deployment, run
+`printf 'or-%s\n' "$(openssl rand -hex 16)"` in a shell, save its output as
+`AUTH_TOKEN`, and update its clients.
+
 The Compose stack now declares its bridge subnet so it can reserve the bundled
 proxy addresses. When upgrading an existing stack, schedule a service
 interruption and recreate the project network from `infra/compose/`:
