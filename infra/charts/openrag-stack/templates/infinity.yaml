@@ -71,6 +71,35 @@
 {{- fail (printf "env.config.RERANKER_BASE_URL renders %q but the reranker listens on port %s (reranker.service.port), so OpenRAG could not reach it. Set the port in reranker.service.port, which replaces reranker.servicePort, and env.config.RERANKER_BASE_URL to the chart default, which reads it." $url $port) }}
 {{- end }}
 {{- end }}
+{{- /* The NVIDIA runtime gives a container the GPUs NVIDIA_VISIBLE_DEVICES
+   names, with the driver features NVIDIA_DRIVER_CAPABILITIES lists. Infinity's
+   image sets both in its ENV, so the reranker's GPU used to depend on the
+   image: the chart sets the same values here. It leaves a variable alone where
+   a value of yours applies, from reranker.extraEnv or from env.config (read
+   through envFrom, below env), so the env list never names a variable twice.
+   It also leaves NVIDIA_VISIBLE_DEVICES to the device plugin when
+   reranker.resources asks for an nvidia.com/ resource: the container's env
+   would replace the device the plugin assigned. */}}
+{{- $ownEnv := keys (.Values.env.config | default dict) }}
+{{- range $reranker.extraEnv | default list }}
+{{- $ownEnv = append $ownEnv (toString .name) }}
+{{- end }}
+{{- $pluginDevices := false }}
+{{- range $section := list "requests" "limits" }}
+{{- range $name, $_ := get ($reranker.resources | default dict) $section | default dict }}
+{{- if hasPrefix "nvidia.com/" $name }}
+{{- $pluginDevices = true }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $env := list }}
+{{- if not (or $pluginDevices (has "NVIDIA_VISIBLE_DEVICES" $ownEnv)) }}
+{{- $env = append $env (dict "name" "NVIDIA_VISIBLE_DEVICES" "value" "all") }}
+{{- end }}
+{{- if not (has "NVIDIA_DRIVER_CAPABILITIES" $ownEnv) }}
+{{- $env = append $env (dict "name" "NVIDIA_DRIVER_CAPABILITIES" "value" "compute,utility") }}
+{{- end }}
+{{- $env = concat $env ($reranker.extraEnv | default list) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -176,7 +205,7 @@ liveness:
           volumeMounts:
             - name: hf-cache
               mountPath: /app/.cache/huggingface
-          {{- with $reranker.extraEnv }}
+          {{- with $env }}
           env:
             {{- toYaml . | nindent 12 }}
           {{- end }}
