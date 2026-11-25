@@ -747,18 +747,18 @@ Limit values use the `<count>/<period>` format from the [`limits`](https://limit
 | `RATE_LIMIT_AUTH` | `str` | `60/minute` | Limit for `/auth/*` (login/callback/logout). Keyed on client IP because callers are unauthenticated there — keep it high enough that a shared corporate/NAT egress IP does not throttle a legitimate login rush. |
 | `RATE_LIMIT_CHAT` | `str` | `120/minute` | Limit for `/v1/*` (chat completions, tools). |
 | `RETRIEVAL_DIAGNOSTICS_RATE_LIMIT` | `str` | `120/minute` | Separate per-administrator limit for retrieval traces, original-query comparisons, and retrieval snapshots. This limit applies even though administrators bypass the general tiers. It is enforced per API process, so the deployment-wide capacity scales with the number of replicas. |
-| `RATE_LIMIT_AUTH_FAILURE` | `str` | `RATE_LIMIT_AUTH`, else `20/minute` | Separate, stricter budget for **failed** authentication attempts, keyed by client IP. After exhaustion, recently validated generated user tokens (`or-` plus 32 lowercase hex digits) may still be revalidated while cached. Hand-chosen token values that do not match that format—including typical configured `AUTH_TOKEN` and seed-user values—remain subject to `429`. OIDC sessions keep their existing behavior. Each process caches at most 1,024 client-identity/credential pairs, and entries may be evicted before the two-failure-window maximum retention period. Falls back to `RATE_LIMIT_AUTH` when unset, then to `20/minute`. Disabled together with `RATE_LIMIT_ENABLED=false`. |
+| `RATE_LIMIT_AUTH_FAILURE` | `str` | `RATE_LIMIT_AUTH`, else `20/minute` | Separate, stricter budget for **failed** authentication attempts, keyed by client IP. After exhaustion, a recently validated generated-format token (`or-` plus 32 lowercase hex digits), including an `AUTH_TOKEN` generated in that format, may still be revalidated while its cache entry remains. Hand-chosen tokens and seed-user values that do not match that format remain subject to `429`. A recently validated OIDC session may also be revalidated while its session entry remains cached; a session that is not cached receives `429` during lockout. Each process caches at most 1,024 client-identity/credential pairs, and entries may be evicted before the two-failure-window maximum retention period. Falls back to `RATE_LIMIT_AUTH` when unset, then to `20/minute`. Disabled together with `RATE_LIMIT_ENABLED=false`. |
 | `RATE_LIMIT_EXEMPT_PATHS` | `str` | `/chainlit/,/assets/` | Comma-separated path prefixes the limiter skips, matched with `startswith`. These are auth-bypassed (Chainlit does its own header auth), so requests there carry no user and can only be keyed by IP. Chainlit's Socket.IO transport also issues one HTTP request per packet when it long-polls. Keep the trailing slash so a sibling like `/chainlithack` stays rate-limited rather than being swept into the `/chainlit` exemption. Set-but-empty (`RATE_LIMIT_EXEMPT_PATHS=`) removes all exemptions; `/auth/*` is never exempt. |
 
 :::caution[Behind a reverse proxy, trust the right client IP]
 The `/auth/*` limits and failed-login budget use the client IP. If the API cannot
-trust a proxy's forwarding headers, requests share the proxy's IP and failure
-budget and recent-credential cache. In that case, a recently used generated
-user token may still authenticate another client during lockout. Hand-chosen
-token values that do not match the generated format remain throttled. This
-applies to Helm's default loopback
-trust setting and traffic through an untrusted proxy such as NPM. The OIDC
-cookie's `Secure` flag reads `X-Forwarded-Proto` directly
+trust a proxy's forwarding headers, requests share the proxy's IP, failure
+budget, and recent-credential cache. During lockout, a previously validated
+generated-format token or OIDC session that remains in that cache may still be
+revalidated for requests seen under the same client identity. Hand-chosen token
+values that do not match the generated format remain throttled. This applies to
+Helm's default loopback trust setting and traffic through an untrusted proxy
+such as NPM. The OIDC cookie's `Secure` flag reads `X-Forwarded-Proto` directly
 (or `PREFERRED_URL_SCHEME`); this check is independent of Uvicorn's
 forwarded-IP trust list.
 
