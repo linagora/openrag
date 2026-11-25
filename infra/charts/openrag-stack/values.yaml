@@ -825,6 +825,14 @@ reranker:
   # instead of 100-125 s in our tests.
   extraEnv: []
   replicas: 1
+  # To share a GPU with the pods that request nvidia.com/gpu, set
+  # runtimeClassName (e.g. "nvidia") and a nodeSelector for the GPU nodes, as
+  # values-linagora.yaml does. Left empty, the reranker runs on CPU unless the
+  # node's default runtime is NVIDIA's. The chart sets NVIDIA_VISIBLE_DEVICES
+  # to all and NVIDIA_DRIVER_CAPABILITIES to compute,utility, as the image
+  # does; a value in extraEnv or env.config replaces it. On a node with several
+  # GPUs, all also exposes those the scheduler gave to other pods: set
+  # NVIDIA_VISIBLE_DEVICES in extraEnv to the card to share (e.g. "0").
   runtimeClassName: ""
   # service.port is the port Infinity listens on, the Service port, and the one
   # in RERANKER_BASE_URL. It replaces servicePort.

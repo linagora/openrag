@@ -348,6 +348,20 @@ OpenRAG names it (`RERANKER_MODEL`). Its port is set once, in
 which refuses `--model-id` and `--port`, and environment variables for the
 reranker alone in `reranker.extraEnv`.
 
+The reranker shares a GPU through the container runtime instead of requesting
+`nvidia.com/gpu`, which would take a whole card. Set
+`reranker.runtimeClassName` (`nvidia`) and a `reranker.nodeSelector` for your
+GPU nodes, as `values-linagora.yaml` does. Without them it runs on CPU, unless
+NVIDIA is the node's default runtime. The chart sets the variables the NVIDIA
+runtime reads, with the values Infinity's image also sets:
+`NVIDIA_VISIBLE_DEVICES=all` and `NVIDIA_DRIVER_CAPABILITIES=compute,utility`.
+The reranker's GPU therefore doesn't depend on the image. A value of yours in
+`reranker.extraEnv` or `env.config` replaces either one. On a node with several
+GPUs, `all` also exposes cards the scheduler gave to other pods: set
+`NVIDIA_VISIBLE_DEVICES` in `reranker.extraEnv` to the card to share (for
+example `"0"`). When `reranker.resources` requests an `nvidia.com/` resource,
+the chart leaves the device list to the device plugin.
+
 Readiness uses the configured model endpoints and API keys, just like inference.
 HTTP endpoints do not encrypt those credentials; configure HTTPS when transport
 encryption is required.
