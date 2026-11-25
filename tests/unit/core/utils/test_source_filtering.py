@@ -236,6 +236,8 @@ class TestExtractAndStripSourcesBlock:
             pytest.param("Allocated Resources: 12", id="allocated-resources"),
             pytest.param("Open resources: 5 available.", id="open-resources-inline"),
             pytest.param("datasources: 4", id="datasources"),
+            pytest.param("Set it in the config:\nmax_sources: 5", id="snake-max-sources"),
+            pytest.param("Use `num_sources: 3`", id="snake-num-sources"),
         ],
     )
     def test_sources_inside_another_word_is_not_a_tag(self, text):
