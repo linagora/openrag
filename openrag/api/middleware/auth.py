@@ -461,12 +461,28 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     }
                     if not eligible:
                         return await limiter.limited_response(request)
-                    auth_service, unavailable = self._resolve_auth_service(request)
-                    if unavailable is not None:
-                        return unavailable
-                    result, skipped = await self._validate_credentials(
-                        auth_service, credentials, enc_key=enc_key, identity=identity, eligible=eligible
+                    first_eligible_index = next(
+                        index for index, credential in enumerate(credentials) if credential in eligible
                     )
+                    eligible_values = {value for value, _kind in eligible}
+                    if any(
+                        credential not in eligible and credential[0] not in eligible_values
+                        for credential in credentials[:first_eligible_index]
+                    ):
+                        limited = await limiter.is_limited(request)
+                        # Do not let a lower-priority credential replace an
+                        # earlier, distinct credential that cannot be checked
+                        # during lockout. If the bucket reopened, normal auth
+                        # below can safely check credentials in their usual order.
+                        if limited:
+                            return await limiter.limited_response(request)
+                    if limited:
+                        auth_service, unavailable = self._resolve_auth_service(request)
+                        if unavailable is not None:
+                            return unavailable
+                        result, skipped = await self._validate_credentials(
+                            auth_service, credentials, enc_key=enc_key, identity=identity, eligible=eligible
+                        )
 
         if not limited:
             auth_service, unavailable = self._resolve_auth_service(request)

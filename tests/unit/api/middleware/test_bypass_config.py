@@ -1039,7 +1039,7 @@ async def test_uncached_bearer_is_checked_if_bucket_reopens_after_cached_cookie_
 
 
 @pytest.mark.asyncio
-async def test_cookie_precedence_is_restored_if_bucket_reopens_during_bearer_lookup(monkeypatch) -> None:
+async def test_cookie_precedence_is_restored_if_bucket_reopens_before_bearer_fallback(monkeypatch) -> None:
     from unittest.mock import AsyncMock
 
     monkeypatch.setenv("AUTH_MODE", "oidc")
@@ -1070,7 +1070,7 @@ async def test_cookie_precedence_is_restored_if_bucket_reopens_during_bearer_loo
 
     assert response.status_code == 200
     assert response.body == b"1"
-    svc.get_user_by_token_for_request.assert_awaited_once_with(_GENERATED_TOKEN)
+    svc.get_user_by_token_for_request.assert_not_awaited()
     svc.get_oidc_session_by_token_for_request.assert_awaited_once_with("valid-cookie")
 
 
@@ -1103,6 +1103,37 @@ async def test_successful_cached_cookie_needs_no_lower_priority_retry(monkeypatc
     assert check.await_count == 2
     svc.get_oidc_session_by_token_for_request.assert_awaited_once_with("valid-cookie")
     svc.get_user_for_request.assert_awaited_once_with(1)
+    svc.get_user_by_token_for_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_uncached_cookie_blocks_cached_bearer_during_lockout(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value={"id": 3, "user_id": 1})
+    svc.oidc_session_needs_refresh = lambda _session: False
+    svc.get_user_for_request = AsyncMock(return_value={"id": 1})
+    svc.get_user_by_token_for_request = AsyncMock(return_value={"id": 2})
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    request = _request(
+        path="/indexer/files",
+        headers={"cookie": f"{SESSION_COOKIE_NAME}=valid-cookie", "authorization": f"Bearer {_GENERATED_TOKEN}"},
+    )
+    limiter = middleware._auth_failure_limiter
+    identity = limiter._identity(request)
+    middleware._remember_authenticated_token(identity, _GENERATED_TOKEN, "token")
+    await limiter.record_failure(request)
+
+    response = await middleware.dispatch(request, _unused_call_next)
+
+    assert response.status_code == 429
+    svc.get_oidc_session_by_token_for_request.assert_not_awaited()
+    svc.get_user_for_request.assert_not_awaited()
     svc.get_user_by_token_for_request.assert_not_awaited()
 
 
@@ -1169,7 +1200,7 @@ async def test_failed_cached_oidc_ui_credential_rechecks_failure_bucket(monkeypa
     ("recent", "status", "lookups"),
     [
         ((("cookie", "session"),), 429, ["cookie"]),
-        (((_GENERATED_TOKEN, "token"),), 200, []),
+        (((_GENERATED_TOKEN, "token"),), 429, []),
         ((("cookie", "session"), (_GENERATED_TOKEN, "token")), 200, ["cookie"]),
     ],
 )
