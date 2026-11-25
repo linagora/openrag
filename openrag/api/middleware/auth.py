@@ -506,9 +506,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if await limiter.is_limited(request):
                 if result is None:
                     return await limiter.limited_response(request)
-                if selected is not None and any(
-                    skipped_credential[0] != selected[0] for skipped_credential in skipped
-                ):
+                if selected is not None and any(skipped_credential[0] != selected[0] for skipped_credential in skipped):
                     return await limiter.limited_response(request)
             elif skipped:
                 # Earlier skipped candidates can take precedence after the
