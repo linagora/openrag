@@ -260,3 +260,20 @@ async def test_timeout_raised_two_actors_down_keeps_the_root_cause(monkeypatch):
     )
     assert "ray::" not in reason
     assert "\x1b" not in reason
+
+
+def test_find_cause_hands_back_the_original_s_attributes_through_the_ray_wrapper():
+    """What a caller recovers across an actor is ``RayTaskError(Original)``: an
+    instance of the original type, reading the original's attributes."""
+    from core.utils.exceptions import InvalidDocumentError
+
+    original = InvalidDocumentError("The PDF could not be opened.", code="INVALID_PDF")
+    ray_error = RayTaskError("process_pdf", "Traceback ...", original).as_instanceof_cause()
+    produced = ray_utils._task_failed("MarkerLoader PDF loading (f.pdf)", ray_error)
+    produced.__cause__ = ray_error
+
+    found = ray_utils.find_cause(produced, InvalidDocumentError)
+
+    assert found is ray_error
+    assert (found.code, found.message) == ("INVALID_PDF", "The PDF could not be opened.")
+    assert ray_utils.find_cause(produced, MemoryError) is None

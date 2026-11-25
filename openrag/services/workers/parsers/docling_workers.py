@@ -14,6 +14,7 @@ import asyncio
 import threading
 from collections.abc import Iterator, Mapping
 from collections.abc import Set as AbstractSet
+from pathlib import Path
 from typing import Any
 
 import ray
@@ -22,7 +23,9 @@ from core.config import load_config
 from core.indexing.image_preprocessor import decode_data_uri
 from core.indexing.parsers.document_parser import BasePooledParser
 from core.indexing.parsers.progress import report_parser_substage
+from core.indexing.pdf_integrity import pdfium_page_count
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
+from core.utils.exceptions import InvalidDocumentError
 from core.utils.logging import get_logger
 from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 from docling.datamodel.base_models import InputFormat
@@ -59,7 +62,7 @@ from docling_core.types.doc.document import (
 )
 from pydantic import PrivateAttr
 
-from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
+from ..ray_utils import call_ray_actor_with_timeout, find_cause, retry_with_backoff
 
 logger = get_logger()
 
@@ -369,6 +372,18 @@ class DoclingPool:
 
     async def process_pdf(self, file_path: str) -> ConversionResult:
         timeout = self.config.loader.docling_timeout
+        # Docling reads the PDF with pdfium: a file pdfium cannot open raises
+        # ``InvalidDocumentError`` here, before a worker is taken and outside the
+        # retries, since the same bytes fail the same way every time. Off the
+        # loop, which every other conversion's bookkeeping runs on.
+        try:
+            await asyncio.to_thread(pdfium_page_count, file_path)
+        except InvalidDocumentError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - not the file's fault; the conversion retries it
+            self.logger.warning(f"Could not check that the PDF opens; converting it anyway: {exc}")
+        # The name, not the path: this ends up in the task's error.
+        description = f"DoclingPool PDF ({Path(file_path).name})"
 
         async def attempt(i: int) -> ConversionResult:
             actor: DoclingWorker = await self._queue.get()
@@ -376,7 +391,7 @@ class DoclingPool:
                 return await call_ray_actor_with_timeout(
                     actor.convert.remote(file_path),
                     timeout=timeout,
-                    task_description=f"DoclingPool PDF ({file_path})",
+                    task_description=description,
                 )
             finally:
                 await self._queue.put(actor)
@@ -385,7 +400,7 @@ class DoclingPool:
             attempt,
             max_retries=self.config.loader.docling_max_task_retry,
             base_delay=self.config.loader.docling_retry_base_delay,
-            task_description=f"DoclingPool PDF ({file_path})",
+            task_description=description,
         )
 
 
@@ -513,11 +528,19 @@ class DoclingLoader(BasePooledParser):
 
     async def _dispatch(self, file_path: str) -> ConversionResult:
         pool = self._pool()
-        return await call_ray_actor_with_timeout(
-            pool.process_pdf.remote(file_path),
-            timeout=self.config.loader.docling_timeout,
-            task_description=f"DoclingLoader PDF loading ({file_path})",
-        )
+        try:
+            return await call_ray_actor_with_timeout(
+                pool.process_pdf.remote(file_path),
+                timeout=self.config.loader.docling_timeout,
+                task_description=f"DoclingLoader PDF loading ({Path(file_path).name})",
+            )
+        except Exception as exc:
+            # The pool found the file unreadable: raise that error, not the Ray
+            # wrapper around it (see ``MarkerLoader._convert_pdf``).
+            invalid = find_cause(exc, InvalidDocumentError)
+            if invalid is None:
+                raise
+            raise InvalidDocumentError(invalid.message, code=invalid.code) from exc
 
     @staticmethod
     def _build_text_blocks(

@@ -200,6 +200,10 @@ JSON string containing file metadata. Example:
 **Response:**
 Returns 201 Created with a task status URL for tracking indexing progress.
 
+**Unreadable PDF (422):** no task is queued.
+- `INVALID_PDF` — no PDF loader can open the file: it is corrupt or truncated.
+- `ENCRYPTED_PDF` — the PDF needs a password.
+
 **Conflicts (409):**
 - The file is already in the partition's catalog.
 - `DOCUMENT_INDEXING_IN_PROGRESS` — another task is still indexing this
@@ -405,6 +409,9 @@ JSON string containing file metadata. Example:
 
 **Response:**
 Returns 202 Accepted with a task status URL for tracking indexing progress.
+
+**Unreadable PDF (422):** `INVALID_PDF` or `ENCRYPTED_PDF`, as for an upload;
+nothing is queued.
 """,
 )
 async def put_file(

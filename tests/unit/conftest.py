@@ -18,6 +18,7 @@ import os
 import tempfile
 from collections.abc import AsyncIterable, AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
@@ -266,3 +267,61 @@ def mock_catalog_store() -> MagicMock:
 @pytest.fixture()
 def memory_object_store() -> InMemoryObjectStore:
     return InMemoryObjectStore()
+
+
+def one_page_pdf(padding: int = 8192) -> bytes:
+    """A sound one-page PDF reading "Readable text", whose first object is its content stream.
+
+    The stream is padded to *padding* bytes, so a cut inside it leaves no whole
+    object: what is left is a PDF header and nothing either library can rebuild.
+    The page, the page tree and the catalog come after it, then the xref table.
+    """
+    content = b"BT /F1 24 Tf 72 720 Td (Readable text) Tj ET\n%" + b"x" * padding + b"\n"
+    objects = [
+        b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Type /Page /Parent 4 0 R /MediaBox [0 0 612 792] /Contents 1 0 R"
+        b" /Resources << /Font << /F1 2 0 R >> >> >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Catalog /Pages 4 0 R >>",
+    ]
+    out = bytearray(b"%PDF-1.7\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    out += b"trailer\n<< /Size %d /Root 5 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    return bytes(out)
+
+
+@dataclass(frozen=True)
+class PdfSamples:
+    """PDFs that open, or not, in pdfium and MuPDF (see ``core.indexing.pdf_integrity``)."""
+
+    #: Opens in both.
+    sound: bytes
+    #: Cut to its first 4 KiB, inside its first object: opens in neither.
+    truncated: bytes
+    #: Cut before its xref table and trailer: pdfium refuses it, MuPDF repairs it
+    #: and reads the page.
+    tail_cut: bytes
+    #: Needs a user password: both refuse it without one.
+    encrypted: bytes
+
+
+@pytest.fixture(scope="session")
+def pdf_samples() -> PdfSamples:
+    import pymupdf
+
+    sound = one_page_pdf()
+    with pymupdf.open(stream=sound, filetype="pdf") as doc:
+        encrypted = doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="secret", owner_pw="owner")
+    return PdfSamples(
+        sound=sound,
+        truncated=sound[:4096],
+        tail_cut=sound[: sound.index(b"\nxref\n") + 1],
+        encrypted=encrypted,
+    )

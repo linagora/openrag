@@ -133,7 +133,7 @@ class WhisperPool:
         return await call_ray_actor_with_timeout(
             self.workers[idx].transcribe.remote(path),
             timeout=self.config.loader.local_whisper.whisper_timeout,
-            task_description=f"WhisperPool transcribe ({path})",
+            task_description=f"WhisperPool transcribe ({Path(path).name})",
         )
 
     async def transcribe(self, path):
@@ -149,7 +149,7 @@ class WhisperPool:
             attempt,
             max_retries=self.config.loader.local_whisper.whisper_max_task_retry,
             base_delay=self.config.loader.local_whisper.whisper_retry_base_delay,
-            task_description=f"WhisperPool transcribe ({path})",
+            task_description=f"WhisperPool transcribe ({Path(path).name})",
         )
 
 

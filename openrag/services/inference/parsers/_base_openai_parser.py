@@ -45,10 +45,13 @@ class BaseOpenAIPdfClient(BaseClientParser, ABC):
 
     @staticmethod
     def _render_pdf_pages(raw_bytes: bytes, scale: float) -> list[Any]:
-        """Render every PDF page into a PIL Image. Pure-CPU; runs in a thread."""
-        import pypdfium2 as pdfium
+        """Render every PDF page into a PIL Image. Pure-CPU; runs in a thread.
 
-        pdf = pdfium.PdfDocument(raw_bytes)
+        ``InvalidDocumentError`` for a PDF pdfium cannot open.
+        """
+        from core.indexing.pdf_integrity import open_pdfium_document
+
+        pdf = open_pdfium_document(raw_bytes)
         try:
             return [page.render(scale=scale).to_pil() for page in pdf]
         finally:

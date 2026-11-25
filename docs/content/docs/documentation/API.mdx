@@ -139,13 +139,19 @@ Upload a new file to a specific partition for indexing.
   unsupported, or its content does not match its extension (for example a `.pdf`
   that is not a PDF, or a `.docx` that is not a readable Office package)
 - `422 Unprocessable Entity`: the `file` part has no filename, or the Office file
-  is password-protected or encrypted (`ENCRYPTED_OFFICE_FILE`)
+  is password-protected or encrypted (`ENCRYPTED_OFFICE_FILE`), or a PDF that no
+  PDF loader can open: `INVALID_PDF` when it is corrupt or truncated (a partial
+  upload or download), `ENCRYPTED_PDF` when it needs a password. Nothing is queued.
+  A PDF that only one of the two PDF libraries can open is accepted: PyMuPDF, the
+  default loader, repairs files that Marker and Docling cannot read.
 
 A `201` only means the file was queued. A document that yields no indexable
 content (for example a CSV with a header but no data rows, or a workbook with no visible sheet) is not
 refused at upload: its task ends `FAILED` with `NO_INDEXABLE_CONTENT`, visible
 through the task-status URL and `GET /indexer/task/{task_id}/error`, and its
-callback reports `"error"`.
+callback reports `"error"`. A PDF accepted at upload that the partition's PDF
+loader then cannot open fails the same way, with `INVALID_PDF` or `ENCRYPTED_PDF`,
+and is not retried: the same bytes fail the same way every time.
 
 ##### Indexing status callback
 

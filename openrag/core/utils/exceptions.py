@@ -13,6 +13,7 @@ The hierarchy is organised by concern:
     +-- AuthError
     |   +-- AuthenticationError          (401)
     +-- ValidationError                  (422)
+    |   +-- InvalidDocumentError
     |   +-- AmbiguousWorkspaceError
     |   +-- InvalidObjectKeyError        (400)
     |   +-- InvalidByteRangeError        (416)
@@ -54,6 +55,8 @@ The hierarchy is organised by concern:
 """
 
 from __future__ import annotations
+
+import functools
 
 # ---------------------------------------------------------------------------
 # Root
@@ -159,6 +162,25 @@ class ValidationError(OpenRAGError):
 
     def __init__(self, message: str, *, status_code: int = 422, code: str = "VALIDATION_ERROR", **kwargs):
         super().__init__(message, code=code, status_code=status_code, **kwargs)
+
+
+class InvalidDocumentError(ValidationError):
+    """A file that is not a readable document of its type: corrupt, truncated or encrypted.
+
+    The file's own outcome, not a failure of the service: the same bytes fail
+    the same way on every attempt, so nothing retries them. ``code`` says what
+    is wrong (``INVALID_PDF``, ``ENCRYPTED_PDF``), and the message is written
+    for the client, so it never names a server path.
+    """
+
+    def __init__(self, message: str, *, code: str = "INVALID_DOCUMENT", **kwargs):
+        super().__init__(message, status_code=422, code=code, **kwargs)
+
+    def __reduce__(self):
+        # Rebuilt from its fields, not from ``args``: those hold "CODE: message",
+        # which ``__init__`` would prefix with a code again once the error is
+        # unpickled in another process (a Ray actor, a PyMuPDF pool child).
+        return functools.partial(type(self), code=self.code, **self.extra), (self.message,)
 
 
 class AmbiguousWorkspaceError(ValidationError):

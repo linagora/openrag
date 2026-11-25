@@ -9,7 +9,14 @@ import pytest
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.preset import PartitionConfig
-from core.utils.exceptions import AuthError, ConfigError, ConflictError, PartitionNotFoundError, ValidationError
+from core.utils.exceptions import (
+    AuthError,
+    ConfigError,
+    ConflictError,
+    InvalidDocumentError,
+    PartitionNotFoundError,
+    ValidationError,
+)
 from services.orchestrators.indexing_service import IndexingService
 
 
@@ -394,6 +401,53 @@ async def test_add_file_hashes_non_http_input_when_digest_is_not_precomputed(tmp
         disp.dispatched[0]["metadata"]["content_sha256"]
         == "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
     )
+
+
+@pytest.mark.parametrize(("sample", "code"), [("truncated", "INVALID_PDF"), ("encrypted", "ENCRYPTED_PDF")])
+@pytest.mark.asyncio
+async def test_add_file_refuses_a_pdf_no_loader_can_open_before_queueing_it(tmp_path, pdf_samples, sample, code):
+    """A client gets the 422 now; before, the task was queued and failed once a
+    worker reached it, as an untyped error naming the server path (#1490)."""
+    f = tmp_path / "a1b2c3_report.pdf"
+    f.write_bytes(getattr(pdf_samples, sample))
+    disp = FakeDispatcher()
+    svc = _service(disp=disp)
+
+    with pytest.raises(InvalidDocumentError) as raised:
+        await svc.add_file(
+            file_path=str(f),
+            file_id="f1",
+            partition="p1",
+            metadata={},
+            sanitized_filename="report.pdf",
+            original_filename="report.pdf",
+            user={"id": 7},
+        )
+
+    assert raised.value.code == code
+    assert disp.dispatched == []
+
+
+@pytest.mark.parametrize("sample", ["sound", "tail_cut"])
+@pytest.mark.asyncio
+async def test_add_file_queues_a_pdf_a_loader_can_open(tmp_path, pdf_samples, sample):
+    """``tail_cut`` is refused by pdfium but read by PyMuPDF, the default loader."""
+    f = tmp_path / "a1b2c3_report.pdf"
+    f.write_bytes(getattr(pdf_samples, sample))
+    disp = FakeDispatcher()
+    svc = _service(disp=disp)
+
+    await svc.add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="p1",
+        metadata={},
+        sanitized_filename="report.pdf",
+        original_filename="report.pdf",
+        user={"id": 7},
+    )
+
+    assert len(disp.dispatched) == 1
 
 
 @pytest.mark.asyncio
