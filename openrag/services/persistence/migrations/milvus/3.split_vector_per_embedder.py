@@ -34,7 +34,7 @@ Usage — prefer the generic runner (from infra/compose, with DC and SVC set as 
 your ``-f`` overlays to DC if you start the stack with them). It
 reads Postgres as well as Milvus, so both must be up (``$DC up -d rdb milvus``) even though
 ``--no-deps`` does not start them:
-    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+    $DC run --no-deps --rm "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py [--dry-run]
 """
 
