@@ -13,6 +13,38 @@ The commands are written for bash. In zsh, run `setopt interactive_comments sh_w
 first. Without it, zsh does not treat `#` as the start of a comment and does not
 split `$DC` into `docker compose`, so the commands below fail.
 
+## OpenRAG 2.3.6
+
+The Compose stack now declares its bridge subnet so it can reserve the bundled
+proxy addresses. When upgrading an existing stack, schedule a service
+interruption and recreate the project network from `infra/compose/`:
+
+```sh
+docker compose down
+docker compose up -d
+```
+
+Before `down`, stop and disconnect any containers outside this Compose project
+that use its network. Reconnect them after `up -d` recreates the network; an
+attached external container can prevent removal and leave the stack stopped.
+Use the same `-f` files and profiles that you use for the deployment on both
+commands. Do not add `-v` to `down`, because that removes persistent volumes.
+A full `up -d` alone may leave an existing network with its old subnet, and a
+service-only update can stop that service while failing to remove the network.
+If you explicitly set `UVICORN_FORWARDED_ALLOW_IPS`, include loopback and the
+exact admin UI proxy address. With the TLS overlay, remove broad ranges such as
+`172.16.0.0/12`, which include NPM's address. Do not add the NPM address while
+private-network clients can set `X-Real-IP` at NPM. Until NPM's forwarding
+behavior is hardened, requests through NPM share its address for both the
+`/auth/*` and failed-login rate limits. The forwarded HTTPS scheme is ignored,
+so most generated API links remain `http`; `PREFERRED_URL_SCHEME=https` only
+corrects links from the indexing API. Trust other proxy addresses only after
+verifying their forwarded-header behavior. If Compose reports `Pool overlaps with other one on this address
+space`, choose an unused range and set `OPENRAG_COMPOSE_SUBNET`,
+`OPENRAG_COMPOSE_DYNAMIC_RANGE`, and `OPENRAG_ADMIN_UI_PROXY_IP`; with the
+TLS overlay, set `OPENRAG_NPM_PROXY_IP` as well. Keep both proxy addresses
+inside the subnet and outside the dynamic range.
+
 ## 2.3.0 or 2.3.1 to a later 2.3.x
 
 The fence that holds a file while an orphaned indexing worker may still write to
@@ -1124,11 +1156,19 @@ $DC stop "$SVC"
 
 #### 5. Run the Milvus migration
 
+The 2.3.0 image cannot run a command through its entrypoint, so the commands
+below bypass it and run as the image's app user (`--user`) rather than as root,
+with the entrypoint's `umask 002`: run as root, or with the default umask, `uv`
+leaves files in the `openrag_venv` volume that another image's user cannot
+replace, and the next start with that image fails with `Permission denied` while
+syncing it.
+
 A dry run first, which changes nothing and lists the pending migrations:
 
 ```bash
-$DC run --no-deps --rm --entrypoint "" "$SVC" \
-  uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
+APP_UID=$($DC run --no-deps --rm -T --entrypoint printenv "$SVC" APP_UID)
+$DC run --no-deps --rm --entrypoint sh --user "$APP_UID:0" "$SVC" -c \
+  'umask 002 && exec uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run'
 ```
 
 The dry run prints the collection's current version:
@@ -1161,8 +1201,8 @@ Check that the plan routes every partition to an embedder field, and review any
 lose their vector. Then apply it:
 
 ```bash
-$DC run --no-deps --rm --entrypoint "" "$SVC" \
-  uv run --no-dev python services/persistence/migrations/milvus/migrate.py
+$DC run --no-deps --rm --entrypoint sh --user "$APP_UID:0" "$SVC" -c \
+  'umask 002 && exec uv run --no-dev python services/persistence/migrations/milvus/migrate.py'
 ```
 
 A failed run can be run again: until its last step drops the old `vector` field,

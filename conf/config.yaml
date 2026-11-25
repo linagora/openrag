@@ -204,6 +204,7 @@ loader:
     application/vnd.openxmlformats-officedocument.wordprocessingml.document: .docx
     application/vnd.openxmlformats-officedocument.presentationml.presentation: .pptx
     application/vnd.openxmlformats-officedocument.spreadsheetml.sheet: .xlsx
+    application/vnd.ms-excel: .xls
     application/msword: .doc
     image/png: .png
     image/jpeg: .jpeg
@@ -235,6 +236,7 @@ loader:
     eml: EmlLoader
     docx: DocxLoader
     pptx: PPTXLoader
+    xls: XlsParser
     xlsx: XlsxParser
     doc: DocLoader
     png: ImageLoader

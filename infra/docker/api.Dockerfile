@@ -111,4 +111,6 @@ RUN useradd --uid ${APP_UID} --gid 0 --no-log-init --no-create-home \
 ENV APP_UID=${APP_UID}
 USER ${APP_UID}
 
-ENTRYPOINT ../entrypoint.sh
+# Exec form, so `docker compose run <svc> <cmd>` reaches entrypoint.sh as "$@"
+# and runs as the non-root app user (the shell form would drop the arguments).
+ENTRYPOINT ["/app/entrypoint.sh"]

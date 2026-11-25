@@ -201,7 +201,7 @@ describe("JobListPage filters", () => {
     expect(screen.queryByText("Caption, Topic tagging")).toBeNull();
   });
 
-  it("shows only lifecycle status in All and stage progress in Active", async () => {
+  it("shows stage progress for running rows in every tab and lifecycle status for the rest", async () => {
     const activeTask = task("active-task", "SERIALIZING", "active.pdf", "docs", {
       stage_progress: {
         stage_id: "parse",
@@ -234,11 +234,13 @@ describe("JobListPage filters", () => {
     renderJobs();
 
     expect(await screen.findByText("active.pdf")).not.toBeNull();
-    expect(screen.getByText("Active", { selector: "[data-slot='badge']" })).not.toBeNull();
+    const allTabParsing = screen.getByText("Parsing");
+    expect(allTabParsing.closest("[data-slot='badge']")?.textContent).toMatch(/^Parsing · /);
+    expect(allTabParsing.closest("tr")?.textContent).toContain("active.pdf");
+    expect(screen.queryByText("Active", { selector: "[data-slot='badge']" })).toBeNull();
     expect(screen.getByText("COMPLETED", { selector: "[data-slot='badge']" })).not.toBeNull();
     expect(screen.getByText("QUEUED", { selector: "[data-slot='badge']" })).not.toBeNull();
-    expect(screen.queryByText("Parsing")).toBeNull();
-    expect(screen.queryByText("Contextualization")).toBeNull();
+    expect(screen.queryByText(/Contextualization|Finalizing/)).toBeNull();
     expect(screen.queryByText("Completed with degradation")).toBeNull();
     expect(screen.queryByText("SERIALIZING")).toBeNull();
 
@@ -372,10 +374,11 @@ describe("JobListPage filters", () => {
     expect(embeddingLabel.closest("[data-slot='badge']")?.textContent).toBe("Embedding · <5s");
   }, 10_000);
 
-  it("waits for a stage update when an active task has no stage data", async () => {
+  it("waits for a stage update when an active task has no stage data, in every tab", async () => {
+    const runningTask = task("unknown-stage", "SERIALIZING", "unknown.pdf");
     listTasksMock.mockImplementation(async (status) => status === "active"
       ? {
-          tasks: [task("unknown-stage", "SERIALIZING", "unknown.pdf")],
+          tasks: [runningTask],
           pagination: {
             offset: 0,
             limit: 10,
@@ -384,11 +387,15 @@ describe("JobListPage filters", () => {
             available_partitions: ["docs"],
           },
         }
-      : { tasks: [task("completed", "COMPLETED", "completed.pdf")] });
+      : { tasks: [runningTask, task("completed", "COMPLETED", "completed.pdf")] });
 
     renderJobs();
 
     await screen.findByText("completed.pdf");
+    const allTabWaiting = screen.getByText("Waiting for stage update…");
+    expect(allTabWaiting.closest("tr")?.textContent).toContain("unknown.pdf");
+    expect(screen.queryByText("Active", { selector: "[data-slot='badge']" })).toBeNull();
+
     await userEvent.click(screen.getByRole("tab", { name: "Active" }));
     expect(await screen.findByText("Waiting for stage update…")).not.toBeNull();
     expect(screen.queryByText("Active", { selector: "[data-slot='badge']" })).toBeNull();

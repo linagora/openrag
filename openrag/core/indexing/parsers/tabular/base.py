@@ -48,3 +48,28 @@ def markdown_row(cells: list[str]) -> str:
         cell = cell.replace("\r\n", "\n").replace("\r", "\n")
         escaped.append(cell.replace("\n", "<br>"))
     return "| " + " | ".join(escaped) + " |"
+
+
+def _rendered_header_key(value: str) -> str:
+    """Return the canonical cell text produced by the Markdown renderer."""
+    return markdown_row([value])[2:-2]
+
+
+def normalize_unique_headers(values: list[str]) -> list[str]:
+    """Normalize headers and retain unique Markdown-rendered identities."""
+    headers = normalize_headers([value.strip() for value in values])
+    reserved = {_rendered_header_key(name) for name in headers}
+    used = set()
+    for index, name in enumerate(headers):
+        candidate, suffix = name, 2
+        candidate_key = _rendered_header_key(candidate)
+        if candidate_key in used:
+            candidate = f"{name}_{suffix}"
+            candidate_key = _rendered_header_key(candidate)
+            while candidate_key in reserved or candidate_key in used:
+                suffix += 1
+                candidate = f"{name}_{suffix}"
+                candidate_key = _rendered_header_key(candidate)
+        headers[index] = candidate
+        used.add(candidate_key)
+    return headers

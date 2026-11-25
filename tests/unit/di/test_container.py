@@ -933,6 +933,15 @@ class TestPhase14ServiceWiring:
         assert service._partition_service is c.partition_service
         assert c.partition_service._config is settings
 
+    def test_mcp_service_downloads_into_the_data_dir(self):
+        """index_url stores its download where the upload routes store a file."""
+        settings = _settings()
+        c = ServiceContainer(settings)
+        for name in ("retrieval", "indexing", "job", "conversion"):
+            setattr(c, f"_{name}_service", object())
+
+        assert c.mcp_service._data_dir == settings.paths.data_dir
+
     def test_prompt_service_is_lazy_cached_on_shared_prompt_repo(self):
         """Expose PromptService wired to the shared prompt_repo."""
         from services.orchestrators.prompt_service import PromptService
