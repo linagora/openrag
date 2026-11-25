@@ -16,8 +16,8 @@ by filters. Use one logical table per sheet for accurate column labels.
 
 OpenRAG indexes stored values, including cached formula results. Formula expressions, charts, macros, and embedded
 objects are outside this XLS path. Password-protected workbooks are rejected. An XLS workbook may be up to 16 MiB,
-with up to 128 worksheets, 2 million cells in any worksheet's bounding rectangle, and 5 million across the visible
-worksheets. OpenRAG checks cell coordinates before xlrd loads each worksheet. Indexing batches hold up to 1,000 rows or 2 MiB of
+with up to 128 worksheets, 2 million cell slots per worksheet, and 5 million across the visible worksheets. Each
+row counts only through its own last stored cell, including formatted blanks. OpenRAG checks cell coordinates before xlrd loads each worksheet. Indexing batches hold up to 1,000 rows or 2 MiB of
 rendered text, and the complete workbook can produce up to 32 MiB of rendered text.
 For XLSX table detection, chart extraction, or formula text, save a copy as `.xlsx` before upload.
 

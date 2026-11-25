@@ -178,7 +178,8 @@ def _check_sheet_area(book: xlrd.book.Book, index: int, limit: int) -> tuple[int
     position = book._sh_abs_posn[index]
     if unpack_from("<H", data, position)[0] not in biffh.bofcodes:
         raise xlrd.XLRDError("Missing BIFF worksheet beginning")
-    rows = columns = hyperlink_cells = 0
+    rows = padded_cells = hyperlink_cells = 0
+    widths: dict[int, int] = {}
     dimensions_seen = False
     in_embedded_object = False
     first_record = True
@@ -192,7 +193,7 @@ def _check_sheet_area(book: xlrd.book.Book, index: int, limit: int) -> tuple[int
             first_record = False
         elif code == biffh.XL_EOF:
             if not in_embedded_object:
-                return rows, columns
+                return rows, padded_cells + rows - len(widths)
             in_embedded_object = False
         elif not in_embedded_object:
             if code in biffh.bofcodes:
@@ -217,8 +218,13 @@ def _check_sheet_area(book: xlrd.book.Book, index: int, limit: int) -> tuple[int
                 if code in _MULTIPLE_CELLS:
                     column = unpack_from("<H", data, position - 2)[0]
                 rows = max(rows, row + 1)
-                columns = max(columns, column + 1)
-                if rows * columns > limit:
+                # xlrd's ragged rows pad only to their own last column.
+                # Count formatted BLANKs too, since xlrd materializes them.
+                old_width = widths.get(row, 0)
+                if column + 1 > old_width:
+                    widths[row] = column + 1
+                    padded_cells += column + 1 - old_width
+                if padded_cells + rows - len(widths) > limit:
                     raise _limit("XLS workbook exceeds the worksheet area limit")
     raise xlrd.XLRDError("Missing BIFF worksheet ending")
 
@@ -269,6 +275,7 @@ def _worksheet_batches(
 ) -> Iterator[TextBlock]:
     hidden_columns = {col for col, info in sheet.colinfo_map.items() if info.hidden}
     columns = set()
+    populated_rows: list[int] = []
     first_row = last_row = None
     first_cells: dict[int, str] = {}
     first_all_text = True
@@ -283,6 +290,7 @@ def _worksheet_batches(
         if not occupied:
             continue
         columns.update(occupied)
+        populated_rows.append(row)
         if first_row is None:
             first_row = row
             first_all_text = all(kinds[col] == xlrd.XL_CELL_TEXT for col in occupied)
@@ -335,9 +343,10 @@ def _worksheet_batches(
         )
 
     lines, numbers, size = [], [], base_bytes
-    for row, kinds, values in _visible_rows(sheet, rows):
+    for row in populated_rows:
         if row == header_row:
             continue
+        kinds, values = sheet.row_types(row), sheet.row_values(row)
         cells = [
             _cell_text(
                 values[col],
@@ -404,10 +413,8 @@ class XlsParser(TabularBatchParser):
                     # xlrd only exposes visibility publicly on a loaded sheet.
                     if book._sheet_visibility[index]:
                         continue
-                    rows, columns = _check_sheet_area(book, index, min(_MAX_SHEET_AREA, _MAX_WORKBOOK_AREA - area))
-                    # xlrd includes merged formatting in nrows/ncols. Budget
-                    # the physical cell records checked by the preflight.
-                    area += rows * columns
+                    rows, cells = _check_sheet_area(book, index, min(_MAX_SHEET_AREA, _MAX_WORKBOOK_AREA - area))
+                    area += cells
                     sheet = book.sheet_by_index(index)
                     try:
                         for block in _worksheet_batches(sheet, index, rows, elapsed_styles, self.batch_size):

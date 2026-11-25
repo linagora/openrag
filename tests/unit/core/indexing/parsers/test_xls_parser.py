@@ -147,3 +147,19 @@ def test_xls_uses_stored_cells_for_area_and_preserves_elapsed_time(monkeypatch):
     assert "| Shift | 1 day, 12:00:00 |" in table.text
     assert "| Total | 2 days, 0:00:00 |" in table.text
     assert "| Rate | 2 |" in table.text
+
+
+def test_xls_wide_formatted_merge_does_not_widen_every_row(monkeypatch):
+    fixture = WORKBOOK.with_name("legacy_workbook_wide_merge.xls")
+    document = Document(filename="merged.xls", source_path=str(fixture))
+    monkeypatch.setattr(xls_parser, "_MAX_SHEET_AREA", 432)
+    (table,) = XlsParser().iter_batches(document)
+    assert table.metadata["table_row_numbers"] == list(range(2, 26))
+    assert table.metadata["table_worksheet_column_indices"] == [1, 2, 3, 4, 5, 6]
+    assert "record-24" in table.text
+
+    # xlwt writes formatted BLANK records for the title's merged cells.
+    # Count those 256 slots plus 24 six-cell rows.
+    monkeypatch.setattr(xls_parser, "_MAX_SHEET_AREA", 399)
+    with pytest.raises(PipelineError, match="worksheet area limit"):
+        list(XlsParser().iter_batches(document))
