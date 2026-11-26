@@ -87,6 +87,11 @@ def test_several_replicas_sharing_a_ray_cluster_render(tmp_path: Path, shared_ra
     assert result.returncode == 0, result.stderr
 
 
+VALUE_FROM_MARKER_GPUS = (
+    '[{"name":"MARKER_NUM_GPUS","valueFrom":{"configMapKeyRef":{"name":"gpu-sizing","key":"MARKER_NUM_GPUS"}}}]'
+)
+
+
 def _gpus(count: int) -> tuple[str, ...]:
     return ("--set-json", f'openrag.resources={{"limits":{{"nvidia.com/gpu":{count}}}}}')
 
@@ -104,6 +109,8 @@ def _gpus(count: int) -> tuple[str, ...]:
         (("--set-string", "env.config.MARKER_NUM_GPUS=1", "--set-string", "env.config.DOCLING_NUM_GPUS=0"), "Whisper"),
         # env.secrets wins over env.config at runtime.
         (("--set-string", "env.secrets.MARKER_POOL_SIZE=2"), "Marker"),
+        # openrag.extraEnv lands in the container env, which wins over envFrom.
+        (("--set-json", 'openrag.extraEnv=[{"name":"MARKER_NUM_GPUS","value":"2"}]'), "Marker"),
         # Fits if Docling starts first (0.6 + 0.4 on each card), but not if Marker
         # does: both 0.4 land on the first card and the second 0.6 has no room.
         (
@@ -121,6 +128,7 @@ def _gpus(count: int) -> tuple[str, ...]:
         "docling-counts",
         "whisper-counts",
         "pool-from-secrets",
+        "gpus-from-extra-env",
         "start-order",
     ],
 )
@@ -157,6 +165,10 @@ def test_a_fractional_reservation_above_one_gpu_is_refused(tmp_path: Path) -> No
         # beside another Secret it is a leftover the workers never read.
         ("--set-string", "env.secrets.MARKER_POOL_SIZE=2", "--set", "env.existingSecret=openrag-env"),
         ("--set-string", "env.secrets.MARKER_POOL_SIZE=2", "--set", "env.secretsProvider.type=externalSecret"),
+        # An extraEnv valueFrom hides env.config and env.secrets, and its value
+        # cannot be read at render time: the check is skipped.
+        ("--set-string", "env.config.MARKER_NUM_GPUS=2", "--set-json", f"openrag.extraEnv={VALUE_FROM_MARKER_GPUS}"),
+        ("--set-string", "env.secrets.MARKER_POOL_SIZE=2", "--set-json", f"openrag.extraEnv={VALUE_FROM_MARKER_GPUS}"),
     ],
     ids=[
         "fits-one-card",
@@ -167,6 +179,8 @@ def test_a_fractional_reservation_above_one_gpu_is_refused(tmp_path: Path) -> No
         "external-ray-from-secret",
         "secrets-beside-an-existing-secret",
         "secrets-beside-an-operator-secret",
+        "config-hidden-by-extra-env-value-from",
+        "secrets-hidden-by-extra-env-value-from",
     ],
 )
 def test_gpu_workers_that_fit_render(tmp_path: Path, args: tuple[str, ...]) -> None:
