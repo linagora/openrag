@@ -1328,6 +1328,10 @@ env:
     # only resolves within values.yaml and goes stale once overridden via
     # --set/-f) so the secret always matches the actual DB credential.
     POSTGRES_PASSWORD: "{{ .Values.postgresql.auth.password }}"
+    # For lockout revalidation, use `or-` plus 32 lowercase hex digits.
+    # Run this in a shell and set AUTH_TOKEN to its output:
+    #   printf 'or-%s\n' "$(openssl rand -hex 16)"
+    # Other valid token formats remain subject to 429 during a failed-auth lockout.
     AUTH_TOKEN: "" # API KEY for OpenRAG
     METRICS_TOKEN: "" # Bearer for Prometheus on GET /metrics; empty = 403 unless METRICS_ALLOW_UNAUTHENTICATED
     HF_TOKEN: "" # HuggingFace token

@@ -66,7 +66,8 @@ embedder:
 
 # --- Vector Database (Milvus) ---
 # Env: VDB_HOST, VDB_PORT, VDB_CONNECTOR_NAME, VDB_COLLECTION_NAME, VDB_HYBRID_SEARCH,
-#      VDB_ENABLE_INSERTION, VDB_TIMEOUT, VDB_JSON_MAX_LENGTH, VDB_JSON_SAFETY_MARGIN_BYTES
+#      VDB_ENABLE_INSERTION, VDB_TIMEOUT, VDB_JSON_MAX_LENGTH, VDB_JSON_SAFETY_MARGIN_BYTES,
+#      VDB_INSERT_BATCH_MAX_BYTES, VDB_INSERT_BATCH_MAX_ROWS
 vectordb:
   host: milvus
   port: 19530
@@ -78,6 +79,11 @@ vectordb:
   # Match Milvus's common.JSONMaxLength. Oversized rows are fitted below it.
   json_max_length: 65536
   json_safety_margin_bytes: 1024
+  # Rows are written in requests of at most this many (estimated) bytes and rows.
+  # Milvus refuses a request over proxy.grpc.serverMaxRecvSize (128 MiB by default),
+  # and on 3.0.5 one of 56 MiB already held the next write for about a minute (WAL rate limit).
+  insert_batch_max_bytes: 16777216 # 16 MiB
+  insert_batch_max_rows: 10000
   schema_version: 3 # Increment when the collection schema changes and a migration is required
 
 # --- Relational Database (PostgreSQL) ---
@@ -205,6 +211,8 @@ loader:
     application/vnd.openxmlformats-officedocument.presentationml.presentation: .pptx
     application/vnd.openxmlformats-officedocument.spreadsheetml.sheet: .xlsx
     application/vnd.ms-excel: .xls
+    application/vnd.oasis.opendocument.text: .odt
+    application/vnd.oasis.opendocument.presentation: .odp
     application/msword: .doc
     image/png: .png
     image/jpeg: .jpeg
@@ -238,6 +246,8 @@ loader:
     pptx: PPTXLoader
     xls: XlsParser
     xlsx: XlsxParser
+    odt: OdtLoader
+    odp: OdpLoader
     doc: DocLoader
     png: ImageLoader
     jpeg: ImageLoader

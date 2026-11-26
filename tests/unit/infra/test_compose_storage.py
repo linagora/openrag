@@ -46,6 +46,8 @@ def _assert_milvus_initializer(services: dict) -> None:
     assert initializer["cap_add"] == ["CHOWN", "DAC_READ_SEARCH"]
 
     command = initializer["command"][0]
+    # Already-initialized storage must not be rescanned (issue #1493).
+    assert '"$$(stat -c %u:%g /var/lib/milvus)" = "999:999"' in command
     assert "! -uid 999" in command
     assert "! -gid 999" in command
     assert "exit 1" in command
