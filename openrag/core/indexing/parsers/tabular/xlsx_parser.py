@@ -17,7 +17,12 @@ from pathlib import Path
 from typing import Any
 
 from core.indexing.parsers.registry import parser_registry
-from core.indexing.parsers.tabular.base import TabularBatchParser, markdown_row, normalize_headers
+from core.indexing.parsers.tabular.base import (
+    TabularBatchParser,
+    markdown_row,
+    normalize_headers,
+    normalize_unique_headers,
+)
 from core.indexing.parsers.tabular.xlsx_drawings import CHART_MODES, ChartLimits, TableCoverage, WorkbookCharts
 from core.indexing.parsers.tabular.xlsx_row_router import route_sheet_tables
 from core.indexing.parsers.tabular.xlsx_validation import SheetInfo, TableRegion, XlsxLimits, limit, validate_ooxml
@@ -74,31 +79,6 @@ def _cell_display_format(value: Any) -> dict[str, Any] | None:
     if isinstance(value, (_FormulaValue, _FormattedValue)):
         return value.display_format
     return None
-
-
-def _rendered_header_key(value: str) -> str:
-    """Return the canonical cell text produced by the Markdown renderer."""
-    return markdown_row([value])[2:-2]
-
-
-def _normalize_unique_headers(values: list[str]) -> list[str]:
-    """Normalize headers and retain unique Markdown-rendered identities."""
-    headers = normalize_headers([value.strip() for value in values])
-    reserved = {_rendered_header_key(name) for name in headers}
-    used = set()
-    for index, name in enumerate(headers):
-        candidate, suffix = name, 2
-        candidate_key = _rendered_header_key(candidate)
-        if candidate_key in used:
-            candidate = f"{name}_{suffix}"
-            candidate_key = _rendered_header_key(candidate)
-            while candidate_key in reserved or candidate_key in used:
-                suffix += 1
-                candidate = f"{name}_{suffix}"
-                candidate_key = _rendered_header_key(candidate)
-        headers[index] = candidate
-        used.add(candidate_key)
-    return headers
 
 
 _HEADER_ALIGNMENT_ROWS = 3
@@ -1498,7 +1478,7 @@ class XlsxParser(TabularBatchParser):
                 for physical_row, values in enumerate(row_iterator, start=table.start_row):
                     if use_declared_names and physical_row >= selected_header_row:
                         names = [table.declared_column_names[column - table.start_column] for column in visible_columns]
-                        header_values = _normalize_unique_headers(normalize_headers([name.strip() for name in names]))
+                        header_values = normalize_unique_headers(normalize_headers([name.strip() for name in names]))
                         header_row = None
                         # This row is data: put it back in front of the stream.
                         row_iterator = chain([values], row_iterator)
@@ -1531,7 +1511,7 @@ class XlsxParser(TabularBatchParser):
                         flattened, header_hierarchy, header_hierarchy_rows = _column_header_hierarchy(
                             sheet, table, visible_columns, preamble_values, leaf_headers
                         )
-                        header_values = _normalize_unique_headers(flattened)
+                        header_values = normalize_unique_headers(flattened)
                         for index, hierarchy in enumerate(header_hierarchy):
                             hierarchy["column"] = header_values[index]
                         header_row = physical_row

@@ -206,3 +206,22 @@ def test_eml_caps_attachment_candidates_before_decoding(monkeypatch):
 
     assert attachments == []
     assert attachment_decodes == _MAX_EML_ATTACHMENTS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "parameter",
+    [b"filename*=utf-8\x00''a.csv", b"filename*", b"filename*0*"],
+    ids=["charset-with-nul", "truncated", "truncated-continuation"],
+)
+async def test_eml_skips_part_with_unreadable_content_disposition(parameter):
+    raw = (
+        b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+        b"--b\r\nContent-Type: text/plain\r\n\r\nbody text\r\n"
+        b"--b\r\nContent-Disposition: attachment; " + parameter + b"\r\n\r\nx\r\n"
+        b"--b--\r\n"
+    )
+    doc = Document(filename="mail.eml", content_type=DocumentType.EML, raw_bytes=raw)
+    processed = await EmlParser().parse(doc)
+    assert processed.text_blocks[0].text == "body text"
+    assert processed.metadata["email_attachment_count"] == 0
