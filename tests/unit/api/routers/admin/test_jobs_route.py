@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
+from starlette.datastructures import URL
 from api.dependencies.auth import current_user, require_task_owner
-from api.routers.admin.indexing import get_task_error, get_task_stage_progress
+from api.routers.admin.indexing import get_task_error, get_task_status, get_task_stage_progress
 from api.routers.admin.indexing import router as indexing_router
 from api.routers.admin.jobs import list_tasks
 from api.routers.admin.jobs import router as jobs_router
@@ -14,8 +16,14 @@ from fastapi.testclient import TestClient
 
 
 class _Request:
+    def __init__(self, scheme: str = "https") -> None:
+        self.scheme = scheme
+
     def url_for(self, name: str, **kwargs) -> str:
-        return f"https://openrag.test/{name}/{kwargs['task_id']}"
+        path = f"/indexer/task/{kwargs['task_id']}"
+        if name == "get_task_error":
+            path += "/error"
+        return URL(f"{self.scheme}://openrag.test{path}")
 
 
 class _JobService:
@@ -47,6 +55,27 @@ class _FailedJobService:
         ]
 
 
+class _TaskLinksService:
+    async def list_tasks(self, **_kwargs):
+        return [
+            {
+                "task_id": "task-completed",
+                "state": "COMPLETED",
+                "outcome": "completed",
+                "details": {},
+                "created_at": "2026-09-17T10:00:00+00:00",
+                "duration_ms": 1200,
+            },
+            {
+                "task_id": "task-failed",
+                "state": "FAILED",
+                "outcome": "failed",
+                "details": {},
+                "created_at": "2026-09-17T10:00:00+00:00",
+                "duration_ms": 1200,
+                "error_summary": "ValueError: parser failed",
+            },
+        ]
 class _PaginatedJobService:
     def __init__(self) -> None:
         self.kwargs = None
@@ -87,6 +116,10 @@ class _IndexingService:
         self.reason_calls += 1
         return self.error_reason
 
+class _TaskStatusService:
+    async def get_task_state(self, _task_id: str) -> str:
+        return "FAILED"
+    
 
 class _StageJobService:
     def __init__(self, result=None) -> None:
@@ -102,6 +135,7 @@ class _StageJobService:
 async def test_jobs_route_exposes_the_degraded_outcome() -> None:
     response = await list_tasks(
         _Request(),
+        config=SimpleNamespace(server=SimpleNamespace(preferred_url_scheme=None)),
         user={"id": 7, "is_admin": False},
         service=_JobService(),
     )
@@ -115,12 +149,40 @@ async def test_jobs_route_exposes_the_degraded_outcome() -> None:
 async def test_jobs_route_exposes_failure_summary_supplied_for_an_admin() -> None:
     response = await list_tasks(
         _Request(),
+        config=SimpleNamespace(server=SimpleNamespace(preferred_url_scheme=None)),
         user={"id": 7, "is_admin": True},
         service=_FailedJobService(),
     )
 
     payload = json.loads(response.body)
     assert payload["tasks"][0]["error_summary"] == "ValueError: parser failed"
+
+
+@pytest.mark.parametrize(
+    ("preferred_url_scheme", "request_scheme", "expected_scheme"),
+    [
+        ("https", "http", "https"),
+        (None, "http", "http"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_jobs_route_builds_task_links_using_configured_or_request_scheme(
+    preferred_url_scheme: str | None,
+    request_scheme: str,
+    expected_scheme: str,
+) -> None:
+    response = await list_tasks(
+        _Request(scheme=request_scheme),
+        config=SimpleNamespace(server=SimpleNamespace(preferred_url_scheme=preferred_url_scheme)),
+        user={"id": 7, "is_admin": True},
+        service=_TaskLinksService(),
+    )
+
+    payload = json.loads(response.body)
+    tasks = payload["tasks"]
+    assert tasks[0]["url"] == f"{expected_scheme}://openrag.test/indexer/task/task-completed"
+    assert tasks[1]["url"] == f"{expected_scheme}://openrag.test/indexer/task/task-failed"
+    assert tasks[1]["error_url"] == f"{expected_scheme}://openrag.test/indexer/task/task-failed/error"
 
 
 @pytest.mark.asyncio
@@ -213,6 +275,37 @@ async def test_task_owner_does_not_receive_or_fetch_the_internal_reason() -> Non
     assert payload["summary"] == "Task failed. Contact an administrator for details."
     assert service.reason_calls == 0
 
+@pytest.mark.parametrize(
+    ("preferred_url_scheme", "request_scheme", "expected_scheme"),
+    [
+        ("https", "http", "https"),
+        (None, "http", "http"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_task_status_error_url_uses_configured_or_request_scheme(
+    preferred_url_scheme: str | None,
+    request_scheme: str,
+    expected_scheme: str,
+) -> None:
+
+    response = await get_task_status(
+        request=_Request(scheme=request_scheme),
+        task_id="task-failed",
+        task_details={},
+        config=SimpleNamespace(
+            server=SimpleNamespace(
+                preferred_url_scheme=preferred_url_scheme
+            )
+        ),
+        service=_TaskStatusService(),
+    )
+
+    payload = json.loads(response.body)
+
+    assert payload["error_url"] == (
+        f"{expected_scheme}://openrag.test/indexer/task/task-failed/error"
+    )
 
 @pytest.mark.asyncio
 async def test_stage_history_route_passes_a_bounded_cursor_to_the_job_service() -> None:

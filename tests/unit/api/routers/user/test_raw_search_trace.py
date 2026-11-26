@@ -13,7 +13,7 @@ from api.error_handlers import register_error_handlers
 from api.routers.user.search import router as search_router
 from core.models.chunk import Chunk
 from core.retrieval.trace import candidates_from_chunks, canonical_fingerprint
-from di.providers import get_retrieval_service, get_workspace_service
+from di.providers import get_config, get_retrieval_service, get_workspace_service
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -79,6 +79,7 @@ def _client(*, retrieval=None, user=None, workspaces=None):
     app.dependency_overrides[get_retrieval_service] = lambda: retrieval
     app.dependency_overrides[get_workspace_service] = lambda: workspaces or _Workspaces()
     app.dependency_overrides[get_retrieval_diagnostics_guard] = lambda: _AllowDiagnostics()
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace(server=SimpleNamespace(preferred_url_scheme=None))
     return TestClient(app), retrieval
 
 
@@ -167,6 +168,7 @@ def test_trace_requires_administrator_privileges():
     app.dependency_overrides[require_partition_viewer] = lambda: {"id": 7, "is_admin": False}
     app.dependency_overrides[get_retrieval_service] = lambda: _Retrieval()
     app.dependency_overrides[get_workspace_service] = lambda: _Workspaces()
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace(server=SimpleNamespace(preferred_url_scheme=None))
 
     response = TestClient(app).get(
         "/search/partition/mine",

@@ -1,6 +1,8 @@
 from types import SimpleNamespace
-
 import pytest
+from core.config.root import Settings
+from api.routers.admin.partitions import router as partitions_router
+
 from api.dependencies.auth import (
     current_user,
     current_user_or_admin_partitions_list,
@@ -8,7 +10,7 @@ from api.dependencies.auth import (
 )
 from api.error_handlers import register_error_handlers
 from api.routers.user.search import router as search_router
-from di.providers import get_auth_service, get_partition_service, get_retrieval_service, get_workspace_service
+from di.providers import get_config, get_auth_service, get_partition_service, get_retrieval_service, get_workspace_service
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -28,6 +30,15 @@ class _RetrievalService:
     async def search(self, **_kwargs):
         raise AssertionError("search must not run without an authorized partition scope")
 
+def _test_settings(*, preferred_scheme=None):
+    settings = Settings()
+    return settings.model_copy(
+        update={
+            "server": settings.server.model_copy(
+                update={"preferred_url_scheme": preferred_scheme}
+            )
+        }
+    )
 
 def _client(*, user_partitions):
     app = FastAPI()
@@ -42,6 +53,7 @@ def _client(*, user_partitions):
     app.dependency_overrides[get_partition_service] = lambda: _PartitionService()
     app.dependency_overrides[get_retrieval_service] = lambda: _RetrievalService()
     app.dependency_overrides[get_workspace_service] = lambda: object()
+    app.dependency_overrides[get_config] = lambda: _test_settings()
     return TestClient(app)
 
 
@@ -90,6 +102,7 @@ def test_search_file_binds_file_id_via_filter_params():
     app.dependency_overrides[require_partition_viewer] = lambda: None
     app.dependency_overrides[validate_file_id] = lambda: "abc123"
     app.dependency_overrides[get_retrieval_service] = lambda: _CapturingRetrieval()
+    app.dependency_overrides[get_config] = lambda: _test_settings()
 
     resp = TestClient(app).get(
         "/search/partition/mine/file/abc123", params={"text": "q", "filter": "page > 5 OR page < 2"}
@@ -140,6 +153,7 @@ def _client_with_workspace(*, user_partitions, workspaces, retrieval):
     app.dependency_overrides[get_partition_service] = lambda: _PartitionService()
     app.dependency_overrides[get_retrieval_service] = lambda: retrieval
     app.dependency_overrides[get_workspace_service] = lambda: workspaces
+    app.dependency_overrides[get_config] = lambda: _test_settings()
     return TestClient(app)
 
 
@@ -204,6 +218,7 @@ def test_search_one_partition_valid_workspace_scopes_files():
     app.dependency_overrides[require_partition_viewer] = lambda: None
     app.dependency_overrides[get_retrieval_service] = lambda: retrieval
     app.dependency_overrides[get_workspace_service] = lambda: _FakeWorkspaces(scope)
+    app.dependency_overrides[get_config] = lambda: _test_settings()
 
     resp = TestClient(app).get("/search/partition/mine", params={"text": "hello", "workspace": "w1"})
 
@@ -222,6 +237,7 @@ def test_search_one_partition_empty_workspace_forwards_empty_file_ids():
     app.dependency_overrides[require_partition_viewer] = lambda: None
     app.dependency_overrides[get_retrieval_service] = lambda: retrieval
     app.dependency_overrides[get_workspace_service] = lambda: _FakeWorkspaces(scope)
+    app.dependency_overrides[get_config] = lambda: _test_settings()
 
     resp = TestClient(app).get("/search/partition/mine", params={"text": "hello", "workspace": "w1"})
 
@@ -240,6 +256,7 @@ def test_search_one_partition_invalid_workspace_404s():
     app.dependency_overrides[require_partition_viewer] = lambda: None
     app.dependency_overrides[get_retrieval_service] = lambda: retrieval
     app.dependency_overrides[get_workspace_service] = lambda: _FakeWorkspaces(None)
+    app.dependency_overrides[get_config] = lambda: _test_settings()
 
     resp = TestClient(app).get("/search/partition/mine", params={"text": "hello", "workspace": "ghost"})
 
@@ -247,6 +264,87 @@ def test_search_one_partition_invalid_workspace_404s():
     assert resp.json()["detail"] == "Workspace not found"
     assert retrieval.calls == []
 
+@pytest.mark.parametrize(
+    ("preferred_scheme", "request_scheme", "expected_scheme"),
+    [
+        ("https", "http", "https"),
+        (None, "https", "https"),
+        (None, "http", "http"),
+    ],
+)
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/search",
+        "/search/partition/mine",
+        "/search/partition/mine/file/abc123",
+    ],
+)
+def test_search_source_urls_use_preferred_scheme(
+    preferred_scheme, request_scheme, expected_scheme, path
+):
+    from api.dependencies.auth import require_partition_viewer
+    from api.dependencies.files import validate_file_id
+
+    # Return one chunk so that the response contains a link to assert on.
+    chunk = SimpleNamespace(
+        id="chunk-1",
+        text="hello",
+        to_langchain=lambda: SimpleNamespace(
+            metadata={"_id": "chunk-1", "file_id": "file-1"}
+        ),
+    )
+
+    class _SearchRetrieval:
+        async def search(self, **kwargs):
+            return [chunk]
+
+    retrieval = _SearchRetrieval()
+
+    app = FastAPI()
+    register_error_handlers(app)
+    @app.get("/extract/{extract_id}", name="get_extract")
+    async def fake_get_extract(extract_id: str):
+        return {"extract_id": extract_id}
+    
+    @app.middleware("http")
+    async def set_request_scheme(request, call_next):
+        request.scope["scheme"] = request_scheme
+        return await call_next(request)
+
+    app.include_router(search_router, prefix="/search")
+    app.include_router(partitions_router)
+
+    settings = _test_settings(
+        preferred_scheme=preferred_scheme
+    )
+
+    app.dependency_overrides[require_partition_viewer] = lambda: None
+    app.dependency_overrides[validate_file_id] = lambda: "abc123"
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval
+    app.dependency_overrides[get_config] = lambda: settings
+    app.dependency_overrides[get_workspace_service] = lambda: _FakeWorkspaces()
+    app.dependency_overrides[current_user] = lambda: {"id": 7, "is_admin": False}
+    app.dependency_overrides[current_user_partitions] = lambda: [
+        {"partition": "mine", "role": "viewer"}
+    ]
+    app.dependency_overrides[current_user_or_admin_partitions_list] = lambda: ["mine"]
+    app.dependency_overrides[get_auth_service] = lambda: _AuthService
+    app.dependency_overrides[get_partition_service] = lambda: _PartitionService()
+
+    client = TestClient(app)
+
+    response = client.get(
+        path,
+        params={"text": "hello"},
+        headers={"X-Forwarded-Proto": request_scheme},
+    )
+
+    assert response.status_code == 200
+
+    links = [document["link"] for document in response.json()["documents"]]
+    assert links
+    assert all(link.startswith(f"{expected_scheme}://") for link in links)
 
 # --------------------------------------------------------------------------- #
 # Reranking
@@ -266,6 +364,7 @@ def _rerank_client(retrieval):
     app.dependency_overrides[validate_file_id] = lambda: "abc123"
     app.dependency_overrides[get_retrieval_service] = lambda: retrieval
     app.dependency_overrides[get_workspace_service] = lambda: object()
+    app.dependency_overrides[get_config] = lambda: _test_settings()
     return TestClient(app)
 
 
