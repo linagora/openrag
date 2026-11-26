@@ -3073,7 +3073,7 @@ requires-dist = [
     { name = "tenacity", specifier = ">=8.2.0" },
     { name = "torch", specifier = ">=2.4.1" },
     { name = "umap-learn", specifier = ">=0.5.9.post2" },
-    { name = "xberg", specifier = ">=1.3.9,<2" },
+    { name = "xberg", specifier = ">=1.3.9,<1.4" },
     { name = "xlrd", specifier = ">=2.0.2,<3" },
 ]
 
