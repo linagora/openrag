@@ -430,6 +430,25 @@ async def test_literal_footnote_like_brackets_are_kept(odf_package):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("large", ["T1", "Ventes"], ids=["cell", "title"])
+async def test_what_chart_copies_add_is_bounded_in_bytes(odf_package, monkeypatch, large):
+    """A chart is a few elements whatever its text: one 8 MiB cell in 40 frames of a
+    9 KiB file made a 320 MiB content.xml."""
+    import core.indexing.parsers.odf as odf
+
+    budget = 1024 * 1024
+    monkeypatch.setattr(odf, "_MAX_CHART_BYTES", budget)
+    text = "x" * (100 * 1024)
+    chart = _CHART_OBJECT.replace(large, text)
+    md = await _markdown(
+        odf_package, f"<text:p>{_CHART_FRAME * 50}</text:p>", pictures={"Object 1/content.xml": chart.encode()}
+    )
+
+    assert 0 < md.count("### Chart") < 50
+    assert md.count(text) * len(text) <= budget
+
+
+@pytest.mark.asyncio
 async def test_a_chart_keeps_its_title_and_data_table(odf_package):
     md = await _markdown(
         odf_package,

@@ -25,7 +25,7 @@ import zipfile
 import zlib
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ...models.document import ImageBlock
 from ..image_preprocessor import UPLOADED_IMAGE_FORMATS, ensure_png_compatible_mode, pil_to_png_bytes
@@ -60,9 +60,11 @@ _CHART = "{urn:oasis:names:tc:opendocument:xmlns:chart:1.0}"
 _XLINK_HREF = "{http://www.w3.org/1999/xlink}href"
 _PRESENTATION = "{urn:oasis:names:tc:opendocument:xmlns:presentation:1.0}"
 _PRESENTATION_CLASS = f"{_PRESENTATION}class"
-# What charts may add to a document, in XML elements. Frames may all name one object,
-# so a small file can ask for a large table many times over.
+# What charts may add to a document: in XML elements, and in bytes of XML, as much
+# as content.xml may hold. Frames may all name one object, so a small file can ask
+# for a large table many times over, and one cell can hold megabytes.
 _MAX_CHART_ELEMENTS = 500_000
+_MAX_CHART_BYTES = _MAX_XML_BYTES
 # What parsing charts may cost, all of them together, as each one's tree is kept
 # until the document is patched: in XML read, as much as content.xml may hold, and
 # in nodes parsed (elements, attributes, comments), as many as they may add.
@@ -191,8 +193,8 @@ def _patch_content(root, package: zipfile.ZipFile) -> None:
     for notes in root.iter(f"{_PRESENTATION}notes"):
         etree.strip_tags(notes, f"{_TEXT}list", f"{_TEXT}list-item")
     # A chart renders as one garbled formula: its table goes in its place.
-    charts: dict[str, Any] = {}
-    remaining = _MAX_CHART_ELEMENTS
+    charts: dict[str, _Chart | None] = {}
+    elements, size = _MAX_CHART_ELEMENTS, _MAX_CHART_BYTES
     budget = _ChartBudget()
     inline_frames = []
     for frame in list(root.iter(f"{_DRAW}frame")):
@@ -202,12 +204,13 @@ def _patch_content(root, package: zipfile.ZipFile) -> None:
         name = f"{(obj.get(_XLINK_HREF) or '').removeprefix('./').rstrip('/')}/content.xml"
         if name not in charts:
             charts[name] = _chart_table(package, name, budget)
-        if charts[name] and charts[name][2] <= remaining:
-            table = copy.deepcopy(charts[name][0])
-            remaining -= charts[name][2]
-            title = charts[name][1]
+        chart = charts[name]
+        if chart and chart.elements <= elements and chart.size <= size:
+            elements -= chart.elements
+            size -= chart.size
+            table = copy.deepcopy(chart.table)
             heading = etree.Element(f"{_TEXT}p")
-            heading.text = f"### Chart: {title}" if title else "### Chart"
+            heading.text = f"### Chart: {chart.title}" if chart.title else "### Chart"
             for child in list(frame):
                 frame.remove(child)
             anchor = frame
@@ -242,6 +245,15 @@ def _patch_content(root, package: zipfile.ZipFile) -> None:
     etree.cleanup_namespaces(root)
 
 
+class _Chart(NamedTuple):
+    """A chart's data table and title, and what each copy of them costs."""
+
+    table: Any
+    title: str
+    elements: int
+    size: int
+
+
 class _ChartBudget:
     """What parsing chart objects may still cost, all charts together."""
 
@@ -253,8 +265,8 @@ class _ChartBudget:
         return self.xml_bytes <= 0 or self.nodes <= 0
 
 
-def _chart_table(package: zipfile.ZipFile, name: str, budget: _ChartBudget) -> tuple[Any, str, int] | None:
-    """The data table, title and element count of the chart at *name*, if it is one.
+def _chart_table(package: zipfile.ZipFile, name: str, budget: _ChartBudget) -> _Chart | None:
+    """The data table and title of the chart at *name*, if it is one.
 
     Parsing it is paid from *budget*, and stops when that runs out: no chart is
     parsed past it."""
@@ -286,7 +298,7 @@ def _chart_table(package: zipfile.ZipFile, name: str, budget: _ChartBudget) -> t
     etree.strip_tags(chart, f"{_TABLE}table-rows")
     title = chart.find(f"{_CHART}title")
     text = " ".join("".join(title.itertext()).split()) if title is not None else ""
-    return table, text, sum(1 for _ in table.iter())
+    return _Chart(table, text, sum(1 for _ in table.iter()), len(etree.tostring(table)) + len(text.encode()))
 
 
 def _read(package: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
