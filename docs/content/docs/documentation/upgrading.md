@@ -440,10 +440,14 @@ With neither, every scrape gets `403`. See
 
 OpenRAG 2.3.0 refuses to start, with an error naming the variable, when:
 
-- `AUTH_TOKEN`, `POSTGRES_PASSWORD`, `CHAINLIT_AUTH_SECRET`, `MINIO_SECRET_KEY` or
-  `GRAFANA_ADMIN_PASSWORD` is shorter than 12 characters;
+- `AUTH_TOKEN`, `POSTGRES_PASSWORD`, `CHAINLIT_AUTH_SECRET`, `MINIO_SECRET_KEY`,
+  `GRAFANA_ADMIN_PASSWORD` or `METRICS_TOKEN` is shorter than 12 characters;
 - a secret is set to a value the project publishes as an example, such as the
   defaults of the 2.2.x `.env.example`.
+
+`METRICS_TOKEN` is now validated too. After upgrading, a token shorter than 12
+characters or set to a published/default placeholder refuses to start. Replace
+it with a sufficiently strong random token.
 
 The rules are in
 [Environment variables — What will be refused](/openrag/documentation/env_vars/#what-will-be-refused).

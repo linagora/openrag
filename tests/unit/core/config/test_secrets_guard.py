@@ -76,6 +76,9 @@ def test_blank_values_pass(blank):
         ("API_KEY", "sk-xxxx"),
         ("HF_TOKEN", "hf_xxxx"),
         ("AUTH_TOKEN", "test-admin-token"),
+        ("METRICS_TOKEN", "replace-with-a-random-secret"),
+        ("METRICS_TOKEN", "<random secret>"),
+        ("METRICS_TOKEN", "<openssl rand -hex 16>"),
     ],
 )
 def test_published_defaults_are_refused(env_var, value):
@@ -89,9 +92,11 @@ def test_denylist_is_case_insensitive_and_trimmed():
     assert find_insecure_secrets(env={"AUTH_TOKEN": "  OR-OpenRAG-1234  "})
 
 
-def test_short_value_refused_for_credentials_we_define():
-    problems = find_insecure_secrets(env={"AUTH_TOKEN": "short"})
+@pytest.mark.parametrize("env_var", ["AUTH_TOKEN", "METRICS_TOKEN"])
+def test_short_value_refused_for_credentials_we_define(env_var):
+    problems = find_insecure_secrets(env={env_var: "short"})
     assert len(problems) == 1
+    assert env_var in problems[0]
     assert str(MIN_SECRET_LENGTH) in problems[0]
 
 
@@ -229,6 +234,18 @@ def test_settings_are_consulted_when_the_environment_is_silent():
     assert find_insecure_secrets(_Settings(), env={})
 
 
+def test_metrics_token_is_read_from_settings_when_the_environment_is_silent():
+    class _Server:
+        metrics_token = "replace-with-a-random-secret"
+
+    class _Settings:
+        server = _Server()
+
+    problems = find_insecure_secrets(_Settings(), env={})
+    assert len(problems) == 1
+    assert "METRICS_TOKEN" in problems[0]
+
+
 # ---------------------------------------------------------------------------
 # Drift gate: the chart must say the same thing
 # ---------------------------------------------------------------------------
@@ -256,6 +273,11 @@ def test_chart_length_floor_matches_python():
     match = re.search(r"\$minSecretLength\s*:=\s*(\d+)", text)
     assert match, "$minSecretLength not found in the chart template"
     assert int(match.group(1)) == MIN_SECRET_LENGTH
+
+
+def test_chart_length_floor_counts_unicode_characters():
+    text = _CHART_SECRETS_TEMPLATE.read_text()
+    assert 'len (splitList "" (trim $stringValue))' in text
 
 
 def test_chart_length_checked_keys_match_python():
