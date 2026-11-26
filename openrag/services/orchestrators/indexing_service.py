@@ -21,7 +21,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from core.config.model_endpoints import embedder_fingerprint
-from core.utils.consts import is_reserved_partition_name, strip_protected_metadata
+from core.utils.consts import (
+    UPLOAD_METADATA_SERVER_KEYS,
+    is_reserved_partition_name,
+    strip_internal_metadata,
+    strip_protected_metadata,
+)
 from core.utils.exceptions import (
     AuthError,
     ConfigError,
@@ -48,6 +53,10 @@ logger = get_logger()
 
 # Client-supplied datetime fields lifted into queryable metadata.
 TEMPORAL_FIELDS = ["created_at"]
+# Stored keys a replace does not keep: they describe the previous bytes (the
+# server's upload keys, and ``mimetype``, which picks the parser) or the catalog
+# row (``partition``), and are set again for the new file.
+_NOT_KEPT_ON_REPLACE = UPLOAD_METADATA_SERVER_KEYS | {"mimetype", "partition"}
 _ROLE_HIERARCHY: dict[str, int] = {"viewer": 1, "editor": 2, "owner": 3}
 
 
@@ -129,6 +138,21 @@ class IndexingService:
     # ------------------------------------------------------------------
     # Ingest
     # ------------------------------------------------------------------
+
+    async def _metadata_kept_on_replace(self, file_id: str, partition: str, metadata: dict) -> dict:
+        """The previous version's metadata with the request's keys on top.
+
+        A replace changes the file, not what the caller said about it: keys such
+        as ``created_at``, ``title`` or ``relationship_id`` stay unless the
+        request sends them. Like the metadata PATCH, it merges: an omitted key
+        is kept, never removed.
+        """
+        previous = await self._document_repo.get_file_metadata(file_id, partition) or {}
+        kept = {
+            key: value for key, value in strip_internal_metadata(previous).items() if key not in _NOT_KEPT_ON_REPLACE
+        }
+        kept, _ = strip_protected_metadata(kept)
+        return {**kept, **metadata}
 
     def _build_metadata(
         self,
@@ -331,6 +355,8 @@ class IndexingService:
         if not self._deduplication_enabled():
             content_sha256 = None
 
+        if replace:
+            metadata = await self._metadata_kept_on_replace(file_id, partition, metadata)
         full_metadata = self._build_metadata(
             metadata=metadata,
             file_path=file_path,
