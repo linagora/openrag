@@ -27,6 +27,7 @@ import json
 from collections.abc import Callable, Collection, Mapping
 from typing import TYPE_CHECKING, Any
 
+import asyncpg
 from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, embedder_fingerprint
 from core.models.catalog import INDEXING_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
 from core.ports.document_repo import ContentClaimLease, DocumentRepository, IndexedCorpusState
@@ -38,8 +39,6 @@ from services.persistence.file_count import decrement_file_counts
 if TYPE_CHECKING:
     from datetime import datetime
 
-    import asyncpg
-
 # Note on JSON: ``ConnectionManager.initialize`` registers a json/jsonb codec
 # on every connection, so reading a JSON column yields a Python dict and
 # binding a dict to a JSON parameter is encoded transparently. The repo
@@ -47,6 +46,9 @@ if TYPE_CHECKING:
 # digest below uses ``json.dumps`` only for an unambiguous local hash payload.
 
 logger = get_logger()
+
+# The unique constraint on (file_id, partition_name) in ``files`` (schema.py).
+_FILE_ID_PARTITION_CONSTRAINT = "uix_file_id_partition"
 
 # The endpoint a partition's files are embedded with, as the catalog write
 # records a file against it (#958): the partition's own embedder, or the default
@@ -776,10 +778,18 @@ class PgDocumentRepository(DocumentRepository):
                 # file_metadata is JSON, indexation_config is JSONB; the rest bind directly.
                 casts = {"file_metadata": "::json", "indexation_config": "::jsonb"}
                 placeholders = ", ".join(f"${i}{casts.get(col, '')}" for i, col in enumerate(columns, start=1))
-                await conn.execute(
-                    f"INSERT INTO files ({', '.join(columns)}) VALUES ({placeholders})",
-                    *values,
-                )
+                try:
+                    # A savepoint, so a row that another writer inserted after the
+                    # check above rolls back this statement alone.
+                    async with conn.transaction():
+                        await conn.execute(
+                            f"INSERT INTO files ({', '.join(columns)}) VALUES ({placeholders})",
+                            *values,
+                        )
+                except asyncpg.UniqueViolationError as exc:
+                    if exc.constraint_name == _FILE_ID_PARTITION_CONSTRAINT:
+                        return False
+                    raise
                 if user_id is not None:
                     consumed = quota_reservation_id is not None and await conn.fetchval(
                         "DELETE FROM file_quota_reservations WHERE id = $1 AND user_id = $2 RETURNING 1",

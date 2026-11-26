@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncpg
 import pytest
 from core.utils.exceptions import ValidationError
 
@@ -282,3 +283,42 @@ async def test_auto_create_refuses_a_reserved_partition_name():
         await repo.add_file_to_partition(file_id="f1", partition="all", user_id=42)
     assert (exc.value.status_code, exc.value.code) == (400, "RESERVED_PARTITION_NAME")
     assert pool.conn.executed == []
+
+
+class _RacedConn(_FakeConn):
+    """The file row is free at the check, then the INSERT hits a unique violation."""
+
+    def __init__(self, constraint: str):
+        super().__init__(partition_exists=True)
+        self.constraint = constraint
+
+    async def execute(self, query: str, *params):
+        if "INSERT INTO files" in query:
+            exc = asyncpg.UniqueViolationError(f'duplicate key value violates unique constraint "{self.constraint}"')
+            exc.constraint_name = self.constraint
+            raise exc
+        return await super().execute(query, *params)
+
+
+@pytest.mark.asyncio
+async def test_a_file_id_taken_after_the_check_reports_the_row_as_existing():
+    from services.persistence.document_repo import PgDocumentRepository
+
+    pool = _FakePool()
+    pool.conn = _RacedConn("uix_file_id_partition")
+    repo = PgDocumentRepository(pool_getter=lambda: pool)
+
+    assert await repo.add_file_to_partition(file_id="f1", partition="p", user_id=42) is False
+    assert not any("file_count" in query for query, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_another_unique_violation_still_raises():
+    from services.persistence.document_repo import PgDocumentRepository
+
+    pool = _FakePool()
+    pool.conn = _RacedConn("uix_files_partition_content_sha256")
+    repo = PgDocumentRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(asyncpg.UniqueViolationError):
+        await repo.add_file_to_partition(file_id="f1", partition="p", user_id=42)

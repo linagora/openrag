@@ -1,7 +1,8 @@
-"""Copy requests must reject a missing source before creating a destination."""
+"""Copy requests must reject a missing source, or a destination file_id already
+taken, before creating a destination."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import httpx
 import pytest
@@ -69,12 +70,17 @@ async def test_copy_missing_source_returns_404_without_creating_target(copy_app)
 @pytest.mark.asyncio
 async def test_copy_existing_source_still_creates_target_and_returns_201(copy_app):
     app, document_repo, dispatcher, partitions = copy_app
+    # The source exists; the destination file_id is free.
+    document_repo.file_exists_in_partition.side_effect = [True, False]
 
     response = await _copy(app)
 
     assert response.status_code == 201
     assert response.json() == {"message": "File copied successfully."}
-    document_repo.file_exists_in_partition.assert_awaited_once_with(file_id="original", partition="source")
+    assert document_repo.file_exists_in_partition.await_args_list == [
+        call(file_id="original", partition="source"),
+        call(file_id="copy", partition="target"),
+    ]
     assert partitions.create_partition.await_args.args == ("target",)
     partitions.pin_embedder_for_write.assert_awaited_once_with("target")
     dispatcher.copy_file.assert_awaited_once_with(
@@ -84,6 +90,21 @@ async def test_copy_existing_source_still_creates_target_and_returns_201(copy_ap
         {"id": 7, "is_admin": False},
         quota_reservation_id=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_copy_onto_an_existing_file_id_returns_409_without_creating_target(copy_app):
+    app, document_repo, dispatcher, partitions = copy_app
+    # Both the source and the destination file_id exist.
+    document_repo.file_exists_in_partition.side_effect = [True, True]
+
+    response = await _copy(app)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "[VDB_FILE_ALREADY_EXISTS]: File 'copy' already exists in partition 'target'."
+    partitions.create_partition.assert_not_awaited()
+    partitions.pin_embedder_for_write.assert_not_awaited()
+    dispatcher.copy_file.assert_not_awaited()
 
 
 @pytest.mark.asyncio
