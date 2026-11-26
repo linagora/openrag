@@ -40,6 +40,13 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
+        # A mount root already owned by 999:999 was initialized for Milvus 3
+        # (fresh install or completed migration). Skip the deep scan there:
+        # Docker Desktop bind mounts report some files Milvus 3 itself writes
+        # (e.g. RocksDB LOCK/CURRENT) as 0:0, which would block every restart.
+        if [ "$$(stat -c %u:%g /var/lib/milvus)" = "999:999" ]; then
+          exit 0
+        fi
         incompatible_path="$$(find /var/lib/milvus -mindepth 1 \( ! -uid 999 -o ! -gid 999 \) -print -quit)"
         if [ -n "$$incompatible_path" ]; then
           echo "Existing Milvus data is not owned by UID/GID 999. Back up the deployment and follow the Milvus 2.6-to-3.0 migration guide before starting Milvus 3." >&2
