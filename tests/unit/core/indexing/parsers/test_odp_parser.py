@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from core.indexing.parsers.odp_parser import OdpParser
@@ -208,6 +209,24 @@ async def test_content_xml_that_is_not_a_document_indexes_as_nothing(root):
     processed = await _parse(buf.getvalue())
 
     assert processed.text_blocks == []
+
+
+@pytest.mark.asyncio
+async def test_a_result_without_document_structure_indexes_as_nothing(odf_package, monkeypatch):
+    """Slides are found in xberg's document structure, which its result types as optional."""
+    import core.indexing.parsers.odp_parser as odp_parser
+
+    read_odf = odp_parser.read_odf
+
+    def without_structure(path, kind):
+        result = read_odf(path, kind)
+        return SimpleNamespace(content=result.content, images=result.images, document=None)
+
+    monkeypatch.setattr(odp_parser, "read_odf", without_structure)
+    processed = await _parse(odf_package("odp", f"<draw:page>{_frame('title', '<text:p>Un</text:p>')}</draw:page>"))
+
+    assert processed.text_blocks == []
+    assert processed.page_count == 0
 
 
 @pytest.mark.asyncio

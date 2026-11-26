@@ -382,6 +382,8 @@ def text_markdown(extracted: Any, image_prefix: str) -> tuple[str, list[ImageBlo
 
 def slides_markdown(extracted: Any, image_prefix: str) -> tuple[int, list[tuple[int, str]], list[ImageBlock]]:
     """An ``.odp``'s slide count, its non-empty slides by number, and its pictures."""
+    if extracted.document is None:
+        raise OdfError("xberg returned no document structure")
     slide_notes: list[list[str]] = []
     master_texts: list[str] = []
     for node in extracted.document.nodes:
