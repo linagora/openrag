@@ -90,6 +90,47 @@ class TestCreateGet:
         assert await postgres_store.oidc_session_repo.get_by_token_hash("hash-expired") is None
 
 
+class TestRecentlyRevoked:
+    """The lookup logout uses for the IdP hint of a session Chat logout just revoked."""
+
+    async def test_a_session_revoked_just_now_is_found(self, postgres_store: PostgresStore):
+        repo = postgres_store.oidc_session_repo
+        user = await _seed_user(postgres_store)
+        created = await repo.create_session(_session(user.id, token_hash="hash-chat-logout"))
+        await repo.revoke_session(created.id)
+
+        found = await repo.get_recently_revoked_by_token_hash("hash-chat-logout", within=timedelta(seconds=60))
+
+        assert found is not None
+        assert found.id_token_encrypted == b"id-token-bytes"
+
+    async def test_a_session_that_expired_after_its_revocation_is_found(self, postgres_store: PostgresStore):
+        repo = postgres_store.oidc_session_repo
+        user = await _seed_user(postgres_store)
+        created = await repo.create_session(_session(user.id, token_hash="hash-expired-logout"))
+        await repo.revoke_session(created.id)
+        await repo.update_session(
+            created.id, session_expires_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=1)
+        )
+
+        assert await repo.get_recently_revoked_by_token_hash("hash-expired-logout", within=timedelta(seconds=60))
+
+    async def test_a_live_session_is_not_found(self, postgres_store: PostgresStore):
+        repo = postgres_store.oidc_session_repo
+        user = await _seed_user(postgres_store)
+        await repo.create_session(_session(user.id, token_hash="hash-live"))
+
+        assert await repo.get_recently_revoked_by_token_hash("hash-live", within=timedelta(seconds=60)) is None
+
+    async def test_a_session_revoked_earlier_is_not_found(self, postgres_store: PostgresStore):
+        repo = postgres_store.oidc_session_repo
+        user = await _seed_user(postgres_store)
+        created = await repo.create_session(_session(user.id, token_hash="hash-old-logout"))
+        await repo.update_session(created.id, revoked_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=2))
+
+        assert await repo.get_recently_revoked_by_token_hash("hash-old-logout", within=timedelta(seconds=60)) is None
+
+
 class TestRevoke:
     async def test_revoke_by_sid_marks_all(self, postgres_store: PostgresStore):
         user = await _seed_user(postgres_store)
