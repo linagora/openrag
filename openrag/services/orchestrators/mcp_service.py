@@ -455,11 +455,11 @@ class MCPService:
         if allowed_partitions is None:
             raise PermissionError("Authentication context is missing")
         chunk = await self._conversion.get_chunk(chunk_id)
-        if chunk is None:
+        # A chunk in a partition the caller cannot read is reported as missing.
+        if chunk is None or (
+            allowed_partitions != ["all"] and chunk["metadata"].get("partition") not in allowed_partitions
+        ):
             raise KeyError(f"Chunk '{chunk_id}' not found")
-        chunk_partition = chunk["metadata"].get("partition")
-        if allowed_partitions != ["all"] and chunk_partition not in allowed_partitions:
-            raise PermissionError(f"Access denied for partition: {chunk_partition}")
         return {
             "chunk_id": chunk_id,
             "page_content": chunk["page_content"],
