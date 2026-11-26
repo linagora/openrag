@@ -58,7 +58,7 @@ from core.chunking.recursive import (
 from core.chunking.registry import chunking_registry
 from core.models.chunk import Chunk, ChunkType
 from core.models.document import ProcessedDocument
-from core.utils.consts import XLSX_TEXT_CONTENT_KINDS
+from core.utils.consts import WORKBOOK_TABULAR_FORMATS, XLSX_TEXT_CONTENT_KINDS
 from core.utils.text import sanitize_text
 
 # Markdown ATX heading: ``## Title``. Level = number of ``#``.
@@ -314,7 +314,7 @@ class StructuredSectionChunker(BaseChunker):
                 )
             ]
         elif (
-            metadata.get("tabular_format") == "xlsx"
+            metadata.get("tabular_format") in WORKBOOK_TABULAR_FORMATS
             and metadata.get("xlsx_content_kind") not in XLSX_TEXT_CONTENT_KINDS
         ):
             units = [self._atomic_unit(MDElement(type="table", content=content, metadata=metadata), [], 1)]
@@ -342,7 +342,7 @@ class StructuredSectionChunker(BaseChunker):
         # formula/format groups, a detached worksheet context, table columns on
         # a worksheet-note chunk).
         xlsx_table = (
-            metadata.get("tabular_format") == "xlsx"
+            metadata.get("tabular_format") in WORKBOOK_TABULAR_FORMATS
             and metadata.get("xlsx_content_kind") not in XLSX_TEXT_CONTENT_KINDS
         )
         chunks: list[Chunk] = []
@@ -453,7 +453,7 @@ class StructuredSectionChunker(BaseChunker):
         """
         if not units:
             return None
-        total = sum(u.tokens for u in units) + 2 * (len(units) - 1)
+        total = self.length_function("\n\n".join(u.text for u in units).strip())
         path = units[0].heading_path
         for unit in units[1:]:
             path = _common_prefix(path, unit.heading_path)
@@ -469,7 +469,7 @@ class StructuredSectionChunker(BaseChunker):
         merged = _copy_unit(units[0])
         merged.heading_path = list(path)
         for unit in units[1:]:
-            _absorb(merged, unit, path=path)
+            _absorb(merged, unit, self.length_function, path=path)
         merged.tokens = total
         return [merged]
 
@@ -729,10 +729,10 @@ class StructuredSectionChunker(BaseChunker):
                 continue
             if cur is None:
                 cur = _copy_unit(unit)
-            elif cur.heading_path == unit.heading_path and cur.tokens + unit.tokens <= self._packing_budget(
-                filename, cur.heading_path, cur.pages | unit.pages
-            ):
-                _absorb(cur, unit)
+            elif cur.heading_path == unit.heading_path and self.length_function(
+                f"{cur.text}\n\n{unit.text}".strip()
+            ) <= self._packing_budget(filename, cur.heading_path, cur.pages | unit.pages):
+                _absorb(cur, unit, self.length_function)
             else:
                 out.append(cur)
                 cur = _copy_unit(unit)
@@ -937,7 +937,9 @@ class StructuredSectionChunker(BaseChunker):
                     # the section from both the header and ``hierarchy_path``,
                     # where it becomes unreachable by dense and sparse search
                     # alike (BM25 is declared over ``text`` only).
-                    _absorb(prev, unit, path=merged_path or prev.heading_path or unit.heading_path)
+                    _absorb(
+                        prev, unit, self.length_function, path=merged_path or prev.heading_path or unit.heading_path
+                    )
                     continue
             out.append(_copy_unit(unit))
         return out
@@ -972,7 +974,9 @@ class StructuredSectionChunker(BaseChunker):
         # this strategy exists to remove, arriving through the merge pass.
         if _is_headings_only(unit, self._is_heading_line):
             return False
-        if prev.tokens + unit.tokens > self._effective_max(filename, merged_path, prev.pages | unit.pages):
+        if self.length_function(f"{prev.text}\n\n{unit.text}".strip()) > self._effective_max(
+            filename, merged_path, prev.pages | unit.pages
+        ):
             return False
         if prev.pages & unit.pages and _keeps_context(prev.heading_path, unit.heading_path):
             return True
@@ -1123,9 +1127,9 @@ def _copy_unit(unit: _Unit) -> _Unit:
     )
 
 
-def _absorb(cur: _Unit, unit: _Unit, *, path: list[str] | None = None) -> None:
+def _absorb(cur: _Unit, unit: _Unit, length_function: Callable[[str], int], *, path: list[str] | None = None) -> None:
     cur.text = f"{cur.text}\n\n{unit.text}".strip()
-    cur.tokens = cur.tokens + unit.tokens
+    cur.tokens = length_function(cur.text)
     cur.pages |= unit.pages
     if unit.chunk_type is not ChunkType.TEXT and cur.chunk_type is ChunkType.TEXT:
         cur.chunk_type = unit.chunk_type
@@ -1242,6 +1246,8 @@ _SPLIT_LADDER = (_SENTENCE_RE, *_CLAUSE_RES)
 def _greedy_split(text: str, target: int, max_tokens: int, length_function: Callable[[str], int]) -> list[str]:
     """Pack paragraphs (then sentences for an over-``max`` paragraph) to ``target``."""
 
+    packing_target = min(target, max_tokens)
+
     def descend(item: str, levels: tuple[re.Pattern[str], ...]) -> list[str]:
         """Split one over-``max`` item on the strongest separator it actually
         contains, then keep the weaker ones in reserve for its own oversize
@@ -1251,55 +1257,127 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
             parts = splitter.split(item)
             if len(parts) > 1:
                 return pack(parts, " ", levels[i + 1 :])
-        return _hard_wrap(item, target, length_function)
+        return _hard_wrap(item, packing_target, length_function)
 
     def pack(items: list[str], joiner: str, levels: tuple[re.Pattern[str], ...]) -> list[str]:
         out: list[str] = []
         buf: list[str] = []
-        size = 0
+        char_count = 0
         for item in items:
             it = length_function(item)
-            if buf and size + it > target:
+            if length_function is len:
+                candidate_size = char_count + (len(joiner) if buf else 0) + it
+            else:
+                candidate_size = length_function(joiner.join([*buf, item])) if buf else it
+            if buf and candidate_size > packing_target:
                 out.append(joiner.join(buf))
-                buf, size = [], 0
+                buf = []
+                char_count = 0
             if it > max_tokens and not buf:
                 out.extend(descend(item, levels))
                 continue
+            char_count += (len(joiner) if buf else 0) + len(item)
             buf.append(item)
-            size += it
         if buf:
             out.append(joiner.join(buf))
         return out
 
     sanitized = sanitize_text(text, max_consecutive_newlines=2)
-    return _rehome_trailing_headings(pack(re.split(r"\n{2,}", sanitized), "\n\n", _SPLIT_LADDER))
+    pieces = pack(re.split(r"\n{2,}", sanitized), "\n\n", _SPLIT_LADDER)
+
+    # A heading is eligible only when the emitted line is the same complete
+    # line at the same word position in the sanitized source. This keeps
+    # sentence-split prefixes and word-wrap fragments ineligible, while still
+    # recognizing an intact heading from a word-wrapped paragraph. The word
+    # span distinguishes identical text that appears elsewhere in the source.
+    source_heading_spans: set[tuple[int, int, str]] = set()
+    word_offset = 0
+    for line in sanitized.splitlines():
+        word_count = len(line.split())
+        if _CAPTION_HEADING_RE.match(line):
+            source_heading_spans.add((word_offset, word_offset + word_count, line))
+        word_offset += word_count
+
+    source_heading_positions: set[tuple[int, int]] = set()
+    word_offset = 0
+    for piece_index, piece in enumerate(pieces):
+        for line_index, line in enumerate(piece.rstrip().splitlines()):
+            word_count = len(line.split())
+            if (
+                _CAPTION_HEADING_RE.match(line)
+                and (word_offset, word_offset + word_count, line) in source_heading_spans
+            ):
+                source_heading_positions.add((piece_index, line_index))
+            word_offset += word_count
+    return _rehome_trailing_headings(pieces, max_tokens, length_function, source_heading_positions)
 
 
-def _rehome_trailing_headings(pieces: list[str]) -> list[str]:
+def _rehome_trailing_headings(
+    pieces: list[str],
+    max_tokens: int,
+    length_function: Callable[[str], int],
+    source_heading_positions: set[tuple[int, int]],
+) -> list[str]:
     """Move a heading stranded at a piece's end onto the following piece.
 
     Splitting long *prose* rarely lands on a heading, but VLM image captions
     carry their own ``###`` sub-headings, so packing paragraphs could end a
     piece on one — stranding the heading away from the content it introduces
     (worst case: a piece that is an ``<image_description>`` opener plus a bare
-    heading). Rule 4 of the strategy is that a heading always travels with its
-    body, so hand it forward rather than leaving it orphaned.
+    heading). A word-wrapped fragment that only looks like a heading does not
+    count; only complete source lines are eligible. If moving a heading would
+    exceed the ceiling, leave it and any earlier headings in place.
     """
     out = list(pieces)
     # Walk backwards so a run of consecutive headings cascades forward in one
-    # pass, and so a piece that is *only* a heading (the worst case — packing
-    # can emit a bare ``### Key Trends`` as its own 3-token piece) empties out
-    # and is dropped below rather than being left as a heading-only chunk.
+    # pass. Blank lines between eligible headings are part of that run. Move
+    # each heading only while the complete candidate still fits the ceiling;
+    # pieces containing only moved headings are filtered below.
     for i in range(len(out) - 2, -1, -1):
         lines = out[i].rstrip().splitlines()
         cut = len(lines)
-        while cut > 0 and _CAPTION_HEADING_RE.match(lines[cut - 1]):
-            cut -= 1
-        if cut == len(lines):
+        heading_indices: list[int] = []
+
+        def is_source_heading(line_index: int) -> bool:
+            position = (i, line_index)
+            return _CAPTION_HEADING_RE.match(lines[line_index]) is not None and position in source_heading_positions
+
+        while cut > 0:
+            line_index = cut - 1
+            if is_source_heading(line_index):
+                heading_indices.append(line_index)
+                cut -= 1
+                continue
+            if not lines[line_index].strip():
+                preceding_heading = line_index - 1
+                while preceding_heading >= 0 and not lines[preceding_heading].strip():
+                    preceding_heading -= 1
+                if preceding_heading >= 0 and is_source_heading(preceding_heading):
+                    cut = preceding_heading + 1
+                    continue
+            break
+
+        if not heading_indices:
             continue
-        moved = "\n\n".join(line.strip() for line in lines[cut:])
-        out[i] = "\n".join(lines[:cut]).rstrip()
-        out[i + 1] = f"{moved}\n\n{out[i + 1].lstrip()}"
+        receiver_index = i + 1
+        while receiver_index < len(out) and not out[receiver_index].strip():
+            receiver_index += 1
+        if receiver_index == len(out):
+            continue
+
+        receiver = out[receiver_index].lstrip()
+        move_cut = None
+        for heading_index in heading_indices:
+            candidate = f"{lines[heading_index].strip()}\n\n{receiver}"
+            if length_function(candidate) > max_tokens:
+                break
+            receiver = candidate
+            move_cut = heading_index
+        if move_cut is None:
+            continue
+
+        out[i] = "\n".join(lines[:move_cut]).rstrip()
+        out[receiver_index] = receiver
     return [piece for piece in out if piece.strip()]
 
 

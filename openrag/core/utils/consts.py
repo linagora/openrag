@@ -136,4 +136,5 @@ XLSX_TEXT_NUMBER_FORMAT_KINDS = frozenset({"percentage", "currency"})
 # XLSX blocks chunked as prose; every other XLSX block is a worksheet table
 # whose rows chunk_table splits under a repeated header. Loose cells, charts
 # and text boxes carry no table row metadata.
+WORKBOOK_TABULAR_FORMATS = frozenset({"xls", "xlsx"})
 XLSX_TEXT_CONTENT_KINDS = frozenset({"cells", "chart", "text_box"})

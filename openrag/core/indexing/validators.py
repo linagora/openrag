@@ -56,6 +56,8 @@ def validate_file_id(
     file_id = file_id.strip()
     if not file_id:
         raise ValidationError("File ID cannot be empty.", status_code=400)
+    if file_id in {".", ".."}:
+        raise ValidationError("File ID cannot be a dot path segment.", status_code=400)
     if _VALID_IDENTIFIER_RE.fullmatch(file_id) is None:
         raise ValidationError(
             "File ID may only contain letters, digits, '.', '_', ':' and '-'.",
@@ -361,6 +363,16 @@ def validate_content_matches_extension(extension: str, head: bytes) -> None:
     Raises:
         ValidationError: HTTP 415, when the content contradicts the extension.
     """
+    if extension == "xls":
+        # A CFB header is necessary for this route. The worker validates the
+        # workbook stream, since other legacy Office formats share this header.
+        if not head.startswith(_OLE_SIGNATURE):
+            raise ValidationError(
+                "Uploaded .xls file is not a legacy Excel workbook. Use the extension matching its actual format.",
+                status_code=415,
+            )
+        return
+
     tolerated = _TOLERANT_SIGNATURES.get(extension)
     if tolerated is not None:
         kind = filetype.guess(head)

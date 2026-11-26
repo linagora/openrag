@@ -87,6 +87,7 @@ class FileLoadersConfig(ConfigMixin):
     eml: str = "EmlLoader"
     docx: str = "DocxLoader"
     pptx: str = "PPTXLoader"
+    xls: str = "XlsParser"
     xlsx: str = "XlsxParser"
     xlsm: str = "XlsxParser"
     odt: str = "OdtLoader"
@@ -131,6 +132,7 @@ class MimetypesConfig(ConfigMixin):
         default=".pptx",
         alias="application/vnd.openxmlformats-officedocument.presentationml.presentation",
     )
+    application_xls: str = Field(default=".xls", alias="application/vnd.ms-excel")
     application_xlsx: str = Field(
         default=".xlsx",
         alias="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

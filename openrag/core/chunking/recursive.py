@@ -28,7 +28,7 @@ from core.chunking.markdown_utils import (
 from core.chunking.registry import chunking_registry
 from core.models.chunk import Chunk, ChunkType
 from core.models.document import ProcessedDocument
-from core.utils.consts import XLSX_TEXT_CONTENT_KINDS
+from core.utils.consts import WORKBOOK_TABULAR_FORMATS, XLSX_TEXT_CONTENT_KINDS
 from core.utils.text import sanitize_text
 
 # Substring (case-insensitive) marking a "no useful content" image caption.
@@ -275,7 +275,7 @@ class BaseChunker(ChunkingStrategy):
     def _chunk_workbook_blocks(self, document: ProcessedDocument, partition: str) -> list[Chunk] | None:
         """The collecting parse API must not merge different sheets/batches."""
         if len(document.text_blocks) <= 1 or not any(
-            block.metadata.get("tabular_format") == "xlsx" for block in document.text_blocks
+            block.metadata.get("tabular_format") in WORKBOOK_TABULAR_FORMATS for block in document.text_blocks
         ):
             return None
         chunks = []
@@ -340,7 +340,10 @@ class BaseChunker(ChunkingStrategy):
         # metadata["file_id"] to set Chunk.document_id, so a stray key in
         # `document.metadata` would silently reassign chunks to the wrong doc.
         block_metadata = {}
-        if len(document.text_blocks) == 1 and document.text_blocks[0].metadata.get("tabular_format") == "xlsx":
+        if (
+            len(document.text_blocks) == 1
+            and document.text_blocks[0].metadata.get("tabular_format") in WORKBOOK_TABULAR_FORMATS
+        ):
             block_metadata = document.text_blocks[0].metadata
         return {
             **document.metadata,
@@ -414,7 +417,7 @@ class BaseChunker(ChunkingStrategy):
                 for piece in chunk_xlsx_chart(content, metadata, body_size, self.length_function)
             ]
         if (
-            metadata.get("tabular_format") == "xlsx"
+            metadata.get("tabular_format") in WORKBOOK_TABULAR_FORMATS
             and metadata.get("xlsx_content_kind") not in XLSX_TEXT_CONTENT_KINDS
         ):
             # Canonical workbook tables must never enter prose sanitization or

@@ -321,6 +321,7 @@ class IndexerWorker:
             if self._document_repo is not None:
                 wrote_catalog = await _write_catalog_record(
                     doc_repo=self._document_repo,
+                    task_id=task_id,
                     metadata=metadata,
                     partition=partition,
                     user=user,
@@ -485,6 +486,7 @@ async def _write_catalog_record(
     *,
     doc_repo: Any,
     metadata: dict[str, Any],
+    task_id: str | None = None,
     partition: str,
     user: dict[str, Any] | None,
     replace: bool,
@@ -502,6 +504,10 @@ async def _write_catalog_record(
     With ``embedder_fingerprint``, the repo first checks that the partition's
     embedder is still the config the vectors were built with, and refuses the
     file otherwise (#958); the caller's failure path then removes its vectors.
+
+    A new file consumes the file slot reserved under ``task_id``: a
+    quota-capped upload runs under its reservation's id (#664). Any other task
+    holds no slot, and the insert counts the file instead.
     """
     file_id = metadata.get("file_id", "")
     file_metadata = {key: value for key, value in metadata.items() if key != "page"}
@@ -537,6 +543,7 @@ async def _write_catalog_record(
         # Stay protected until the outer worker has completed every attachment.
         independently_indexed=True,
         content_sha256=metadata.get("content_sha256"),
+        quota_reservation_id=task_id,
         **config_kwargs,
     )
 
@@ -651,7 +658,11 @@ async def _load_document(
     # document metadata so it never leaks into chunk metadata.
     filename = _display_filename(path, metadata)
     content_type = Document.detect_content_type(filename, metadata.get("mimetype"))
-    raw_bytes = None if content_type in {DocumentType.CSV, DocumentType.XLSX} else await asyncio.to_thread(p.read_bytes)
+    raw_bytes = (
+        None
+        if content_type in {DocumentType.CSV, DocumentType.XLS, DocumentType.XLSX}
+        else await asyncio.to_thread(p.read_bytes)
+    )
     return Document(
         id=file_id,
         filename=filename,
@@ -663,13 +674,9 @@ async def _load_document(
         # is off.
         #
         # Placeable only when that file is on shared storage, which is a
-        # property of the caller, not of this function. The upload routes save
-        # under ``config.paths.data_dir`` (Helm RWX volume, Compose bind
-        # mount), so they are. ``MCPService.index_url`` downloads to a
-        # ``NamedTemporaryFile`` in the node's own temp dir, so it is not — on
-        # a multi-node cluster a worker elsewhere cannot open it. That is the
-        # pre-existing #911 behaviour for that route rather than a regression,
-        # and closing it means downloading into ``data_dir``.
+        # property of the caller, not of this function. The upload routes and
+        # ``MCPService.index_url`` save under ``config.paths.data_dir`` (Helm
+        # RWX volume, Compose bind mount), so they are.
         source_path=str(p),
         content_type=content_type,
         partition=partition,
