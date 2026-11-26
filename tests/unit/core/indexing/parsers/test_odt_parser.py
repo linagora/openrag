@@ -16,6 +16,20 @@ async def _parse(raw: bytes):
     return await OdtParser().parse(Document(filename="x.odt", content_type=DocumentType.ODT, raw_bytes=raw))
 
 
+_CHART_OBJECT = (
+    '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+    'xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0" '
+    'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" '
+    'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:chart><chart:chart>'
+    "<chart:title><text:p>Ventes</text:p></chart:title>"
+    '<table:table table:name="local-table"><table:table-rows><table:table-row>'
+    "<table:table-cell><text:p>T1</text:p></table:table-cell><table:table-cell><text:p>10</text:p></table:table-cell>"
+    "</table:table-row></table:table-rows></table:table></chart:chart></office:chart></office:body>"
+    "</office:document-content>"
+)
+_CHART_FRAME = '<draw:frame><draw:object xlink:href="./Object 1"/></draw:frame>'
+
+
 async def _markdown(odf_package, body: str, **kwargs) -> str:
     processed = await _parse(odf_package("odt", body, **kwargs))
     assert len(processed.text_blocks) == 1
@@ -317,6 +331,57 @@ async def test_many_notes_and_spaces_in_one_paragraph_are_taken_out_in_linear_ti
     assert md == "ab" * count + " c" * count
 
 
+_ONE_CELL_CHART = (
+    '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+    'xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0" '
+    'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" '
+    'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:chart><chart:chart>'
+    "<table:table><table:table-row><table:table-cell><text:p>1</text:p></table:table-cell></table:table-row>"
+    "</table:table></chart:chart></office:chart></office:body></office:document-content>"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        pytest.param(
+            "<text:list>" + "<text:list-header><text:p>h</text:p></text:list-header>" * 40_000 + "</text:list>",
+            "\n\n".join(["h"] * 40_000),
+            id="headers-in-one-list",
+        ),
+        pytest.param(
+            "<text:p>a</text:p>" + "<text:list><text:list-header/></text:list>\n    " * 80_000 + "<text:p>b</text:p>",
+            "a\n\nb",
+            id="empty-lists",
+        ),
+    ],
+)
+async def test_many_list_headers_and_empty_lists_are_taken_out_in_linear_time(odf_package, body, expected):
+    """Each list was scanned again for every header it holds, and empty lists were
+    taken out one by one: 40,000 headers in one list, from a 2.5 KB file, took 67 s,
+    and 80,000 empty lists 20 s."""
+    start = time.perf_counter()
+    md = await _markdown(odf_package, body)
+
+    assert time.perf_counter() - start < 10
+    assert md == expected
+
+
+@pytest.mark.asyncio
+async def test_many_charts_in_one_paragraph_are_taken_out_in_linear_time(odf_package):
+    """Their frames were taken out of the paragraph one by one: 80,000 took 17 s."""
+    count = 80_000
+    pictures = {"Object 1/content.xml": _ONE_CELL_CHART.encode()}
+    one_chart = (await _markdown(odf_package, f"<text:p>{_CHART_FRAME}</text:p>", pictures=pictures)).strip()
+
+    start = time.perf_counter()
+    md = await _markdown(odf_package, f"<text:p>{(_CHART_FRAME + 'abcd') * count}</text:p>", pictures=pictures)
+
+    assert time.perf_counter() - start < 10
+    assert md == "abcd" * count + f"\n\n{one_chart}" * count
+
+
 @pytest.mark.asyncio
 async def test_comments_and_footnotes_are_left_out(odf_package):
     md = await _markdown(
@@ -337,21 +402,10 @@ async def test_literal_footnote_like_brackets_are_kept(odf_package):
 
 @pytest.mark.asyncio
 async def test_a_chart_keeps_its_title_and_data_table(odf_package):
-    chart = (
-        '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
-        'xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0" '
-        'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" '
-        'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:chart><chart:chart>'
-        "<chart:title><text:p>Ventes</text:p></chart:title>"
-        '<table:table table:name="local-table"><table:table-rows><table:table-row>'
-        "<table:table-cell><text:p>T1</text:p></table:table-cell><table:table-cell><text:p>10</text:p></table:table-cell>"
-        "</table:table-row></table:table-rows></table:table></chart:chart></office:chart></office:body>"
-        "</office:document-content>"
-    )
     md = await _markdown(
         odf_package,
-        '<text:p><draw:frame><draw:object xlink:href="./Object 1"/></draw:frame></text:p>',
-        pictures={"Object 1/content.xml": chart.encode()},
+        f"<text:p>{_CHART_FRAME}</text:p>",
+        pictures={"Object 1/content.xml": _CHART_OBJECT.encode()},
     )
 
     assert "### Chart: Ventes" in md

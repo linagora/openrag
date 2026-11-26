@@ -103,24 +103,12 @@ def read_odf(path: str, kind: str) -> Any:
     return result.results[0]
 
 
-def _detach(element) -> None:
-    """Take *element* out of its parent, leaving the text that follows it behind."""
-    parent = element.getparent()
-    tail, element.tail = element.tail, None
-    if tail:
-        previous = element.getprevious()
-        if previous is not None:
-            previous.tail = (previous.tail or "") + tail
-        else:
-            parent.text = (parent.text or "") + tail
-    parent.remove(element)
-
-
 def _detach_all(elements) -> None:
-    """:func:`_detach` each of *elements*, joining each parent's text once.
+    """Take each of *elements* out of its parent, leaving the text that follows it behind.
 
-    Detaching them one by one appends to the same string each time, which is
-    quadratic in the number of elements a parent holds."""
+    Each parent's text is joined once: detaching them one by one appends to the
+    same string each time, which is quadratic in the number of elements a parent
+    holds."""
     removed: dict[Any, set] = {}
     for element in elements:
         parent = element.getparent()
@@ -156,16 +144,23 @@ def _patch_content(root, package: zipfile.ZipFile) -> None:
     _detach_all(spaces)
     # A list header's text is dropped. It is how LibreOffice writes the titles of a
     # deck imported from PowerPoint: an unnumbered paragraph, so that is what it becomes.
-    for header in list(root.iter(f"{_TEXT}list-header")):
-        list_element = header.getparent()
+    # Each list is scanned once, whatever the number of headers it holds.
+    headers: dict[Any, list] = {}
+    for header in root.iter(f"{_TEXT}list-header"):
+        headers.setdefault(header.getparent(), []).append(header)
+    emptied = []
+    for list_element, in_list in headers.items():
         if any(child.tag == f"{_TEXT}list-item" for child in list_element):
-            header.tag = f"{_TEXT}list-item"
+            for header in in_list:
+                header.tag = f"{_TEXT}list-item"
             continue
-        for child in list(header):
-            list_element.addprevious(child)
-        list_element.remove(header)
+        for header in in_list:
+            for child in list(header):
+                list_element.addprevious(child)
+            list_element.remove(header)
         if len(list_element) == 0:
-            _detach(list_element)
+            emptied.append(list_element)
+    _detach_all(emptied)
     # A shape's text is dropped unless it sits in a frame's text box.
     for shape in list(root.iter(f"{_DRAW}custom-shape", f"{_DRAW}rect", f"{_DRAW}ellipse", f"{_DRAW}polygon")):
         # A comment's tag is a function, not a string.
@@ -181,6 +176,7 @@ def _patch_content(root, package: zipfile.ZipFile) -> None:
     # A chart renders as one garbled formula: its table goes in its place.
     charts: dict[str, Any] = {}
     remaining = _MAX_CHART_ELEMENTS
+    inline_frames = []
     for frame in list(root.iter(f"{_DRAW}frame")):
         obj = frame.find(f"{_DRAW}object")
         if obj is None:
@@ -206,9 +202,10 @@ def _patch_content(root, package: zipfile.ZipFile) -> None:
                 etree.SubElement(title_frame, f"{_DRAW}text-box").append(heading)
                 frame.addprevious(title_frame)
             else:
-                _detach(frame)
+                inline_frames.append(frame)
                 anchor.addnext(table)
                 anchor.addnext(heading)
+    _detach_all(inline_frames)
     for page in root.iter(f"{_DRAW}page"):
         title = ""
         skipped = []
