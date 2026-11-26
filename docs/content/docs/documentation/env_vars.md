@@ -39,7 +39,7 @@ python3 scripts/gen_env.py --check   # verify nothing is left unset
 | `API_KEY`, `VLM_API_KEY`, `EMBEDDER_API_KEY`, `RERANKER_API_KEY`, `TRANSCRIBER_API_KEY`, `WEBSEARCH_API_TOKEN` | Per integration | Set by the provider, so no length floor. Use the literal `EMPTY` for a local OpenAI-compatible server that requires no credential — that is the documented sentinel and is always accepted. |
 
 `UVICORN_FORWARDED_ALLOW_IPS` is not a secret but belongs in the same conversation: it
-must name your proxy's subnet for session cookies and per-IP rate limits to behave
+must list your trusted proxies for session cookies and per-IP rate limits to behave
 correctly behind a reverse proxy. See [FastAPI & Access Control](#fastapi--access-control).
 
 ## What will be refused
@@ -69,7 +69,7 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `IMAGE_CAPTIONING` | `bool` | `true` | If `true`, an LLM is used to describe images and convert them into text using a [specific prompt](https://github.com/linagora/openrag/blob/main/openrag/prompts/templates/image_captioning_tmpl.txt). The image in files are replaced by their descriptions |
-| `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing (after image captioning) is saved next to the uploaded file as `<file>.md`. Useful for debugging and verifying the correctness of the generated markdown. Page changes are marked with `<!-- page N -->`, and images left without a description show their alt text (or `[Image]`). Only files stored under `DATA_DIR` get a copy, so URLs indexed through MCP are skipped. The copy is kept whatever `SAVE_UPLOADED_FILES` says, and nothing deletes it afterwards (deleting the file or its partition doesn't either), so turn the flag off once you're done. |
+| `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing (after image captioning) is saved next to the uploaded file as `<file>.md`. Useful for debugging and verifying the correctness of the generated markdown. Page changes are marked with `<!-- page N -->`, and images left without a description show their alt text (or `[Image]`). Only files stored under `DATA_DIR` get a copy. The copy is kept whatever `SAVE_UPLOADED_FILES` says, and nothing deletes it afterwards (deleting the file or its partition doesn't either), so turn the flag off once you're done. |
 |`SAVE_UPLOADED_FILES`|`bool`|`true`| When `true`, uploaded files are stored on disk. You must enable this option if you want Chainlit to show sources while chatting.|
 | `CONTENT_DEDUPLICATION_ENABLED` | `bool` | `true` | Rejects a file when identical content already exists in the same partition. Set it to `false` when a test intentionally indexes duplicates. |
 | `FILE_FENCES` | `str` | `ray` | Where the per-file fences live: `ray` or `postgres`. With `postgres`, one operation changes a file at a time (upload, replace, delete, metadata update, copy into it): an upload, replace, metadata update or copy of a busy file is refused with `409`; a delete of a file being indexed stops the indexing and wins, and a delete of a file being deleted or updated waits for it (up to 60 s, then `409`); an indexing task whose file was deleted meanwhile cannot write it back. See [Concurrent operations on one file](/openrag/documentation/api/#concurrent-operations-on-one-file). Set the same value on every API replica: a replica on `ray` doesn't take the fences, so a file it deletes can be written back by a task the others started. Not yet meant for production. |
@@ -722,7 +722,7 @@ The following environment variables configure the FastAPI server and control acc
 | `METRICS_ALLOW_UNAUTHENTICATED` | `boolean` | `false` | Serve `GET /metrics` to anyone who can reach the API port when `METRICS_TOKEN` is unset. Only for deployments that block `/metrics` at the edge and scrape from inside the network; a configured token always wins. |
 | `ASSISTANT_NAME` | `string` | empty | Name used in the assistant's greeting. Leave unset for a neutral introduction; set it for a white-label deployment. |
 | `CORS_EXTRA_ORIGINS` | `string` | _(unset)_ | Semicolon-separated list of additional origins allowed by CORS (e.g. `https://app.example.com;https://other.example.com`). Extends the default list without replacing it. |
-| `UVICORN_FORWARDED_ALLOW_IPS` | `string` | `127.0.0.1` | Comma-separated CIDRs/IPs (or `*`) whose `X-Forwarded-*` headers uvicorn trusts. **Required when OpenRAG runs behind a reverse proxy that lives outside loopback** (typical docker-compose / k8s — including the bundled admin-ui proxy). Otherwise `X-Forwarded-Proto` is dropped and OIDC cookies ship with `Secure=False` even over HTTPS, and `X-Forwarded-For` is dropped so per-user rate limits collapse onto the proxy's single IP. **Set this to your proxy's subnet, not `*`** — see the proxy-trust caution under [Rate Limiting](#rate-limiting) for why `*` can be spoofed. |
+| `UVICORN_FORWARDED_ALLOW_IPS` | `string` | Loopback and the exact admin UI proxy address in Compose. Loopback elsewhere. | Comma-separated addresses allowed to supply `X-Forwarded-*` headers. Set this explicitly for Helm and other additional reverse proxies. See [Rate Limiting](#rate-limiting). |
 | `MAX_UPLOAD_SIZE_MB` | `int` | `1024` | Maximum accepted upload size, in MB. `0` or a negative value means unlimited. |
 | `MAX_PARTITIONS_PER_USER` | `int` | `100` | Maximum number of partitions a non-admin user may own. `-1` disables the cap (unlimited). Admin users always bypass it. |
 | `APP_UID` | `int` | `1000` | UID the API container drops to before running the app. Override when your host user is not UID 1000 and bind-mounted folders (`data/`, `logs/`) would otherwise not be writable by the container user. |
@@ -747,25 +747,29 @@ Limit values use the `<count>/<period>` format from the [`limits`](https://limit
 | `RATE_LIMIT_AUTH` | `str` | `60/minute` | Limit for `/auth/*` (login/callback/logout). Keyed on client IP because callers are unauthenticated there — keep it high enough that a shared corporate/NAT egress IP does not throttle a legitimate login rush. |
 | `RATE_LIMIT_CHAT` | `str` | `120/minute` | Limit for `/v1/*` (chat completions, tools). |
 | `RETRIEVAL_DIAGNOSTICS_RATE_LIMIT` | `str` | `120/minute` | Separate per-administrator limit for retrieval traces, original-query comparisons, and retrieval snapshots. This limit applies even though administrators bypass the general tiers. It is enforced per API process, so the deployment-wide capacity scales with the number of replicas. |
-| `RATE_LIMIT_AUTH_FAILURE` | `str` | `RATE_LIMIT_AUTH`, else `20/minute` | Separate, stricter budget for **failed** authentication attempts, keyed by client IP (brute-force protection). Falls back to `RATE_LIMIT_AUTH` when unset, then to `20/minute`. Disabled together with `RATE_LIMIT_ENABLED=false`. |
+| `RATE_LIMIT_AUTH_FAILURE` | `str` | `RATE_LIMIT_AUTH`, else `20/minute` | Separate, stricter budget for **failed** authentication attempts, keyed by client IP. After exhaustion, a recently validated generated-format token (`or-` plus 32 lowercase hex digits), including an `AUTH_TOKEN` generated by `scripts/gen_env.py`, may still be revalidated while its cache entry remains. To generate one by hand, run `printf 'or-%s\n' "$(openssl rand -hex 16)"` in a shell and save its output as `AUTH_TOKEN`. Hand-chosen tokens outside this format and seed-user values remain subject to `429` during lockout. A recently validated OIDC session may also be revalidated while its session entry remains cached. A known-refused session is skipped while its refusal entry remains, so it does not block a cached Bearer; an unchecked session is not looked up during lockout, and the request receives `429` even if it also carries a distinct cached Bearer token. Each process keeps up to 1,024 recently validated credential entries and up to 1,024 rejected session entries in separate caches. Entries expire two failure windows after they were last recorded or renewed, and may be evicted sooner if their cache fills. Falls back to `RATE_LIMIT_AUTH` when unset, then to `20/minute`. Disabled together with `RATE_LIMIT_ENABLED=false`. |
 | `RATE_LIMIT_EXEMPT_PATHS` | `str` | `/chainlit/,/assets/` | Comma-separated path prefixes the limiter skips, matched with `startswith`. These are auth-bypassed (Chainlit does its own header auth), so requests there carry no user and can only be keyed by IP. Chainlit's Socket.IO transport also issues one HTTP request per packet when it long-polls. Keep the trailing slash so a sibling like `/chainlithack` stays rate-limited rather than being swept into the `/chainlit` exemption. Set-but-empty (`RATE_LIMIT_EXEMPT_PATHS=`) removes all exemptions; `/auth/*` is never exempt. |
 
 :::caution[Behind a reverse proxy, trust the right client IP]
-The `/auth/*` limits and the failed-login budget (`RATE_LIMIT_AUTH_FAILURE`) are keyed **by client IP** — that is how brute-force protection tells attackers apart. Behind a proxy, uvicorn only sees the real client IP if it trusts the proxy's `X-Forwarded-For`, so `UVICORN_FORWARDED_ALLOW_IPS` must name the proxy. Get this wrong in either direction and the per-IP limits stop working:
+The `/auth/*` limits and failed-login budget use the client IP. If the API cannot
+trust a proxy's forwarding headers, requests share the proxy's IP, failure
+budget, and recent-credential cache. During lockout, a previously validated
+generated-format token or OIDC session that remains in that cache may still be
+revalidated for requests seen under the same client identity. Hand-chosen token
+values that do not match the generated format remain throttled. This applies to
+Helm's default loopback trust setting and traffic through an untrusted proxy
+such as NPM. The OIDC cookie's `Secure` flag reads `X-Forwarded-Proto` directly
+(or `PREFERRED_URL_SCHEME`); this check is independent of Uvicorn's
+forwarded-IP trust list.
 
-- **Too narrow** (default `127.0.0.1`, proxy outside loopback): every request keys on the proxy's single address, so one shared bucket throttles the whole deployment at once — one client's failed logins can lock out everyone.
-- **Too wide** (`*`): uvicorn trusts `X-Forwarded-For` from *any* peer. If the API port is reachable directly (the bundled compose publishes `APP_PORT` on `0.0.0.0`), an attacker sends a forged, rotating `X-Forwarded-For` and gets a fresh bucket per request — the brute-force limiter is fully bypassed.
+- **Compose** trusts loopback and the exact admin UI proxy address by default. The admin UI proxy appends its peer address to `X-Forwarded-For`, allowing Uvicorn to select the actual client address. Do not add NPM’s address while it accepts client-supplied `X-Real-IP` from private networks.
+- **Helm** leaves trust at loopback until an administrator sets `env.config.UVICORN_FORWARDED_ALLOW_IPS` in the chart values. Use your proxy's stable addresses and update the allowlist if the addresses change.
 
-**Recommended:** set `UVICORN_FORWARDED_ALLOW_IPS` to the proxy's subnet (e.g. your compose/k8s network CIDR), **not** `*`. Reserve `*` for deployments where nothing untrusted can reach `APP_PORT` — keep the API on the internal network and expose only the admin-ui proxy (you don't need to publish `APP_PORT` at all).
+Keep the allowlist limited to proxies you control. A wildcard or a shared container or pod subnet gives unrelated clients the ability to supply forwarding headers. Configure the edge proxy to supply the actual client address and only accept forwarded addresses from trusted upstreams.
 
-**Defense in depth (proxy config):** trusting `X-Forwarded-For` only helps if the header can't be forged *through* the proxy. The bundled nginx **appends** to the header (`proxy_add_x_forwarded_for`), and uvicorn reads the left-most value — which a client can inject. For a hard guarantee, have the edge proxy **overwrite** it with the real peer instead of appending:
+Compose uses a fixed bridge subnet so it can reserve the admin UI address. For an overlapping network or another stack on the same host, set `OPENRAG_COMPOSE_SUBNET`, `OPENRAG_COMPOSE_DYNAMIC_RANGE`, and `OPENRAG_ADMIN_UI_PROXY_IP` in the Compose environment. If you use the TLS overlay, also set `OPENRAG_NPM_PROXY_IP`. Keep the proxy addresses distinct, inside the subnet, and outside the dynamic range.
 
-```nginx
-# openrag-admin.conf — edge proxy: replace any client-supplied X-Forwarded-For
-proxy_set_header X-Forwarded-For $remote_addr;
-```
-
-If nginx itself sits behind another load balancer, use the [real-ip module](https://nginx.org/en/docs/http/ngx_http_realip_module.html) (`set_real_ip_from <lb-subnet>; real_ip_header X-Forwarded-For;`) so the true client is resolved only from that trusted upstream.
+Keep loopback and the exact admin UI proxy address in explicit Compose allowlists. Do not use a broad range such as `172.16.0.0/12` with the TLS overlay because it includes NPM’s address. Add other proxy addresses only after hardening and verifying their forwarded-IP handling. When the Compose subnet changes, recreate the project network before starting the updated stack.
 :::
 
 ### Admin UI
@@ -812,6 +816,8 @@ flowchart TD
 ### MCP Server (Model Context Protocol)
 
 OpenRAG ships a standalone [Model Context Protocol](https://modelcontextprotocol.io/) server (`openrag/api/mcp/server.py`) that exposes retrieval to MCP clients. It runs as its own process (not part of the default compose stack). These variables configure the FastMCP transport binding and the search-tool defaults/bounds applied before a request reaches the retrieval service.
+
+The `index_url` tool stores what it downloads in `DATA_DIR`, as an upload is stored, and it is kept or deleted by the same `SAVE_UPLOADED_FILES` rule. Run the MCP server with the same `DATA_DIR` and data volume as the API.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|

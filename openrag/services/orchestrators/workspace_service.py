@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import TYPE_CHECKING, TypeVar
 
 from core.indexing.file_fences import DEFAULT_WAIT_TIMEOUT_SECONDS, FileFences
@@ -104,15 +105,59 @@ class WorkspaceService:
     async def get_existing_file_ids_any_partition(self, file_ids: list[str]) -> list[str]:
         return list(await self._workspace_repo.get_existing_file_ids_any_partition(file_ids))
 
-    async def add_files(self, partition: str, workspace_id: str, file_ids: list[str]) -> list[str]:
-        """Associate files; returns any file_ids that were not found."""
-        return await self._workspace_repo.add_files_to_workspace(partition, workspace_id, file_ids)
+    async def add_files(
+        self,
+        partition: str,
+        workspace_id: str,
+        file_ids: list[str],
+        *,
+        expected_created_at: datetime | None = None,
+        expected_created_at_is_null: bool = False,
+    ) -> list[str] | None:
+        """Associate files; returns any file_ids that were not found.
 
-    async def remove_file(self, partition: str, workspace_id: str, file_id: str) -> bool:
-        return await self._workspace_repo.remove_file_from_workspace(partition, workspace_id, file_id)
+        Returns ``None`` when the supplied generation no longer matches the
+        workspace (a same-ID replacement was confirmed against a stale picker).
+        """
+        return await self._workspace_repo.add_files_to_workspace(
+            partition,
+            workspace_id,
+            file_ids,
+            expected_created_at=expected_created_at,
+            expected_created_at_is_null=expected_created_at_is_null,
+        )
 
-    async def list_files(self, partition: str, workspace_id: str) -> list[str]:
-        return await self._workspace_repo.list_workspace_files(partition, workspace_id)
+    async def remove_file(
+        self,
+        partition: str,
+        workspace_id: str,
+        file_id: str,
+        *,
+        expected_created_at: datetime | None = None,
+        expected_created_at_is_null: bool = False,
+    ) -> bool | None:
+        return await self._workspace_repo.remove_file_from_workspace(
+            partition,
+            workspace_id,
+            file_id,
+            expected_created_at=expected_created_at,
+            expected_created_at_is_null=expected_created_at_is_null,
+        )
+
+    async def list_files(
+        self,
+        partition: str,
+        workspace_id: str,
+        *,
+        expected_created_at: datetime | None = None,
+        expected_created_at_is_null: bool = False,
+    ) -> list[str] | None:
+        return await self._workspace_repo.list_workspace_files(
+            partition,
+            workspace_id,
+            expected_created_at=expected_created_at,
+            expected_created_at_is_null=expected_created_at_is_null,
+        )
 
     async def get_file_workspaces(self, file_id: str, partition: str) -> list[str]:
         return await self._workspace_repo.get_file_workspaces(file_id, partition)
@@ -152,13 +197,25 @@ class WorkspaceService:
             raise AmbiguousWorkspaceError(workspace_id, sorted(ws.partition for ws in matches))
         partition = matches[0].partition
         file_ids = await self._workspace_repo.list_workspace_files(partition, workspace_id)
+        if file_ids is None:
+            # The workspace may have been deleted after ``find_workspaces``.
+            # Do not treat that race as a valid, empty workspace scope.
+            return None
         return WorkspaceScope(workspace_id=workspace_id, partition=partition, file_ids=file_ids)
 
     # ------------------------------------------------------------------
     # Cross-cutting: delete workspace + clean up orphaned files
     # ------------------------------------------------------------------
 
-    async def delete_workspace(self, partition: str, workspace_id: str, keep_files: bool = False) -> dict:
+    async def delete_workspace(
+        self,
+        partition: str,
+        workspace_id: str,
+        keep_files: bool = False,
+        *,
+        expected_created_at: datetime | None = None,
+        expected_created_at_is_null: bool = False,
+    ) -> dict | None:
         """Delete the workspace, then fully delete any files it orphaned.
 
         ``workspace_repo.delete_workspace`` removes the workspace and its
@@ -172,8 +229,19 @@ class WorkspaceService:
         the workspace and its membership rows are still removed, but the
         files stay indexed in the partition and are reported under
         ``kept_files``.
+
+        When ``expected_created_at`` is supplied, return ``None`` without
+        deleting files if the workspace instance changed since confirmation.
         """
-        orphaned = await self._workspace_repo.delete_workspace(partition, workspace_id, keep_files=keep_files)
+        orphaned = await self._workspace_repo.delete_workspace(
+            partition,
+            workspace_id,
+            keep_files=keep_files,
+            expected_created_at=expected_created_at,
+            expected_created_at_is_null=expected_created_at_is_null,
+        )
+        if orphaned is None:
+            return None
 
         deleted_count = 0
         failed_file_ids: list[str] = []

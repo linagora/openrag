@@ -42,6 +42,14 @@ fi
 # to be recreated once after upgrading (delete the volume / let it resync).
 umask 002
 
+# One-off commands (`docker compose run --rm openrag uv run ... migrate.py`)
+# run here, after the privilege drop and umask above. Overriding the entrypoint
+# instead (`--entrypoint ""`) would run them as root and leave root-owned,
+# owner-only files in the openrag_venv volume, breaking the next venv sync.
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
+
 ENV_ARGS=()
 if [[ -n "${SHARED_ENV}" ]]; then
   ENV_ARGS+=("--env-file=${SHARED_ENV}")
@@ -66,6 +74,17 @@ else
   RELOAD_ARGS=()
   if [[ "${UVICORN_RELOAD}" == "true" ]]; then
     RELOAD_ARGS+=("--reload")
+  fi
+  # An empty value in SHARED_ENV overrides proxy-defaults.env. Keep explicit
+  # non-empty overrides intact, but restore the safe Compose proxy default
+  # when it is blank. Non-Compose runs trust loopback only by default.
+  if [[ -z "${UVICORN_FORWARDED_ALLOW_IPS:-}" ]]; then
+    if [[ -n "${OPENRAG_ADMIN_UI_PROXY_IP:-}" ]]; then
+      UVICORN_FORWARDED_ALLOW_IPS="127.0.0.1,${OPENRAG_ADMIN_UI_PROXY_IP}"
+    else
+      UVICORN_FORWARDED_ALLOW_IPS="127.0.0.1"
+    fi
+    export UVICORN_FORWARDED_ALLOW_IPS
   fi
   # uvicorn only honours X-Forwarded-* from peers listed in --forwarded-allow-ips
   # (default: 127.0.0.1), so a reverse proxy outside loopback — the admin-ui

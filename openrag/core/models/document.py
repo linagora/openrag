@@ -22,6 +22,7 @@ class DocumentType(str, Enum):
     PDF = "pdf"
     TEXT = "text"
     CSV = "csv"
+    XLS = "xls"
     XLSX = "xlsx"
     HTML = "html"
     MARKDOWN = "markdown"
@@ -39,6 +40,7 @@ _EXTENSION_TYPES: dict[str, DocumentType] = {
     "pdf": DocumentType.PDF,
     "txt": DocumentType.TEXT,
     "csv": DocumentType.CSV,
+    "xls": DocumentType.XLS,
     "xlsx": DocumentType.XLSX,
     # Macro-enabled OOXML workbooks use the same safe, read-only tabular
     # parser.  The parser never retains or executes VBA.
@@ -242,11 +244,10 @@ class Document(BaseModel):
         (#911).
 
         Whether the yielded path is reachable from another node is the
-        *caller's* property, not this method's: the upload routes save under
-        ``config.paths.data_dir`` (Helm ``persistence.accessMode:
-        ReadWriteMany``, Compose's ``${DATA_VOLUME}:/app/data`` bind mount) and
-        are placeable; ``index_url``'s download is in the node's own temp dir
-        and is not.
+        *caller's* property, not this method's: the upload routes and MCP's
+        ``index_url`` save under ``config.paths.data_dir`` (Helm
+        ``persistence.accessMode: ReadWriteMany``, Compose's
+        ``${DATA_VOLUME}:/app/data`` bind mount), so their files are placeable.
 
         Otherwise ``raw_bytes`` is materialized to a temporary file, which *is*
         removed on context exit even if the body raises. That is the path for
@@ -319,6 +320,7 @@ _DEFAULT_TEMPFILE_SUFFIX: dict[DocumentType, str] = {
     DocumentType.PDF: ".pdf",
     DocumentType.DOCX: ".docx",
     DocumentType.PPTX: ".pptx",
+    DocumentType.XLS: ".xls",
     DocumentType.XLSX: ".xlsx",
     DocumentType.DOC: ".doc",
     DocumentType.AUDIO: ".wav",

@@ -105,29 +105,27 @@ function stageProgressDisplay(task: TaskListItem): {
     progress.stage_label || progress.stage_id
   );
   const live = progress.freshness === "live";
-  const activeWithoutLiveConfirmation = isActiveState(task.state) && !live;
-  const activeStageWithoutLiveConfirmation = isActiveState(task.state) && !liveStage;
   const interrupted = !!progress.interrupted_invocation_id &&
     progress.interrupted_invocation_id === progress.current_invocation_id;
   const hasCurrentPhase = ["preparing", "between_stages", "finalizing"].includes(progress.phase ?? "");
   const stageHasNoSeparatePhase = !hasCurrentPhase;
   const statusUnconfirmed = !interrupted && (
-    (activeStageWithoutLiveConfirmation && !!label && stageHasNoSeparatePhase)
-    || (activeWithoutLiveConfirmation && hasCurrentPhase)
+    (!liveStage && !!label && stageHasNoSeparatePhase)
+    || (!live && hasCurrentPhase)
   );
-  let stage = isActiveState(task.state) ? "Waiting for stage update…" : "Stage history unavailable";
+  let stage = "Waiting for stage update…";
   if (interrupted) {
     stage = label ? `Interrupted: ${label}` : "Interrupted before a stage was recorded";
   } else if (liveStage) {
     stage = progress.stage_label ?? label ?? "Waiting for stage update…";
   } else if (progress.phase === "finalizing") {
-    stage = live || activeWithoutLiveConfirmation ? "Finalizing" : "Last observed: Finalizing";
+    stage = "Finalizing";
   } else if (progress.phase === "between_stages") {
-    stage = live || activeWithoutLiveConfirmation ? "Between stages" : "Last observed: Between stages";
+    stage = "Between stages";
   } else if (progress.phase === "preparing") {
-    stage = live || activeWithoutLiveConfirmation ? "Preparing" : "Last observed: Preparing";
+    stage = "Preparing";
   } else if (label) {
-    stage = activeStageWithoutLiveConfirmation ? label : `Last observed: ${label}`;
+    stage = label;
   } else if (progress.history_quality === "not_started") {
     stage = "No stage history recorded";
   }
@@ -237,10 +235,11 @@ function TruncatedValue({ value, className = "max-w-[320px]" }: { value: string;
   );
 }
 
-function TaskStateCell({ task, showActiveState }: { task: TaskListItem; showActiveState: boolean }) {
+function TaskStateCell({ task }: { task: TaskListItem }) {
   const state = <StatusBadge status={task.state} />;
-  const progress = showActiveState ? null : stageProgressDisplay(task);
-  const hideActiveState = !showActiveState && task.state === "SERIALIZING";
+  // Running rows show their current stage in every tab; finished rows keep the plain badge.
+  const progress = isActiveState(task.state) ? stageProgressDisplay(task) : null;
+  const hideActiveState = task.state === "SERIALIZING";
   const progressLabel = progress && (
     <>
       <span>{progress.stage}</span>
@@ -275,19 +274,11 @@ function TaskStateCell({ task, showActiveState }: { task: TaskListItem; showActi
           {progress.quality && <span className="block">{progress.quality}</span>}
         </div>
       ) : hideActiveState ? (
-        task.state === "QUEUED"
-          ? state
-          : <span className="text-xs text-muted-foreground">Waiting for stage update…</span>
+        <span className="text-xs text-muted-foreground">Waiting for stage update…</span>
       ) : null}
     </div>
   );
 }
-
-const taskStateColumn = (showActiveState: boolean): ColumnDef<TaskListItem, unknown> => ({
-  accessorKey: "state",
-  header: "State",
-  cell: ({ row }) => <TaskStateCell task={row.original} showActiveState={showActiveState} />,
-});
 
 const columns: ColumnDef<TaskListItem, unknown>[] = [
   {
@@ -303,7 +294,11 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
       </Link>
     ),
   },
-  taskStateColumn(true),
+  {
+    accessorKey: "state",
+    header: "State",
+    cell: ({ row }) => <TaskStateCell task={row.original} />,
+  },
   {
     id: "file",
     accessorFn: (task) =>
@@ -348,12 +343,6 @@ const failureReasonColumn: ColumnDef<TaskListItem, unknown> = {
 };
 
 const adminColumns = [columns[0], columns[1], failureReasonColumn, ...columns.slice(2)];
-const activeColumns: ColumnDef<TaskListItem, unknown>[] = [
-  columns[0],
-  taskStateColumn(false),
-  ...columns.slice(2),
-];
-const adminActiveColumns = [activeColumns[0], activeColumns[1], failureReasonColumn, ...activeColumns.slice(2)];
 
 export default function JobListPage() {
   const { isAdmin } = usePermissions();
@@ -622,9 +611,7 @@ export default function JobListPage() {
                 <DataTable
                   key={`${statusTab}:${debouncedSearch}:${partitionFilter}`}
                   pageSize={statusTab === "ACTIVE" ? ACTIVE_JOBS_PAGE_SIZE : undefined}
-                  columns={statusTab === "ACTIVE"
-                    ? (isAdmin ? adminActiveColumns : activeColumns)
-                    : (isAdmin ? adminColumns : columns)}
+                  columns={isAdmin ? adminColumns : columns}
                   data={filteredTasks}
                   disableSorting={statusTab === "ACTIVE"}
                   manualPage={

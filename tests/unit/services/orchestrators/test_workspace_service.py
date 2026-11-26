@@ -19,15 +19,18 @@ class FakeWorkspaceRepo:
     async def cleanup_session(self, file_id, partition):
         yield self
 
-    def __init__(self, *, workspaces=None, orphaned=None, files=None):
+    def __init__(self, *, workspaces=None, orphaned=None, files=None, version_mismatch=False):
         # ``workspaces``: every workspace the fake knows about, across partitions.
         self._workspaces: list[Workspace] = list(workspaces or [])
         self._orphaned = orphaned if orphaned is not None else []
-        self._files = files if files is not None else ["f1", "f2"]
+        self._version_mismatch = version_mismatch
+        self._files = ["f1", "f2"] if files is None else files
         self.created: list[tuple] = []
-        self.added: list[tuple[str, str, list[str]]] = []
+        self.added: list[tuple[str, str, list[str], datetime | None, bool]] = []
         self.removed: list[tuple[str, str, str]] = []
+        self.remove_generation: tuple[datetime | None, bool] | None = None
         self.listed: list[tuple[str, str]] = []
+        self.list_generation: tuple[datetime | None, bool] | None = None
         self.find_calls: list[tuple[str, list[str] | None]] = []
         self.removed_from_all: list[tuple[str, str]] = []
         self.finalized: list[tuple[str, str]] = []
@@ -60,23 +63,64 @@ class FakeWorkspaceRepo:
     async def get_existing_file_ids(self, partition: str, file_ids):
         return [f for f in file_ids if f != "ghost"]
 
-    async def add_files_to_workspace(self, partition: str, workspace_id: str, file_ids):
-        self.added.append((partition, workspace_id, file_ids))
+    async def add_files_to_workspace(
+        self,
+        partition: str,
+        workspace_id: str,
+        file_ids,
+        *,
+        expected_created_at=None,
+        expected_created_at_is_null=False,
+    ):
+        self.added.append((partition, workspace_id, file_ids, expected_created_at, expected_created_at_is_null))
+        if (expected_created_at is not None or expected_created_at_is_null) and self._version_mismatch:
+            return None
         return []
 
-    async def remove_file_from_workspace(self, partition: str, workspace_id: str, file_id: str) -> bool:
+    async def remove_file_from_workspace(
+        self,
+        partition: str,
+        workspace_id: str,
+        file_id: str,
+        *,
+        expected_created_at=None,
+        expected_created_at_is_null=False,
+    ) -> bool | None:
         self.removed.append((partition, workspace_id, file_id))
+        self.remove_generation = (expected_created_at, expected_created_at_is_null)
+        if (expected_created_at is not None or expected_created_at_is_null) and self._version_mismatch:
+            return None
         return True
 
-    async def list_workspace_files(self, partition: str, workspace_id: str) -> list[str]:
+    async def list_workspace_files(
+        self,
+        partition: str,
+        workspace_id: str,
+        *,
+        expected_created_at=None,
+        expected_created_at_is_null=False,
+    ) -> list[str] | None:
         self.listed.append((partition, workspace_id))
-        return list(self._files)
+        self.list_generation = (expected_created_at, expected_created_at_is_null)
+        if (expected_created_at is not None or expected_created_at_is_null) and self._version_mismatch:
+            return None
+        return list(self._files) if self._files is not None else None
 
     async def get_file_workspaces(self, file_id: str, partition: str) -> list[str]:
         return ["w1", "w2"]
 
-    async def delete_workspace(self, partition: str, workspace_id: str, *, keep_files: bool = False) -> list[str]:
+    async def delete_workspace(
+        self,
+        partition: str,
+        workspace_id: str,
+        *,
+        keep_files: bool = False,
+        expected_created_at=None,
+        expected_created_at_is_null=False,
+    ) -> list[str] | None:
         self.deleted.append((partition, workspace_id, keep_files))
+        if (expected_created_at is not None or expected_created_at_is_null) and self._version_mismatch:
+            return None
         return list(self._orphaned)
 
     async def remove_file_from_all_workspaces(self, file_id: str, partition: str) -> None:
@@ -174,14 +218,24 @@ async def test_remove_file_and_list_and_workspaces():
     assert await svc.list_files("p", "w1") == ["f1", "f2"]
     assert await svc.get_file_workspaces("f1", "p") == ["w1", "w2"]
     assert wrepo.removed == [("p", "w1", "f1")]
+    assert wrepo.remove_generation == (None, False)
     assert wrepo.listed == [("p", "w1")]
+
+
+async def test_list_files_forwards_the_expected_workspace_generation():
+    expected_created_at = datetime(2025, 1, 10, 9, 0, tzinfo=UTC)
+    wrepo = FakeWorkspaceRepo()
+
+    assert await _svc(wrepo=wrepo).list_files("p", "w1", expected_created_at=expected_created_at) == ["f1", "f2"]
+    assert wrepo.listed == [("p", "w1")]
+    assert wrepo.list_generation == (expected_created_at, False)
 
 
 @pytest.mark.asyncio
 async def test_add_files_forwards_partition():
     wrepo = FakeWorkspaceRepo()
     assert await _svc(wrepo=wrepo).add_files("p", "w1", ["f1"]) == []
-    assert wrepo.added == [("p", "w1", ["f1"])]
+    assert wrepo.added == [("p", "w1", ["f1"], None, False)]
 
 
 # --------------------------------------------------------------------------- #
@@ -199,6 +253,23 @@ async def test_delete_workspace_no_orphans():
     assert wrepo.deleted == [("p", "w1", False)]
     assert vstore.deleted == []
     assert drepo.removed == []
+
+
+@pytest.mark.asyncio
+async def test_delete_workspace_stops_when_confirmation_is_stale():
+    wrepo = FakeWorkspaceRepo(orphaned=["fA"], version_mismatch=True)
+    vstore = FakeVectorStore(ids_by_file={"fA": ["c1"]})
+    expected_created_at = datetime(2025, 1, 10, 9, 0, tzinfo=UTC)
+
+    result = await _svc(wrepo=wrepo, vstore=vstore).delete_workspace(
+        "p",
+        "w1",
+        expected_created_at=expected_created_at,
+    )
+
+    assert result is None
+    assert wrepo.deleted == [("p", "w1", False)]
+    assert vstore.deleted == []
 
 
 @pytest.mark.asyncio
@@ -392,6 +463,15 @@ async def test_resolve_scope_returns_partition_and_file_ids():
 async def test_resolve_scope_none_when_workspace_missing():
     wrepo = FakeWorkspaceRepo()
     assert await _svc(wrepo=wrepo).resolve_scope("ghost", ["p1"]) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_scope_fails_if_workspace_disappears_before_membership_read():
+    wrepo = FakeWorkspaceRepo(workspaces=[Workspace(workspace_id="w1", partition="p1")])
+    wrepo._files = None
+
+    assert await _svc(wrepo=wrepo).resolve_scope("w1", ["p1"]) is None
+    assert wrepo.listed == [("p1", "w1")]
 
 
 @pytest.mark.asyncio
