@@ -43,9 +43,6 @@ _MAX_COMPRESSION_RATIO = 100_000
 
 _IMAGE_REF = re.compile(r"!\[[^\]]*\]\(image_(\d+)\.\w+\)")
 _SLIDE_SEPARATOR = re.compile(r"^-----$", re.MULTILINE)
-# Impress stores a preview picture beside every table, which xberg takes for a
-# picture of the slide. It renders straight after the table.
-_TABLE_PREVIEW = re.compile(r"(?<=\|\n\n)!\[[^\]]*\]\(image_\d+\.\w+\)\n?")
 _MAX_XML_BYTES = 64 * 1024 * 1024
 _MAX_PACKAGE_BYTES = 500 * 1024 * 1024
 # The only methods zipfile decompresses with an output limit, and the ones ODF
@@ -170,6 +167,16 @@ def _patch_content(root, package: zipfile.ZipFile) -> None:
         box = etree.SubElement(shape, f"{_DRAW}text-box")
         box.extend(text)
         shape.tag = f"{_DRAW}frame"
+    # Impress keeps a preview picture of each table in the table's frame, which
+    # xberg indexes as a picture of the slide.
+    _detach_all(
+        [
+            preview
+            for frame in root.iter(f"{_DRAW}frame")
+            if frame.find(f"{_TABLE}table") is not None
+            for preview in frame.findall(f"{_DRAW}image")
+        ]
+    )
     # Notes holding a list are dropped whole.
     for notes in root.iter(f"{_PRESENTATION}notes"):
         etree.strip_tags(notes, f"{_TEXT}list", f"{_TEXT}list-item")
@@ -357,7 +364,7 @@ def slides_markdown(extracted: Any, image_prefix: str) -> tuple[int, list[tuple[
     pictures = _Pictures(extracted.images or [], image_prefix)
     slides: list[tuple[int, str]] = []
     for slide_num, (section, notes) in enumerate(zip(sections, slide_notes, strict=True), start=1):
-        md = pictures.rewrite(_TABLE_PREVIEW.sub("", _slide_markdown(section, notes)), slide_num).strip()
+        md = pictures.rewrite(_slide_markdown(section, notes), slide_num).strip()
         if notes:
             md = f"{md}\n\n### Notes:\n" + "\n".join(notes)
         if md.strip():

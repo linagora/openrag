@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from core.indexing.parsers.odp_parser import OdpParser
 from core.models.document import Document, DocumentType
+from PIL import Image
 
 
 async def _parse(raw: bytes):
@@ -125,6 +126,31 @@ async def test_pictures_carry_their_slide_number(odf_package, encoded_image):
         (2, "![](odp-image-0)"),
         (2, "![](odp-image-1)"),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preview", ['<draw:image xlink:href="Pictures/preview.png"/>', ""], ids=["preview", "none"])
+async def test_a_table_preview_is_left_out_but_a_picture_after_the_table_is_kept(odf_package, encoded_image, preview):
+    """Impress keeps a preview picture in each table's frame. A picture in a frame of
+    its own after the table was taken for one and lost."""
+    table = (
+        "<draw:frame><table:table><table:table-row><table:table-cell><text:p>A</text:p></table:table-cell>"
+        f"</table:table-row></table:table>{preview}</draw:frame>"
+    )
+    picture = '<draw:frame><draw:image xlink:href="Pictures/photo.png"/></draw:frame>'
+    photo = io.BytesIO()
+    Image.new("RGB", (30, 10), "blue").save(photo, format="PNG")
+    processed = await _parse(
+        odf_package(
+            "odp",
+            f"<draw:page>{_frame('title', '<text:p>T</text:p>')}{table}{picture}</draw:page>",
+            pictures={"Pictures/preview.png": encoded_image("PNG"), "Pictures/photo.png": photo.getvalue()},
+        )
+    )
+
+    assert processed.text_blocks[0].text == "# T\n\n| A |\n| --- |\n\n![](odp-image-0)"
+    assert len(processed.images) == 1
+    assert Image.open(io.BytesIO(processed.images[0].image_bytes)).size == (30, 10)
 
 
 @pytest.mark.asyncio
