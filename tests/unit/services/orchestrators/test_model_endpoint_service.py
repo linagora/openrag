@@ -559,6 +559,55 @@ async def test_seed_defaults_backfill_does_not_clobber_fully_configured_row(monk
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model_type", ["llm", "vlm"])
+async def test_seed_defaults_sync_on_boot_keeps_backfilled_sampling_params(monkeypatch, model_type):
+    """The backfill and the sync both write ``extra`` on an env-managed row.
+
+    The sync used to merge into the row as read before the backfill, so it
+    wrote back an ``extra`` without the keys just backfilled, and the endpoint
+    ran at the provider's default sampling params on every boot.
+    """
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+    from core.config.root import Settings
+
+    for var in ("ENDPOINT", "MODEL", "API_KEY"):
+        monkeypatch.delenv(f"{model_type.upper()}_{var}", raising=False)
+
+    pre_fix_row = _make_row(
+        name="mistral",
+        model_type=model_type,
+        model_name="mistral",
+        is_default=True,
+        extra={"implementation": "vllm", "api_key": "old-key", ENV_MANAGED_KEY: ENV_MANAGED_VALUE},
+    )
+    settings = Settings(
+        **{
+            model_type: {
+                "base_url": "http://llm:8000/v1",
+                "model": "mistral",
+                "api_key": "new-key",
+                "temperature": 0.3,
+                "max_retries": 5,
+                "logprobs": True,
+            }
+        },
+        models={"sync_on_boot": True},
+    )
+    repo = _FakeEndpointRepo(rows=[pre_fix_row])
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    extra = repo._store[("mistral", model_type)].extra
+    assert extra["temperature"] == 0.3
+    assert extra["max_retries"] == 5
+    assert extra["logprobs"] is True
+    assert extra["api_key"] == "new-key"
+    assert extra[ENV_MANAGED_KEY] == ENV_MANAGED_VALUE
+    assert extra["implementation"] == "vllm"
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_skips_reranker_when_unconfigured(monkeypatch):
     from core.config.root import Settings
 
