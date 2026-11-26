@@ -22,6 +22,7 @@ class DocumentType(str, Enum):
     PDF = "pdf"
     TEXT = "text"
     CSV = "csv"
+    XLS = "xls"
     XLSX = "xlsx"
     HTML = "html"
     MARKDOWN = "markdown"
@@ -39,6 +40,7 @@ _EXTENSION_TYPES: dict[str, DocumentType] = {
     "pdf": DocumentType.PDF,
     "txt": DocumentType.TEXT,
     "csv": DocumentType.CSV,
+    "xls": DocumentType.XLS,
     "xlsx": DocumentType.XLSX,
     # Macro-enabled OOXML workbooks use the same safe, read-only tabular
     # parser.  The parser never retains or executes VBA.
@@ -318,6 +320,7 @@ _DEFAULT_TEMPFILE_SUFFIX: dict[DocumentType, str] = {
     DocumentType.PDF: ".pdf",
     DocumentType.DOCX: ".docx",
     DocumentType.PPTX: ".pptx",
+    DocumentType.XLS: ".xls",
     DocumentType.XLSX: ".xlsx",
     DocumentType.DOC: ".doc",
     DocumentType.AUDIO: ".wav",

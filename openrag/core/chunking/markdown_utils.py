@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from operator import itemgetter
 from typing import Any, Literal
 
-from core.utils.consts import XLSX_TEXT_NUMBER_FORMAT_KINDS
+from core.utils.consts import WORKBOOK_TABULAR_FORMATS, XLSX_TEXT_NUMBER_FORMAT_KINDS
 from core.utils.exceptions import PipelineError
 from core.utils.text import clean_markdown_table_spacing
 
@@ -315,12 +315,10 @@ def chunk_table(
     row of the previous chunk is replayed as overlap so context is preserved
     across the boundary.
     """
-    if table_element.metadata and table_element.metadata.get("tabular_format") == "xlsx":
+    if table_element.metadata and table_element.metadata.get("tabular_format") in WORKBOOK_TABULAR_FORMATS:
         return _chunk_xlsx_table(table_element.content, table_element, chunk_size, length_function)
     txt = clean_markdown_table_spacing(table_element.content)
     if table_element.metadata and table_element.metadata.get("csv_columns"):
-        if table_element.metadata.get("tabular_format") == "xlsx":
-            return _chunk_xlsx_table(txt, table_element, chunk_size, length_function)
         return _chunk_csv_table(
             txt,
             table_element=table_element,

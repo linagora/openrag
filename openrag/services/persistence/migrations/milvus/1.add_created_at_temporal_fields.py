@@ -15,21 +15,21 @@ Usage — prefer the generic runner (from infra/compose, with DC and SVC set as 
 ``DC="docker compose"; SVC=openrag`` on a GPU host,
 ``DC="docker compose --profile cpu"; SVC=openrag-cpu`` on a CPU host; add ``-p <project>`` and
 your ``-f`` overlays to DC if you start the stack with them):
-    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+    $DC run --no-deps --rm "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py [--dry-run] [--downgrade --target N]
 
 Or run this script directly:
     # Dry-run first (inspect only, no changes):
-    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+    $DC run --no-deps --rm "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/1.add_created_at_temporal_fields.py --dry-run
 
     # Apply:
-    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+    $DC run --no-deps --rm "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/1.add_created_at_temporal_fields.py
 
     # Roll back indexes and reset version (fields cannot be dropped in Milvus). Refused
     # unless the collection is at version 1; use migrate.py --downgrade --target <version> otherwise:
-    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+    $DC run --no-deps --rm "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/1.add_created_at_temporal_fields.py --downgrade
 """
 

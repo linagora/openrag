@@ -222,6 +222,41 @@ async def test_batches_are_stored_before_reading_the_next_batch(setup_pipeline):
     assert pipeline.parser.closed
 
 
+@pytest.mark.parametrize("chunker_name", ["structured_section", "recursive_splitter"])
+async def test_xls_streaming_pipeline_preserves_worksheet_context(setup_pipeline, chunker_name):
+    from pathlib import Path
+
+    from core.chunking.recursive import RecursiveSplitter
+    from core.indexing.parsers.tabular.xls_parser import XlsParser
+
+    class StreamingOnlyXlsParser(XlsParser):
+        async def parse(self, document):
+            raise AssertionError("XLS ingestion must use the batch iterator")
+
+    pipeline, row, _ = setup_pipeline
+    chunker = pipeline.chunker
+    if chunker_name == "recursive_splitter":
+        chunker = RecursiveSplitter(chunk_size=200, chunk_overlap_rate=0.0, length_function=lambda t: len(t.split()))
+    pipeline = replace(pipeline, parser=StreamingOnlyXlsParser(batch_size=2), chunker=chunker)
+    fixture = Path(__file__).resolve().parents[3] / "resources" / "legacy_workbook.xls"
+    document = await _load_document(str(fixture), {"file_id": "xls-file", "filename": "workbook.xls"}, "customers")
+    assert document.content_type is DocumentType.XLS
+    assert document.raw_bytes is None
+    row["document"] = document
+
+    result = await pipeline.run(row)
+
+    assert result["stage"] == "stored"
+    chunks = [chunk for batch, _ in pipeline.vector_store.calls for chunk in batch]
+    assert all(chunk.metadata["tabular_format"] == "xls" for chunk in chunks)
+    sales = [chunk for chunk in chunks if chunk.metadata["sheet_name"] == "Quarter's sales"]
+    assert {row for chunk in sales for row in chunk.metadata["table_row_numbers"]} == {4, 6, 8}
+    assert {chunk.metadata["xls_batch_index"] for chunk in sales} == {1, 2}
+    assert all("Worksheet: Quarter" in chunk.text for chunk in sales)
+    assert any(chunk.metadata["sheet_name"] == "Single row" for chunk in chunks)
+    assert all("SECRET" not in chunk.text for chunk in chunks)
+
+
 async def test_xlsx_uses_the_same_streaming_pipeline_with_sheet_metadata(setup_pipeline):
     pipeline, row, _ = setup_pipeline
     pipeline = replace(pipeline, parser=RecordingXlsxParser())

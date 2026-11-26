@@ -326,13 +326,15 @@ For an upgrade to 2.3.0, follow [Upgrading OpenRAG](/openrag/documentation/upgra
 The commands below run from `infra/compose/`. From the repo root, point Compose at the file (and at your project name, if you use one):
 
 ```bash
-docker compose -p <project> -f infra/compose/docker-compose.yaml run --no-deps --rm --entrypoint "" openrag \
+docker compose -p <project> -f infra/compose/docker-compose.yaml run --no-deps --rm openrag \
     uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
 
 The migration runner is a file, not a package — pass the full path to `migrate.py`, and keep PostgreSQL and Milvus running.
 
 The migration scripts ship **inside the image**. If you pull released images, check out the release you are moving to first: its Compose file names that release's images, which `docker compose pull` then fetches; if you build them from this checkout, add `--build` to the `run` and `up` commands below. Either way, check that the `Discovered N migration(s)` line of the dry run lists the migration you expect: if it does not, the image is stale.
+
+The image's entrypoint runs the command as the non-root app user. Do not bypass it with `--entrypoint ""`: Compose starts OpenRAG as root, so `uv` would leave root-owned files in the `openrag_venv` volume, and the next start with another image would fail with `Permission denied` while syncing it. Images up to 2.3.5 ignore the command and start OpenRAG instead; with those, run it as in [Upgrading — Run the Milvus migration](/openrag/documentation/upgrading/#5-run-the-milvus-migration), which runs it with `--entrypoint sh --user "$APP_UID:0"` and `umask 002`, so the files it leaves stay writable for the next image.
 :::
 
 ### Step 1 — Start PostgreSQL and Milvus only
@@ -369,13 +371,13 @@ has no health check), and no OpenRAG container.
 <Tabs>
   <TabItem label="GPU">
 ```bash
-docker compose run --no-deps --rm --entrypoint "" openrag \
+docker compose run --no-deps --rm openrag \
     uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
-docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+docker compose --profile cpu run --no-deps --rm openrag-cpu \
     uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
   </TabItem>
@@ -388,13 +390,13 @@ Review the output to confirm which migrations are pending and what changes they 
 <Tabs>
   <TabItem label="GPU">
 ```bash
-docker compose run --no-deps --rm --entrypoint "" openrag \
+docker compose run --no-deps --rm openrag \
     uv run --no-dev python services/persistence/migrations/milvus/migrate.py
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
-docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+docker compose --profile cpu run --no-deps --rm openrag-cpu \
     uv run --no-dev python services/persistence/migrations/milvus/migrate.py
 ```
   </TabItem>
@@ -428,22 +430,22 @@ To upgrade or downgrade to a specific schema version rather than the latest:
   <TabItem label="GPU">
 ```bash
 # Upgrade to version 2 only
-docker compose run --no-deps --rm --entrypoint "" openrag \
+docker compose run --no-deps --rm openrag \
     uv run --no-dev python services/persistence/migrations/milvus/migrate.py --target 2
 
 # Downgrade to version 2 (copies the vectors back into `vector`)
-docker compose run --no-deps --rm --entrypoint "" openrag \
+docker compose run --no-deps --rm openrag \
     uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
 # Upgrade to version 2 only
-docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+docker compose --profile cpu run --no-deps --rm openrag-cpu \
     uv run --no-dev python services/persistence/migrations/milvus/migrate.py --target 2
 
 # Downgrade to version 2 (copies the vectors back into `vector`)
-docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+docker compose --profile cpu run --no-deps --rm openrag-cpu \
     uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 ```
   </TabItem>
@@ -472,13 +474,13 @@ What a downgrade can undo depends on the migration:
 <Tabs>
   <TabItem label="GPU">
 ```bash
-docker compose run --no-deps --rm --entrypoint "" openrag \
+docker compose run --no-deps --rm openrag \
     uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target <version>
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
-docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+docker compose --profile cpu run --no-deps --rm openrag-cpu \
     uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target <version>
 ```
   </TabItem>
@@ -496,19 +498,19 @@ Run it once, after upgrading to the release that adds the filename to new chunks
 
 ```bash
 # See what would change
-docker compose run --no-deps --rm --entrypoint "" openrag \
+docker compose run --no-deps --rm openrag \
     uv run --no-dev python services/persistence/migrations/milvus/backfill_chunk_headers.py --dry-run
 
 # Optional: try it on one partition first
-docker compose run --no-deps --rm --entrypoint "" openrag \
+docker compose run --no-deps --rm openrag \
     uv run --no-dev python services/persistence/migrations/milvus/backfill_chunk_headers.py --partition <name>
 
 # Apply
-docker compose run --no-deps --rm --entrypoint "" openrag \
+docker compose run --no-deps --rm openrag \
     uv run --no-dev python services/persistence/migrations/milvus/backfill_chunk_headers.py
 ```
 
-On a CPU host, use `docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu`. On Kubernetes, use `kubectl exec -n "$NS" "$POD" -- uv run --no-dev --no-sync python`, followed by the same script path.
+On a CPU host, use `docker compose --profile cpu run --no-deps --rm openrag-cpu`. On Kubernetes, use `kubectl exec -n "$NS" "$POD" -- uv run --no-dev --no-sync python`, followed by the same script path.
 
 Good to know:
 

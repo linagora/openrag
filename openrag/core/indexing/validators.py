@@ -350,6 +350,16 @@ def validate_content_matches_extension(extension: str, head: bytes) -> None:
     Raises:
         ValidationError: HTTP 415, when the content contradicts the extension.
     """
+    if extension == "xls":
+        # A CFB header is necessary for this route. The worker validates the
+        # workbook stream, since other legacy Office formats share this header.
+        if not head.startswith(_OLE_SIGNATURE):
+            raise ValidationError(
+                "Uploaded .xls file is not a legacy Excel workbook. Use the extension matching its actual format.",
+                status_code=415,
+            )
+        return
+
     tolerated = _TOLERANT_SIGNATURES.get(extension)
     if tolerated is not None:
         kind = filetype.guess(head)

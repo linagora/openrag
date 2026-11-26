@@ -32,4 +32,6 @@ a3d08e6ceecc1b0d4f91804407378fae95edc797:evaluation-embedder-reranker/benchmark-
 169b420e47f0764bb91e93f1e301cd712d779511:main.py:generic-api-key:45
 169b420e47f0764bb91e93f1e301cd712d779511:main.py:huggingface-access-token:19
 25a4a17d13208510db3604c4f46397b9197f2665:src/pipeline.py:huggingface-access-token:11
+# Deterministic generated-format token used only by the auth throttling test.
+06772a20d6c8d53bdfbf2f192aae3401dfe0977e:tests/unit/api/middleware/test_bypass_config.py:generic-api-key:30
 f9e58e2db20a0743810873550e303da09d4dfdae:ssl/key.pem:private-key:1

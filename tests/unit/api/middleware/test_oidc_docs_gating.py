@@ -47,7 +47,7 @@ def _authed_service() -> AsyncMock:
     session = {"id": 7, "user_id": 1}
     svc = AsyncMock()
     svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=session)
-    svc.refresh_session_if_needed = AsyncMock(return_value=session)
+    svc.oidc_session_needs_refresh = lambda _session: False
     svc.get_user_for_request = AsyncMock(return_value={"id": 1, "is_admin": True})
     svc.list_user_partitions_for_request = AsyncMock(return_value=[])
     return svc

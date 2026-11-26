@@ -37,7 +37,7 @@ Usage — prefer the generic runner (from infra/compose, with DC and SVC set as 
 ``DC="docker compose"; SVC=openrag`` on a GPU host,
 ``DC="docker compose --profile cpu"; SVC=openrag-cpu`` on a CPU host; add ``-p <project>`` and
 your ``-f`` overlays to DC if you start the stack with them):
-    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+    $DC run --no-deps --rm "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py [--dry-run]
 
 This script also runs standalone with ``--dry-run`` / ``--downgrade``; its ``--downgrade`` refuses
