@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from core.models.preset import PartitionConfig
 from core.utils.exceptions import (
     ConflictError,
     NotFoundError,
@@ -15,6 +16,23 @@ from core.utils.exceptions import (
     ValidationError,
 )
 from services.orchestrators.partition_service import PartitionService
+
+
+def test_cached_config_lookup_returns_the_captured_configuration():
+    config = PartitionConfig(name="support", indexation={}, retrieval={})
+    cache = {"support": config}
+
+    assert PartitionService.lookup_cached_config(cache, "support") is config
+    assert PartitionService.require_cached_config(cache, "support") is config
+
+
+def test_cached_config_lookup_reports_an_unknown_partition():
+    config = PartitionConfig(name="support", indexation={}, retrieval={})
+    cache = {"support": config}
+
+    assert PartitionService.lookup_cached_config(cache, "suport") is None
+    with pytest.raises(PartitionNotFoundError, match="Partition 'suport' does not exist"):
+        PartitionService.require_cached_config(cache, "suport")
 
 
 class FakePartitionRepo:
