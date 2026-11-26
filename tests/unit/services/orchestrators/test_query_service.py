@@ -2836,6 +2836,73 @@ async def test_generation_prompt_name_from_partition_reaches_resolver():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("entry_point", ["chat", "chat_stream", "complete"])
+async def test_chat_keeps_partition_settings_when_the_cache_refreshes(entry_point):
+    query_json = json.dumps({"query_list": [{"query": "rewritten"}]})
+    old_llm = FakeLLM(chat_responses=[query_json])
+    new_llm = FakeLLM(chat_responses=[query_json])
+    factory = RecordingFactory({"old-model": old_llm, "new-model": new_llm})
+    chunks = [Chunk(id=name, text=name, metadata={"_id": name}) for name in ("c1", "c2")]
+    svc = _svc(mode="ChatBotRag", llm_factory=factory, retrieval=FakeRetrieval(chunks))
+    old = _partition_cfg(top_n=1, chat_llm="old-model", generation_prompt_names={"sys_prompt": "old-answer"})
+    new = _partition_cfg(
+        top_n=2, chat_llm="new-model", chat_history_depth=1, generation_prompt_names={"sys_prompt": "new-answer"}
+    )
+    old.retrieval.query_contextualizer_prompt_name = "old-query"
+    new.retrieval.query_contextualizer_prompt_name = "new-query"
+    svc._config.partitions = {"p": old}
+
+    prompt_names = []
+    source_counts = []
+
+    class RefreshingPromptService:
+        async def resolve_prompt(self, prompt_type, names):
+            prompt_names.append((prompt_type, names[0]))
+            if prompt_type == "query_contextualizer":
+                svc._config.partitions["p"] = new
+                return "Rewrite the question"
+            return "Answer from {context}"
+
+    svc._prompt_service = RefreshingPromptService()
+
+    def prepare_sources(docs, _web):
+        source_counts.append(len(docs))
+        return []
+
+    async def request():
+        kwargs = {"partitions": ["p"], "prepare_sources": prepare_sources}
+        if entry_point == "complete":
+            await svc.complete(payload={"prompt": "What did we agree?"}, **kwargs)
+            return
+        payload = {
+            "messages": [
+                {"role": "user", "content": "Earlier question"},
+                {"role": "user", "content": "What did we agree?"},
+            ]
+        }
+        if entry_point == "chat":
+            await svc.chat(payload=payload, model_name="openrag-p", **kwargs)
+        else:
+            async for _ in svc.chat_stream(payload=payload, model_name="openrag-p", **kwargs):
+                pass
+
+    await request()
+    await request()
+
+    assert factory.calls == ["old-model", "new-model"]
+    assert prompt_names == [
+        ("query_contextualizer", "old-query"),
+        ("sys_prompt", "old-answer"),
+        ("query_contextualizer", "new-query"),
+        ("sys_prompt", "new-answer"),
+    ]
+    assert source_counts == [1, 2]
+    if entry_point != "complete":
+        assert "Earlier question" in old_llm.chat_calls[0][0][-1]["content"]
+        assert "Earlier question" not in new_llm.chat_calls[0][0][-1]["content"]
+
+
+@pytest.mark.asyncio
 async def test_spoken_style_metadata_swaps_the_answer_prompt():
     """`metadata.spoken_style_answer` is a public API flag (and a Chainlit
     command) that swaps the answer prompt for a voice-friendly one. Nothing

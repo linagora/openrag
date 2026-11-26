@@ -45,7 +45,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from core.models.preset import resolve_partition_chat_llm
+from core.models.preset import PartitionConfig, resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
 from core.models.retrieval_trace import (
     ContextualizationTrace,
@@ -82,6 +82,7 @@ from core.utils.source_filtering import (
 from core.utils.text import get_num_tokens
 from core.utils.web_url import normalize_web_url
 from services.inference.runtime import detect_language, get_llm_semaphore
+from services.orchestrators.partition_service import PartitionService
 from services.orchestrators.prompt_service import ResolvedPrompt
 
 if TYPE_CHECKING:
@@ -307,7 +308,22 @@ class QueryService:
     async def refresh_partition_configs(self) -> None:
         await self._retrieval.refresh_partition_configs()
 
-    def _resolve_chat_history_depth(self, partition: list[str] | None) -> int:
+    def _partition_configs_for_request(self, partitions: list[str] | None) -> dict[str, PartitionConfig]:
+        """Capture the partition settings before awaits can refresh the shared cache."""
+        if not partitions:
+            return {}
+        configs = self._config.partitions
+        if "all" in partitions:
+            return configs.copy()
+        return {
+            name: config
+            for name in dict.fromkeys(partitions)
+            if (config := PartitionService.lookup_cached_config(configs, name)) is not None
+        }
+
+    def _resolve_chat_history_depth(
+        self, partition: list[str] | None, configs: dict[str, PartitionConfig] | None = None
+    ) -> int:
         """Effective chat-history depth for this request.
 
         Honors a partition's configured ``chat_history_depth`` (set via the
@@ -328,17 +344,20 @@ class QueryService:
         global default. A request scoped to one or more named partitions takes
         the largest explicit (>0) value among them.
         """
+        if configs is None:
+            configs = self._config.partitions
         if partition and "all" not in partition:
             explicit = [
                 cfg.chat_history_depth
                 for name in partition
-                if (cfg := self._config.partitions.get(name)) is not None and cfg.chat_history_depth > 0
+                if (cfg := PartitionService.lookup_cached_config(configs, name)) is not None
+                and cfg.chat_history_depth > 0
             ]
             if explicit:
                 return max(explicit)
         return self._default_chat_history_depth
 
-    def _resolve_top_n(self, partition: list[str] | None) -> int:
+    def _resolve_top_n(self, partition: list[str] | None, configs: dict[str, PartitionConfig] | None = None) -> int:
         """How many sources this request's prompt takes: the retrieval preset's ``top_n``.
 
         ``reranker.top_k`` when the preset leaves it unset. Retrieval already
@@ -350,17 +369,22 @@ class QueryService:
         the prompt.
         """
         default = self._config.reranker.top_k
-        configs = self._config.partitions
+        if configs is None:
+            configs = self._config.partitions
         if partition and configs:
             names = list(configs) if "all" in partition else partition
             top_ns = [
-                cfg.retrieval.effective_top_n(default) for name in names if (cfg := configs.get(name)) is not None
+                cfg.retrieval.effective_top_n(default)
+                for name in names
+                if (cfg := PartitionService.lookup_cached_config(configs, name)) is not None
             ]
             if top_ns:
                 return max(top_ns)
         return default
 
-    def _fit_sources(self, docs: list, partition: list[str] | None, headroom: int | None) -> list[int]:
+    def _fit_sources(
+        self, docs: list, partition: list[str] | None, headroom: int | None, configs: dict[str, PartitionConfig]
+    ) -> list[int]:
         """Positions of up to ``top_n`` of *docs*, within the *headroom* the answering model's window leaves.
 
         Sizes the blocks exactly as ``_documents_context`` renders them, provenance
@@ -372,7 +396,7 @@ class QueryService:
         there shows up here as fewer sources than ``top_n``: logged, because
         nothing else surfaces it.
         """
-        top_n = self._resolve_top_n(partition)
+        top_n = self._resolve_top_n(partition, configs)
         _, included = format_context(
             [doc.page_content for doc in docs],
             max_context_tokens=headroom,
@@ -386,7 +410,7 @@ class QueryService:
             )
         return included
 
-    def _resolve_llm(self, partition: list[str] | None) -> LLM:
+    def _resolve_llm(self, partition: list[str] | None, configs: dict[str, PartitionConfig] | None = None) -> LLM:
         """Effective LLM for this request — query generation and answering.
 
         Resolution order:
@@ -423,7 +447,9 @@ class QueryService:
         The resolved endpoint name is always logged (at debug), including for
         the default, so "which model answered?" is answerable from the logs.
         """
-        chat_llm = self._agreed_partition_chat_llm(partition)
+        if configs is None:
+            configs = self._config.partitions
+        chat_llm = self._agreed_partition_chat_llm(partition, configs)
         if chat_llm is not None:
             try:
                 llm = self._llm_factory(chat_llm)  # factory is not None when chat_llm is set
@@ -441,7 +467,9 @@ class QueryService:
                 return llm
         return self._default_llm(partition)
 
-    def _agreed_partition_chat_llm(self, partition: list[str] | None) -> str | None:
+    def _agreed_partition_chat_llm(
+        self, partition: list[str] | None, configs: dict[str, PartitionConfig]
+    ) -> str | None:
         """The single ``chat_llm`` endpoint the request's partitions agree on, else None.
 
         Returns None — meaning "use the catalog default" — when no endpoint
@@ -449,14 +477,12 @@ class QueryService:
         sentinel, no named partition sets one, or the named partitions
         name more than one endpoint (a conflict with no single owning partition).
 
-        The partition-consensus decision itself is delegated to the shared
-        ``resolve_partition_chat_llm`` — the same rule the chat-completions
-        token preflight uses — so the LLM that answers and the budget it was
-        checked against can't fall out of sync.
+        The shared ``resolve_partition_chat_llm`` also defines the consensus
+        rule for retrieval metadata and chat-completions token preflight.
         """
         if self._llm_factory is None:
             return None
-        return resolve_partition_chat_llm(partition, self._config.partitions)
+        return resolve_partition_chat_llm(partition, configs)
 
     def _default_llm(self, partition: list[str] | None) -> LLM:
         """The catalog default LLM endpoint (``is_default=True``), resolved fresh.
@@ -504,23 +530,26 @@ class QueryService:
     # Query generation (was RagPipeline.generate_query — no LangChain)
     # ------------------------------------------------------------------
 
-    def _generation_prompt_name(self, prompt_type: str, partition: list[str] | None) -> str | None:
+    def _generation_prompt_name(
+        self, prompt_type: str, partition: list[str] | None, configs: dict[str, PartitionConfig]
+    ) -> str | None:
         """The library prompt this request's partition names for a generation type.
 
-        Honoured only for a single owning partition (same rule as chat_llm /
-        chat_history_depth); multi-partition and the ``"all"`` sentinel resolve
-        the global default. Returned as the sole candidate name for
+        Honoured only for a single owning partition. Multi-partition and
+        ``"all"`` requests use the global default. Returned as the sole candidate name for
         ``PromptService.resolve_prompt`` — a future per-user tier prepends ahead
         of it.
         """
         if not partition or "all" in partition or len(partition) != 1:
             return None
-        cfg = self._config.partitions.get(partition[0])
+        cfg = PartitionService.lookup_cached_config(configs, partition[0])
         if cfg is None:
             return None
         return getattr(cfg, "generation_prompt_names", {}).get(prompt_type)
 
-    def _retrieval_prompt_name(self, field: str, partition: list[str] | None) -> str | None:
+    def _retrieval_prompt_name(
+        self, field: str, partition: list[str] | None, configs: dict[str, PartitionConfig]
+    ) -> str | None:
         """The library prompt this request's partition names on its retrieval
         preset (query-side prompts: query_contextualizer / hyde / multi_query).
 
@@ -529,7 +558,7 @@ class QueryService:
         """
         if not partition or "all" in partition or len(partition) != 1:
             return None
-        cfg = self._config.partitions.get(partition[0])
+        cfg = PartitionService.lookup_cached_config(configs, partition[0])
         if cfg is None:
             return None
         return getattr(getattr(cfg, "retrieval", None), field, None)
@@ -540,6 +569,8 @@ class QueryService:
         llm: LLM | None = None,
         partition: list[str] | None = None,
         trace: RetrievalTraceBuilder | None = None,
+        *,
+        configs: dict[str, PartitionConfig] | None = None,
     ) -> SearchQueries:
         llm = llm or self._llm
         last_user = _latest_user_query(messages) or (messages[-1].get("content") or "")
@@ -551,7 +582,9 @@ class QueryService:
         # The results of the tools are data the app gave, not turns of the
         # conversation: they do not shape the search.
         chat_history = "".join(f"{m['role']}: {m.get('content') or ''}\n" for m in messages if m.get("role") != "tool")
-        prompt_name = self._retrieval_prompt_name("query_contextualizer_prompt_name", partition)
+        if configs is None:
+            configs = self._config.partitions
+        prompt_name = self._retrieval_prompt_name("query_contextualizer_prompt_name", partition, configs)
         resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
         if resolve_with_identity is not None:
             contextualizer = await resolve_with_identity("query_contextualizer", names=[prompt_name])
@@ -768,8 +801,12 @@ class QueryService:
         llm: LLM | None = None,
         trace: RetrievalTraceBuilder | None = None,
         max_prompt_tokens: int | None = None,
+        *,
+        configs: dict[str, PartitionConfig] | None = None,
     ):
-        messages = _history_window(payload["messages"], self._resolve_chat_history_depth(partition))
+        if configs is None:
+            configs = self._partition_configs_for_request(partition)
+        messages = _history_window(payload["messages"], self._resolve_chat_history_depth(partition, configs))
         custom_prompt, messages = _split_leading_system_prompt(payload["messages"], messages)
         if not messages:
             raise ValidationError("Request must contain at least one non-system message")
@@ -846,7 +883,7 @@ class QueryService:
             queries = SearchQueries(query_list=[Query(query=last_user_message)])
             self._record_contextualization_bypass(trace, original_query=last_user_message)
         elif casual_policy is None or retrieval_forced:
-            queries = await self.generate_query(messages, llm=llm, partition=partition, trace=trace)
+            queries = await self.generate_query(messages, llm=llm, partition=partition, trace=trace, configs=configs)
             usable_queries = [query for query in queries.query_list if query.query.strip()]
             if (
                 acknowledgement_candidate
@@ -994,7 +1031,7 @@ class QueryService:
 
         prompt_type = "spoken_style_answer" if spoken_style else "sys_prompt"
         tmpl = await self._prompt_service.resolve_prompt(
-            prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
+            prompt_type, names=[self._generation_prompt_name(prompt_type, partition, configs)]
         )
         current_date = datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S")
         # What the window leaves for sources once the instructions, the
@@ -1026,7 +1063,7 @@ class QueryService:
             )
         headroom = None if room is None else room - web_tokens
         candidates = docs
-        docs = [docs[i] for i in self._fit_sources(docs, partition, headroom)]
+        docs = [docs[i] for i in self._fit_sources(docs, partition, headroom, configs)]
 
         def assemble(docs: list, web_candidates: list) -> tuple[list[dict], list]:
             """The answer messages with *docs*, then the *web_candidates* that fit after them."""
@@ -1271,15 +1308,21 @@ class QueryService:
         payload: dict,
         llm: LLM | None = None,
         max_prompt_tokens: int | None = None,
+        *,
+        configs: dict[str, PartitionConfig] | None = None,
     ):
+        if configs is None:
+            configs = self._partition_configs_for_request(partition)
         prompt = payload["prompt"]
         metadata = payload.get("metadata") or {}
         # partition= is ours: the retrieval preset's query_contextualizer is
         # resolved per partition. The skip below is from #807.
-        queries = await self.generate_query([{"role": "user", "content": prompt}], llm=llm, partition=partition)
+        queries = await self.generate_query(
+            [{"role": "user", "content": prompt}], llm=llm, partition=partition, configs=configs
+        )
         prompt_type = "spoken_style_answer" if metadata.get("spoken_style_answer", False) else "sys_prompt"
         tmpl = await self._prompt_service.resolve_prompt(
-            prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
+            prompt_type, names=[self._generation_prompt_name(prompt_type, partition, configs)]
         )
         current_date = datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S")
 
@@ -1308,7 +1351,7 @@ class QueryService:
             # Full retrieval set before the token-budget selection below, kept
             # separately for `all_retrieved_sources` (#847).
             retrieved_docs = docs
-            docs = [docs[i] for i in self._fit_sources(docs, partition, room)]
+            docs = [docs[i] for i in self._fit_sources(docs, partition, room, configs)]
             context = _documents_context(
                 order_chunks_by_date(docs, queries.date_order), any_retrieved=bool(retrieved_docs)
             )
@@ -1419,11 +1462,13 @@ class QueryService:
             diagnostics=self._retrieval_diagnostics_context(metadata),
         )
         started = time.perf_counter()
+        configs = self._partition_configs_for_request(partitions)
         result = await self._prepare_chat(
             partitions,
             {"messages": messages, "metadata": metadata},
-            self._resolve_llm(partitions),
+            self._resolve_llm(partitions, configs),
             trace=trace,
+            configs=configs,
         )
         trace.timings["total"] = time.perf_counter() - started
         return trace.finish(configuration_fingerprint=result.configuration_fingerprint)
@@ -1461,7 +1506,8 @@ class QueryService:
             else None
         )
         configuration_fingerprint = "unavailable"
-        llm = self._resolve_llm(partitions)
+        configs = self._partition_configs_for_request(partitions)
+        llm = self._resolve_llm(partitions, configs)
         citation_protocol_active = False
         retry_empty_response = True
         if partitions is None and not metadata.get("websearch", False):
@@ -1470,7 +1516,7 @@ class QueryService:
             self._record_contextualization_not_run(trace, original_query=original_query)
         else:
             result = await self._prepare_chat(
-                partitions, payload, llm, trace=trace, max_prompt_tokens=max_prompt_tokens
+                partitions, payload, llm, trace=trace, max_prompt_tokens=max_prompt_tokens, configs=configs
             )
             payload = result.payload
             docs = result.docs
@@ -1585,7 +1631,8 @@ class QueryService:
             else None
         )
         configuration_fingerprint = "unavailable"
-        llm = self._resolve_llm(partitions)
+        configs = self._partition_configs_for_request(partitions)
+        llm = self._resolve_llm(partitions, configs)
         citation_protocol_active = False
         retry_empty_response = True
         if partitions is None and not metadata.get("websearch", False):
@@ -1594,7 +1641,7 @@ class QueryService:
             self._record_contextualization_not_run(trace, original_query=original_query)
         else:
             result = await self._prepare_chat(
-                partitions, payload, llm, trace=trace, max_prompt_tokens=max_prompt_tokens
+                partitions, payload, llm, trace=trace, max_prompt_tokens=max_prompt_tokens, configs=configs
             )
             payload = result.payload
             docs = result.docs
@@ -1667,12 +1714,15 @@ class QueryService:
         """Non-streaming text completion → finalized OpenAI dict (*max_prompt_tokens*: see ``chat``)."""
         metadata = payload.get("metadata") or {}
         include_all_retrieved = metadata.get("include_all_retrieved_sources") is True
-        llm = self._resolve_llm(partitions)
+        configs = self._partition_configs_for_request(partitions)
+        llm = self._resolve_llm(partitions, configs)
         citation_protocol_active = partitions is not None
         if partitions is None:
             docs, retrieved_docs = [], []
         else:
-            payload, docs, retrieved_docs = await self._prepare_completions(partitions, payload, llm, max_prompt_tokens)
+            payload, docs, retrieved_docs = await self._prepare_completions(
+                partitions, payload, llm, max_prompt_tokens, configs=configs
+            )
         sources = prepare_sources(docs, [])
         all_sources = prepare_sources(retrieved_docs, []) if include_all_retrieved else None
         structured_output = _is_structured_output(payload)
