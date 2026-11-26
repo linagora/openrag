@@ -48,6 +48,9 @@ _SLIDE_SEPARATOR = re.compile(r"^-----$", re.MULTILINE)
 _TABLE_PREVIEW = re.compile(r"(?<=\|\n\n)!\[[^\]]*\]\(image_\d+\.\w+\)\n?")
 _MAX_XML_BYTES = 64 * 1024 * 1024
 _MAX_PACKAGE_BYTES = 500 * 1024 * 1024
+# The only methods zipfile decompresses with an output limit, and the ones ODF
+# producers write. It expands the others whole, whatever the header declares.
+_BOUNDED_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 _OFFICE = "{urn:oasis:names:tc:opendocument:xmlns:office:1.0}"
 _TEXT = "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}"
 _DRAW = "{urn:oasis:names:tc:opendocument:xmlns:drawing:1.0}"
@@ -261,6 +264,9 @@ def _patched(raw: bytes) -> bytes:
             infos = package.infolist()
             # From the zip header, before anything is decompressed: xberg refuses these.
             if sum(i.file_size for i in infos) > _MAX_PACKAGE_BYTES:
+                return raw
+            # Every entry is read below. xberg bounds the other methods itself.
+            if any(i.compress_type not in _BOUNDED_COMPRESSION for i in infos):
                 return raw
             if package.getinfo("content.xml").file_size > _MAX_XML_BYTES:
                 return raw

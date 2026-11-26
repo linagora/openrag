@@ -482,7 +482,9 @@ def _validate_odf_package(extension: str, stream: IO[bytes]) -> None:
     """Reject an ``.odt``/``.odp`` upload whose archive is not an ODF package of that kind.
 
     Reads the central directory, then the ``mimetype`` entry, capped at a few
-    hundred bytes whatever its header claims. ``content.xml`` is required as
+    hundred bytes whatever its header claims. That entry must be stored or
+    deflated, as ODF writes it: ``zipfile`` expands a BZIP2 or LZMA entry with
+    no output limit before the cap applies. ``content.xml`` is required as
     well: it is the part the parser reads. The stream position is restored.
     """
     expected = _ODF_MIMETYPES[extension]
@@ -495,6 +497,8 @@ def _validate_odf_package(extension: str, stream: IO[bytes]) -> None:
         with zipfile.ZipFile(stream) as package:
             names = set(package.namelist())
             if "mimetype" not in names or "content.xml" not in names:
+                raise ValidationError(refused, status_code=415)
+            if package.getinfo("mimetype").compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
                 raise ValidationError(refused, status_code=415)
             # One byte past the bound tells an over-long entry from one that fits.
             bound = len(expected) + 64

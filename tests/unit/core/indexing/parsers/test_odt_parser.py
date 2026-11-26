@@ -390,6 +390,23 @@ async def test_one_highly_compressible_entry_does_not_refuse_the_document(odf_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA], ids=["bzip2", "lzma"])
+async def test_an_entry_neither_stored_nor_deflated_is_left_to_xberg(odf_package, method):
+    """zipfile expands these whole, whatever size the header declares: an 884-byte
+    file whose picture claimed 1 KiB took 850 MiB to patch. xberg bounds them itself."""
+    import core.indexing.parsers.odf as odf
+
+    buf = io.BytesIO(odf_package("odt", "<text:p>Corps</text:p>"))
+    with zipfile.ZipFile(buf, "a") as zf:
+        zf.writestr("Pictures/a.bin", b"\x00" * 1000, compress_type=method)
+    raw = buf.getvalue()
+
+    assert odf._patched(raw) is raw
+    processed = await _parse(raw)
+    assert processed.text_blocks[0].text == "Corps"
+
+
+@pytest.mark.asyncio
 async def test_a_libreoffice_document():
     """LibreOffice 26.8, exported from a python-docx document."""
     raw = (Path(__file__).resolve().parents[4] / "resources" / "test_file.odt").read_bytes()

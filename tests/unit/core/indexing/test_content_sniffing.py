@@ -472,6 +472,19 @@ def test_the_mimetype_entry_is_read_with_a_bound():
         validate_ooxml_package("odt", io.BytesIO(buf.getvalue()))
 
 
+@pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA], ids=["bzip2", "lzma"])
+def test_a_mimetype_entry_neither_stored_nor_deflated_is_refused(method):
+    """zipfile expands these whole before the bound applies: a 644-byte entry
+    holding 400 MiB of spaces took 829 MiB to refuse. The entry is not opened."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr("mimetype", "application/vnd.oasis.opendocument.text", compress_type=method)
+        archive.writestr("content.xml", "<x/>")
+    with pytest.raises(ValidationError) as excinfo:
+        validate_ooxml_package("odt", io.BytesIO(buf.getvalue()))
+    assert excinfo.value.status_code == 415
+
+
 @pytest.mark.parametrize("how", ["encrypted", "corrupt"])
 def test_an_unreadable_mimetype_entry_is_refused(damaged_zip_entry, how):
     """An encrypted entry raises RuntimeError and a broken deflate stream
