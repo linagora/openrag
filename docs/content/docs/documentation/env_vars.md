@@ -320,6 +320,8 @@ The vector database stores embeddings and is configured using the following envi
 | `VDB_TIMEOUT` | float | 120.0 | Per-request timeout (seconds) applied to the Milvus sync and async clients |
 | `VDB_JSON_MAX_LENGTH` | int | 65536 | Maximum JSON metadata size in bytes per row. Must match the Milvus server's `common.JSONMaxLength` |
 | `VDB_JSON_SAFETY_MARGIN_BYTES` | int | 1024 | Bytes reserved below the limit when shortening oversized rows. Must be positive and leave at least two bytes |
+| `VDB_INSERT_BATCH_MAX_BYTES` | int | 16777216 | Estimated size in bytes above which a file's chunks are written to Milvus in several requests. Milvus refuses a request over its proxy's `proxy.grpc.serverMaxRecvSize` (128 MiB by default), and on Milvus 3.0.5 a request of 56 MiB already made the next write wait about a minute (WAL rate limit) |
+| `VDB_INSERT_BATCH_MAX_ROWS` | int | 10000 | Most chunks written to Milvus in one request |
 
 These variables can be overridden when using an external vector database service.
 
