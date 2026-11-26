@@ -44,7 +44,9 @@ _MAX_COMPRESSION_RATIO = 100_000
 # xberg writes a picture's title as its alt text, which may hold brackets in pairs.
 # A bracket of its own ends it, which keeps matching linear on text full of "![".
 _IMAGE_REF = re.compile(r"!\[(?:[^\[\]]|\[[^\[\]]*\])*\]\(image_(\d+)\.\w+\)")
-_SLIDE_SEPARATOR = re.compile(r"^-----$", re.MULTILINE)
+# xberg writes this line before each slide, and as is any text line that reads the same.
+_SLIDE_SEPARATOR_LINE = "-----"
+_SLIDE_SEPARATOR = re.compile(rf"^{_SLIDE_SEPARATOR_LINE}$", re.MULTILINE)
 _MAX_XML_BYTES = 64 * 1024 * 1024
 _MAX_PACKAGE_BYTES = 500 * 1024 * 1024
 # The only methods zipfile decompresses with an output limit, and the ones ODF
@@ -385,14 +387,21 @@ def slides_markdown(extracted: Any, image_prefix: str) -> tuple[int, list[tuple[
     if extracted.document is None:
         raise OdfError("xberg returned no document structure")
     slide_notes: list[list[str]] = []
+    # The lines of each slide's own text that read like a separator: a paragraph
+    # holding only that (xberg joins its lines with spaces), or a line of its notes.
+    literal_separators: list[int] = []
     master_texts: list[str] = []
     for node in extracted.document.nodes:
         # NodeContent exposes its fields through its JSON form only.
         content = json.loads(str(node.content))
         if content["node_type"] == "slide":
             slide_notes.append([])
+            literal_separators.append(0)
+        elif content["node_type"] == "paragraph" and slide_notes:
+            literal_separators[-1] += " ".join(content.get("text", "").split()) == _SLIDE_SEPARATOR_LINE
         elif content["node_type"] == "raw_block" and content["format"] == _NOTES_FORMAT and slide_notes:
             slide_notes[-1].append(content["content"].strip())
+            literal_separators[-1] += content["content"].split("\n").count(_SLIDE_SEPARATOR_LINE)
         elif content["node_type"] == "raw_block" and content["format"] == _MASTER_FORMAT:
             master_texts.append(content["content"])
 
@@ -402,11 +411,22 @@ def slides_markdown(extracted: Any, image_prefix: str) -> tuple[int, list[tuple[
     if masters and body.endswith(masters):
         body = body[: -len(masters)]
 
-    sections = _SLIDE_SEPARATOR.split(body)[1:]
-    if len(sections) != len(slide_notes):
-        # A slide holding a line of dashes of its own: better one block than the
-        # wrong slide numbers.
-        logger.warning("Expected %d ODP slides, found %d separators", len(slide_notes), len(sections))
+    # Each slide starts at its separator, which its own literal ones follow.
+    separators = list(_SLIDE_SEPARATOR.finditer(body))
+    if len(separators) == len(slide_notes) + sum(literal_separators):
+        starts, at = [], 0
+        for literal in literal_separators:
+            starts.append(separators[at])
+            at += 1 + literal
+        sections = [
+            body[start.end() : starts[i + 1].start() if i + 1 < len(starts) else len(body)]
+            for i, start in enumerate(starts)
+        ]
+    else:
+        # A separator line the structure does not account for: better one block
+        # than the wrong slide numbers.
+        expected = len(slide_notes) + sum(literal_separators)
+        logger.warning("Expected %d ODP slide separators, found %d", expected, len(separators))
         sections = [_SLIDE_SEPARATOR.sub("", body)]
         slide_notes = [[note for notes in slide_notes for note in notes]]
 

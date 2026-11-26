@@ -404,6 +404,29 @@ async def test_a_note_repeating_the_title_leaves_the_title_alone(odf_package):
 
 
 @pytest.mark.asyncio
+async def test_a_line_of_dashes_in_a_slide_keeps_the_slides_apart(odf_package):
+    """xberg writes "-----" before each slide, and so does a paragraph or a notes line
+    reading the same: the deck collapsed into one block on page 1."""
+    first = _frame("title", "<text:p>Un</text:p>") + _frame(
+        "outline", "<text:p>avant</text:p><text:p>-----</text:p><text:p>après</text:p>"
+    )
+    notes = (
+        "<presentation:notes><draw:page-thumbnail/>"
+        f"{_frame('notes', '<text:p>Note un</text:p><text:p>-----</text:p>')}</presentation:notes>"
+    )
+    second = _frame("title", "<text:p>Deux</text:p>") + _frame("outline", "<text:p>texte deux</text:p>")
+    processed = await _parse(
+        odf_package("odp", f"<draw:page>{first}{notes}</draw:page><draw:page>{second}</draw:page>")
+    )
+
+    assert processed.page_count == 2
+    assert [(block.page_number, block.text) for block in processed.text_blocks] == [
+        (1, "# Un\n\navant\n\n-----\n\naprès\n\n### Notes:\nNote un\n-----"),
+        (2, "# Deux\n\ntexte deux"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_last_slide_repeating_master_page_text_keeps_it(odf_package):
     master = (
         f'<style:master-page style:name="Default">{_frame("outline", "<text:p>ACME Corp</text:p>")}</style:master-page>'
