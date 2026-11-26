@@ -461,6 +461,31 @@ async def test_an_entry_neither_stored_nor_deflated_is_left_to_xberg(odf_package
 
 
 @pytest.mark.asyncio
+async def test_an_entry_declaring_less_than_it_holds_is_not_inflated_whole(odf_package, damaged_zip_entry):
+    """ZipFile.read inflates a whole entry before cutting it to the size its header
+    declares: a 408 KB file whose picture claimed 1 KiB took 846 MiB to patch."""
+    import tracemalloc
+
+    import core.indexing.parsers.odf as odf
+
+    buf = io.BytesIO(odf_package("odt", "<text:p>Corps</text:p>"))
+    with zipfile.ZipFile(buf, "a") as zf:
+        zf.writestr("Pictures/a.bin", b"\x00" * (32 * 1024 * 1024), compress_type=zipfile.ZIP_DEFLATED)
+    raw = damaged_zip_entry(buf.getvalue(), "Pictures/a.bin", "understated")
+
+    tracemalloc.start()
+    try:
+        odf._patched(raw)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 4 * 1024 * 1024
+    processed = await _parse(raw)
+    assert processed.text_blocks[0].text == "Corps"
+
+
+@pytest.mark.asyncio
 async def test_a_libreoffice_document():
     """LibreOffice 26.8, exported from a python-docx document."""
     raw = (Path(__file__).resolve().parents[4] / "resources" / "test_file.odt").read_bytes()

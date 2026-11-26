@@ -238,7 +238,7 @@ def _chart_table(package: zipfile.ZipFile, name: str) -> tuple[Any, str, int] | 
     try:
         if package.getinfo(name).file_size > _MAX_XML_BYTES:
             return None
-        root = etree.fromstring(package.read(name), parser=_xml_parser())
+        root = etree.fromstring(_read(package, package.getinfo(name)), parser=_xml_parser())
     except (KeyError, zipfile.BadZipFile, zlib.error, RuntimeError, NotImplementedError, etree.XMLSyntaxError):
         return None
     chart = next(root.iter(f"{_CHART}chart"), None)
@@ -250,6 +250,15 @@ def _chart_table(package: zipfile.ZipFile, name: str) -> tuple[Any, str, int] | 
     title = chart.find(f"{_CHART}title")
     text = " ".join("".join(title.itertext()).split()) if title is not None else ""
     return table, text, sum(1 for _ in table.iter())
+
+
+def _read(package: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    """The entry *info*, decompressed no further than the size its header declares.
+
+    ``ZipFile.read`` inflates the whole entry before cutting it to that size, so an
+    entry declaring less than it holds would cost what it holds."""
+    with package.open(info) as entry:
+        return entry.read(info.file_size)
 
 
 def _xml_parser():
@@ -274,14 +283,14 @@ def _patched(raw: bytes) -> bytes:
                 return raw
             if package.getinfo("content.xml").file_size > _MAX_XML_BYTES:
                 return raw
-            root = etree.fromstring(package.read("content.xml"), parser=_xml_parser())
+            root = etree.fromstring(_read(package, package.getinfo("content.xml")), parser=_xml_parser())
             _patch_content(root, package)
             content = etree.tostring(root, xml_declaration=True, encoding="UTF-8")
             out = BytesIO()
             with zipfile.ZipFile(out, "w") as target:
                 for info in infos:
                     try:
-                        data = content if info.filename == "content.xml" else package.read(info.filename)
+                        data = content if info.filename == "content.xml" else _read(package, info)
                     except (zipfile.BadZipFile, zlib.error, RuntimeError, NotImplementedError):
                         continue
                     target.writestr(info.filename, data, compress_type=info.compress_type)

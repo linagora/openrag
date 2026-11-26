@@ -78,14 +78,21 @@ def odf_package() -> OdfFactory:
 
 
 def damage_zip_entry(raw: bytes, name: str, how: str) -> bytes:
-    """*raw* with entry *name* flagged encrypted (``how="encrypted"``) or its
+    """*raw* with entry *name* flagged encrypted (``how="encrypted"``), its
     stored bytes overwritten (``how="corrupt"``), which breaks a deflate stream
-    and fails the CRC of a stored entry."""
+    and fails the CRC of a stored entry, or its headers declaring 1 KiB
+    whatever it holds (``how="understated"``)."""
     data = bytearray(raw)
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         info = archive.getinfo(name)
     local = info.header_offset
-    if how == "encrypted":
+    if how == "understated":
+        struct.pack_into("<I", data, local + 22, 1024)
+        central = data.index(b"PK\x01\x02")
+        while data[central + 46 : central + 46 + len(name)] != name.encode():
+            central = data.index(b"PK\x01\x02", central + 1)
+        struct.pack_into("<I", data, central + 24, 1024)
+    elif how == "encrypted":
         data[local + 6] |= 0x1
         central = data.index(b"PK\x01\x02")
         while data[central + 46 : central + 46 + len(name)] != name.encode():
