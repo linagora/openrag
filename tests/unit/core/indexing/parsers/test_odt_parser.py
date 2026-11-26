@@ -177,6 +177,35 @@ async def test_pictures_become_refs_with_image_blocks(odf_package, encoded_image
 
 
 @pytest.mark.asyncio
+async def test_a_picture_titled_with_brackets_becomes_a_ref(odf_package, encoded_image):
+    """xberg writes the title as alt text: ``![Figure [1]](image_0.png)``."""
+    title = '<svg:title xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0">Figure [1]</svg:title>'
+    processed = await _parse(
+        odf_package(
+            "odt",
+            f'<text:p><draw:frame><draw:image xlink:href="Pictures/a.png"/>{title}</draw:frame></text:p>',
+            pictures={"Pictures/a.png": encoded_image("PNG")},
+        )
+    )
+
+    assert processed.text_blocks[0].text.startswith("![](odt-image-0)")
+    assert "image_0" not in processed.text_blocks[0].text
+    assert len(processed.images) == 1
+
+
+@pytest.mark.asyncio
+async def test_text_full_of_picture_openings_is_read_in_linear_time(odf_package):
+    """Each "![" was matched up to the end of the text: 160,000 took 26 s."""
+    count = 160_000
+    start = time.perf_counter()
+    md = await _markdown(odf_package, f"<text:p>{'![' * count}</text:p>")
+
+    assert time.perf_counter() - start < 10
+    # xberg escapes each one as \![, which still holds a "![" to match.
+    assert md.replace("\\", "") == "![" * count
+
+
+@pytest.mark.asyncio
 async def test_a_picture_falls_back_to_its_first_decodable_alternative(odf_package, encoded_image):
     processed = await _parse(
         odf_package(

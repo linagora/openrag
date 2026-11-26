@@ -41,7 +41,9 @@ _EXTRACTION_TIMEOUT_SECONDS = 300
 # entry, such as an embedded OLE object. Its limits on content size still apply.
 _MAX_COMPRESSION_RATIO = 100_000
 
-_IMAGE_REF = re.compile(r"!\[[^\]]*\]\(image_(\d+)\.\w+\)")
+# xberg writes a picture's title as its alt text, which may hold brackets in pairs.
+# A bracket of its own ends it, which keeps matching linear on text full of "![".
+_IMAGE_REF = re.compile(r"!\[(?:[^\[\]]|\[[^\[\]]*\])*\]\(image_(\d+)\.\w+\)")
 _SLIDE_SEPARATOR = re.compile(r"^-----$", re.MULTILINE)
 _MAX_XML_BYTES = 64 * 1024 * 1024
 _MAX_PACKAGE_BYTES = 500 * 1024 * 1024
