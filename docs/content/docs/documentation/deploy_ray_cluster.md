@@ -11,6 +11,11 @@ This guide explains how to deploy **OpenRAG** across multiple machines using **R
 ## ✅ 1. Set Environment Variables
 
 Ensure your `.env` file includes the standard app variables **plus Ray-specific ones** listed below:
+The Ray container gets these values directly from Docker's `--env-file /ray_mount/.env`
+in `infra/cluster.yaml`; keep that file available at the same path on the Docker hosts.
+No `SHARED_ENV` variable is needed. When starting the Compose app, use that same file
+for Compose interpolation and the API/preflight env file so database and storage
+credentials match across services.
 
 ```bash 
 // .env
@@ -25,7 +30,6 @@ MARKER_MAX_PROCESSES=5 # Number of subprocesses <-> Number of concurrent pdfs pe
 MARKER_POOL_SIZE=1 # Number of workers (typically 1 worker per cluster node)
 MARKER_NUM_GPUS=0.6
 
-SHARED_ENV=/ray_mount/.env
 RAY_DASHBOARD_PORT=8265
 RAY_ADDRESS=ray://X.X.X.X:10001
 HEAD_NODE_IP=X.X.X.X
@@ -126,7 +130,7 @@ uv run ray up -y cluster.yaml
 Use the Docker Compose setup:
 
 ```bash
-docker compose up -d
+OPENRAG_ENV_FILE=/ray_mount/.env docker compose --env-file /ray_mount/.env up -d
 ```
 
 Once running, **OpenRAG will auto-connect** to the Ray cluster using `RAY_ADDRESS` from `.env`.

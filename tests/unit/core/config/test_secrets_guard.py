@@ -14,6 +14,7 @@ fails when they disagree.
 
 from __future__ import annotations
 
+import base64
 import re
 from pathlib import Path
 
@@ -33,7 +34,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 _CHART_SECRETS_TEMPLATE = _REPO_ROOT / "infra/charts/openrag-stack/templates/secrets-env.yaml"
 
 #: Long enough to clear the floor, and not a value this project publishes.
-_GENERATED = "b8f3d1a97c4e2065b8f3d1a97c4e2065"
+_GENERATED = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii")
 
 
 # ---------------------------------------------------------------------------
@@ -50,8 +51,8 @@ def test_absent_values_pass():
     """An unset credential is not a policy failure.
 
     ``AUTH_TOKEN`` unset is a supported development mode, and an unconfigured
-    optional integration is normal. Requiredness is enforced where an install
-    happens — the chart and compose — not here.
+    optional integration is normal. OIDC credentials become required only
+    when ``AUTH_MODE=oidc``.
     """
     assert find_insecure_secrets(env={}) == []
 
@@ -79,9 +80,100 @@ def test_blank_values_pass(blank):
     ],
 )
 def test_published_defaults_are_refused(env_var, value):
-    problems = find_insecure_secrets(env={env_var: value})
+    problems = find_insecure_secrets(env={env_var: value}, service_scope=None)
     assert len(problems) == 1
     assert env_var in problems[0]
+
+
+def test_runtime_checks_only_the_selected_service_scope():
+    """Grafana's password is in the shared env file, but the API does not use it."""
+    env = {"GRAFANA_ADMIN_PASSWORD": "admin"}
+
+    assert find_insecure_secrets(env=env) == []
+    problems = find_insecure_secrets(env=env, service_scope="grafana")
+    assert len(problems) == 1
+    assert "GRAFANA_ADMIN_PASSWORD" in problems[0]
+
+
+def test_runtime_checks_hugging_face_token_used_by_local_audio_transcription():
+    problems = find_insecure_secrets(env={"HF_TOKEN": "hf_xxxx"})
+
+    assert len(problems) == 1
+    assert "HF_TOKEN" in problems[0]
+
+
+def test_oidc_secrets_are_required_only_when_oidc_auth_is_enabled():
+    assert find_insecure_secrets(env={"AUTH_MODE": "token"}) == []
+
+    problems = find_insecure_secrets(env={"AUTH_MODE": " OIDC "})
+
+    assert len(problems) == 2
+    assert any("OIDC_CLIENT_SECRET" in problem for problem in problems)
+    assert any("OIDC_TOKEN_ENCRYPTION_KEY" in problem for problem in problems)
+
+
+@pytest.mark.parametrize("value", ["abcd", "x" * 44, "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA"])
+def test_oidc_encryption_key_must_be_a_valid_fernet_key(value):
+    problems = find_insecure_secrets(
+        env={
+            "AUTH_MODE": "oidc",
+            "OIDC_CLIENT_SECRET": "generated-client-secret",
+            "OIDC_TOKEN_ENCRYPTION_KEY": value,
+        }
+    )
+
+    assert len(problems) == 1
+    assert "OIDC_TOKEN_ENCRYPTION_KEY" in problems[0]
+    assert value not in problems[0]
+
+
+def test_valid_fernet_key_passes_secret_policy():
+    key = base64.urlsafe_b64encode(b"a" * 32).decode("ascii")
+
+    assert (
+        find_insecure_secrets(
+            env={
+                "AUTH_MODE": "oidc",
+                "OIDC_CLIENT_SECRET": "generated-client-secret",
+                "OIDC_TOKEN_ENCRYPTION_KEY": key,
+            }
+        )
+        == []
+    )
+
+
+def test_standard_base64_fernet_key_remains_compatible():
+    import base64
+
+    from core.secret_policy import _is_valid_fernet_key
+    from cryptography.fernet import Fernet
+
+    key = base64.b64encode(bytes([255]) * 32)
+    Fernet(key)
+    assert _is_valid_fernet_key(key.decode("ascii"))
+
+
+def test_valid_fernet_key_with_ascii_whitespace_remains_compatible():
+    from cryptography.fernet import Fernet
+
+    key = base64.urlsafe_b64encode(b"a" * 32).decode("ascii")
+    formatted = f"{key[:10]}\n\t{key[10:20]} {key[20:]}"
+    Fernet(formatted.encode("ascii"))
+
+    assert (
+        find_insecure_secrets(
+            env={
+                "AUTH_MODE": "oidc",
+                "OIDC_CLIENT_SECRET": "generated-client-secret",
+                "OIDC_TOKEN_ENCRYPTION_KEY": formatted,
+            }
+        )
+        == []
+    )
+
+
+def test_unused_oidc_encryption_key_is_not_validated_in_token_mode():
+    assert find_insecure_secrets(env={"AUTH_MODE": "token", "OIDC_TOKEN_ENCRYPTION_KEY": "abcd"}) == []
 
 
 def test_denylist_is_case_insensitive_and_trimmed():
@@ -104,7 +196,7 @@ def test_no_credential_sentinel_is_allowed_for_upstream_credentials():
     """``EMPTY`` says "this endpoint needs none" — the shipped value for the
     bundled vLLM, embedder and reranker, not a weak credential."""
     assert "empty" not in KNOWN_DEFAULT_SECRETS
-    env = {spec.env_var: "EMPTY" for spec in SECRET_SPECS if not spec.enforce_min_length}
+    env = {spec.env_var: "EMPTY" for spec in SECRET_SPECS if not spec.enforce_min_length and spec.value_format is None}
     assert find_insecure_secrets(env=env) == []
 
 
@@ -113,7 +205,7 @@ def test_no_credential_sentinel_is_refused_where_we_define_the_format(env_var):
     """``EMPTY`` is a five-character credential. It is meaningful only for an
     endpoint that accepts no credential; as an API bearer token or an
     object-store key it is just a weak one, and the length floor says so."""
-    assert find_insecure_secrets(env={env_var: "EMPTY"})
+    assert find_insecure_secrets(env={env_var: "EMPTY"}, service_scope=None)
 
 
 def test_every_reported_problem_names_one_variable():

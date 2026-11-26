@@ -498,6 +498,11 @@ def test_embedder_factory_backfills_max_model_len_from_settings() -> None:
                 model_name="embed-model",
                 extra={"implementation": "backfill-probe-embedder", "max_model_len": 4096},
             ),
+            "saved-null": ModelEndpointConfig(
+                endpoint="http://embed.example/v1",
+                model_name="embed-model",
+                extra={"implementation": "backfill-probe-embedder", "max_model_len": None},
+            ),
         }
         cfg = SimpleNamespace(
             models=SimpleNamespace(embedder=registry),
@@ -509,6 +514,7 @@ def test_embedder_factory_backfills_max_model_len_from_settings() -> None:
         assert backfilled.kwargs["max_model_len"] == 2047
         assert backfilled.kwargs["embed_concurrency"] == 4
         assert factory("explicit").kwargs["max_model_len"] == 4096  # per-endpoint extra wins
+        assert factory("saved-null").kwargs["max_model_len"] is None
     finally:
         embedder_registry._registry.pop("backfill-probe-embedder", None)
 

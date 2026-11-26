@@ -32,9 +32,9 @@ python3 scripts/gen_env.py --check   # verify nothing is left unset
 | `AUTH_TOKEN` | Yes, unless using SSO | Bootstraps the admin user and guards the API. Minimum 12 characters. Leaving it unset enables the no-auth development mode only when `ALLOW_NO_AUTH=true`. |
 | `POSTGRES_PASSWORD` | Yes | Minimum 12 characters. Compose fails closed without it; the chart reads it from `postgresql.auth.password`. |
 | `CHAINLIT_AUTH_SECRET` | When the chat interface is enabled | Signs the chat session cookie. Minimum 12 characters; generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Rotating it invalidates live sessions. In the Helm chart the chat interface is off by default (`env.WITH_CHAINLIT_UI`). |
-| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Compose only | Shared by the MinIO service and Milvus — both sides must match. `MINIO_SECRET_KEY` has a 12-character minimum. Kubernetes deployments use external object storage instead. |
+| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Compose only | Shared by the MinIO service and Milvus — both sides must match. `MINIO_SECRET_KEY` has a 12-character minimum. The Helm chart uses separate values for bundled MinIO (`minioCredentials.*`) or external S3 (`milvus.externalS3.*`). |
 | `GRAFANA_ADMIN_PASSWORD` | When bundled Grafana is enabled | Minimum 12 characters. |
-| `OIDC_CLIENT_SECRET`, `OIDC_TOKEN_ENCRYPTION_KEY` | SSO only | Formats are set by your identity provider and by Fernet respectively, so no length floor is applied. See the [OIDC guide](/openrag/documentation/oidc/). |
+| `OIDC_CLIENT_SECRET`, `OIDC_TOKEN_ENCRYPTION_KEY` | SSO only | The identity provider sets the client-secret format. `OIDC_TOKEN_ENCRYPTION_KEY` must be a valid Fernet key; it has no generic 12-character minimum. See the [OIDC guide](/openrag/documentation/oidc/). |
 | `HF_TOKEN` | When pulling gated model weights | |
 | `API_KEY`, `VLM_API_KEY`, `EMBEDDER_API_KEY`, `RERANKER_API_KEY`, `TRANSCRIBER_API_KEY`, `WEBSEARCH_API_TOKEN` | Per integration | Set by the provider, so no length floor. Use the literal `EMPTY` for a local OpenAI-compatible server that requires no credential — that is the documented sentinel and is always accepted. |
 
@@ -47,14 +47,14 @@ correctly behind a reverse proxy. See [FastAPI & Access Control](#fastapi--acces
 Any value this project publishes, matched case-insensitively — including the
 `__GENERATE_ME__` marker itself — and any value shorter than 12 characters for the
 variables marked with a minimum above. The canonical list lives in
-`openrag/core/config/secrets_guard.py`; the chart carries the same list and a unit test
+`openrag/core/secret_policy.py`; the chart carries the same list and a unit test
 fails the build if the two disagree.
 
 The startup error names the variables at fault and never prints their values.
 
 ## Overriding the check
 
-`ALLOW_INSECURE_SECRETS=true` downgrades the refusal to a warning logged on every boot.
+`ALLOW_INSECURE_SECRETS=true` downgrades secret-policy refusals to warnings during API startup and the Compose service preflights. Required credentials still need a value. The standalone `--check` continues to report policy violations as errors.
 It is an opt-out, never an opt-in: an unset value means the check is enforced. Use it for
 disposable development and CI stacks — the bundled API test stack sets it — and not in a
 deployment that holds real data.
@@ -272,7 +272,7 @@ Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured
 |----------|------|---------|--------------|
 | `EMBEDDER_MODEL_NAME` | `str` | Qwen/Qwen3-Embedding-0.6B | HuggingFace Embedding model served by VLLM .i.e `Qwen/Qwen3-Embedding-0.6B` or `jinaai/jina-embeddings-v3`. **Upgrading from 2.2.x under Docker Compose:** the default was `jinaai/jina-embeddings-v3`. If your `.env` does not set this variable, set it to the model your data was indexed with **before** upgrading, since changing the model needs a reindex. Without it the vLLM container serves Qwen while the saved endpoint still asks for jina: every embedding call fails and `/ready` reports `checks.embedder: unavailable`. `MODEL_ENDPOINT_SYNC_ON_BOOT=true` does not get around this: the sync refuses to move an endpoint that holds indexed files to another model and logs a warning. The legacy `EMBEDDING_MODEL`, when set, takes precedence over this variable. The Helm chart has defaulted to Qwen since before 2.2.x; there the embedder's model is `vllm.embedderModelName` together with the embedder entry of `vllm.servingEngineSpec.modelSpec`, which an override must restate in full.|
 | `EMBEDDER_BASE_URL` | `str` | http://vllm:8000/v1 | Base URL of the embedder (OpenAI-style).|
-| `EMBEDDER_PROVIDER` | `str` | vllm | Client for the embedder: `vllm` for any OpenAI-compatible server with a `GET /models` route, `ollama`, or `tei` for Hugging Face text-embeddings-inference, which has none (its readiness probe then checks `/health` rather than the model name). It sets the env-seeded endpoint's vendor (`extra.implementation`). With `MODEL_ENDPOINT_SYNC_ON_BOOT=true`, a set value also replaces the vendor chosen in the admin UI on every boot; unset, that choice is kept. |
+| `EMBEDDER_PROVIDER` | `str` | vllm | Client for the embedder: `vllm` for any OpenAI-compatible server with a `GET /models` route, `ollama`, or `tei` for Hugging Face text-embeddings-inference, which has none (its readiness probe then checks `/health` rather than the model name). It sets the env-seeded endpoint's vendor (`extra.implementation`). With `MODEL_ENDPOINT_SYNC_ON_BOOT=true`, a set value can update an env-managed vendor, subject to the indexed-data and swap checks. When unset, the saved vendor is kept. |
 | `EMBEDDER_API_KEY`  | `str` | EMPTY | API key for authenticating embedder calls.|
 | `EMBEDDER_EXTRA_ARGS` | `str` | (empty) | Extra `vllm serve` flags appended to the **bundled** vLLM embedder's command (`vllm-gpu` / `vllm-cpu` in `infra/compose/docker-compose.yaml`). They come after the built-in flags, so repeating one overrides it, e.g. `--gpu_memory_utilization 0.1`. |
 | `MAX_MODEL_LEN` | `int` | 2047 | Maximum context length (in tokens) supported by the embedding model. Chunks exceeding this limit are truncated (`truncate_prompt_tokens` = this value − 1). Keep it below the model's real context boundary. |
@@ -288,7 +288,7 @@ Model endpoints (embedder, LLM, VLM, reranker) are stored in a **database-backed
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `MODEL_ENDPOINT_SYNC_ON_BOOT` | `bool` | `false` | When `true`, the endpoint each type was auto-seeded with is re-synced from the environment on **every** boot — its `endpoint`, `model_name` and `api_key` are refreshed from the `*_BASE_URL` / `*_MODEL` / `*_API_KEY` values, and `batch_size` / `timeout` follow only when their own env var is set. This lets operators manage that endpoint via env vars + a pod rollout (e.g. a Helm values change), including **changing the model** and **rotating the API key**. Any endpoint created by hand is left untouched. Keep it `false` (the default) to preserve the "database wins after first boot" behavior. An embedder that already holds indexed files does not change model through the sync: the model change is refused and logged as a warning on every boot while env and the database disagree (`EMBEDDER_EDIT_AFFECTS_INDEXED_DATA`, as in the admin API), the row keeps its model, and its URL, API key and env-set tunables are still synced. A URL change alone syncs; if the new server serves another model, `/ready` reports `checks.embedder: unavailable`, except for a `tei` embedder, whose probe checks only `/health` and cannot see the model. To change the model of indexed data, use the admin API with `acknowledge_indexed_data=true`. While an embedder swap re-embeds a partition into that embedder, neither its URL nor its model is synced (`EMBEDDER_SWAP_IN_PROGRESS`, logged as a warning) and the rest of the row still is; restart once the swap ends to sync them. |
+| `MODEL_ENDPOINT_SYNC_ON_BOOT` | `bool` | `false` | Set to `true` to refresh env-managed endpoints on boot. Endpoints created by hand keep their saved settings. For an embedder with indexed files, OpenRAG holds changes to the URL, model or provider that could affect those files and logs a warning. A running swap also holds vector configuration changes. Safe tunables can still sync. OpenRAG rotates a supplied API key only for the same saved URL and provider when vector changes are held. To change an embedder that has indexed files, use the admin API with `acknowledge_indexed_data=true`. Restarting after a swap retries the sync. |
 | `READINESS_REQUIRE_EMBEDDER` | `bool` | `false` | When `true`, `/ready` returns 503 while the default embedder is `unavailable` or `unresolvable` (not on a probe timeout, nor when model discovery itself fails). Off by default because every replica shares the embedder: under Kubernetes its outage, or a restart while the model loads, takes every replica out of the Service at once, admin API and admin UI included. `checks.embedder` in the `/ready` body reports the embedder either way. Before enabling it, check that `/ready` reports `checks.embedder: ok` on your deployment: the probe looks the configured model name up in the endpoint's `GET /models` list, so an embedder that works can still read `unavailable`, for example behind a gateway that lists the model under another name, or on another endpoint that has no `/models` route. A text-embeddings-inference (TEI) embedder has no such route: set `EMBEDDER_PROVIDER=tei` (or the `tei` vendor in the admin UI) and its `/health` is probed instead, without checking the model name. On Ollama, recognized by its `GET /api/version`, an untagged name also matches its `:latest` tag, as Ollama resolves it. |
 
 :::note[How the synced endpoint is identified]
@@ -296,7 +296,7 @@ The seeder stamps the endpoint it creates as env-managed (a `managed_by` marker 
 
 The endpoint's **name never changes** — partitions (`chat_llm`) and presets store endpoint names by value and nothing cascades a rename, so a renamed row would leave those references dangling. After a model change the endpoint keeps its original name while serving the new model.
 
-Sync only writes what the environment actually owns: `endpoint`, `model_name` and `api_key` always, and `batch_size`/`timeout` only when their env var (`EMBEDDER_BATCH_SIZE`, `EMBEDDER_TIMEOUT`, `VLM_TIMEOUT`, `RERANKER_TIMEOUT`) is set, as is the embedder's vendor (`EMBEDDER_PROVIDER`) — otherwise a value you tuned in the admin UI would be replaced by the config default. The API key is likewise only overwritten when env supplies a real one, so an unset `*_API_KEY` (or its `EMPTY` placeholder) will not wipe a key you set by hand.
+Sync writes environment-owned endpoint and model values when the safety checks allow them. For embedders with indexed files or an active swap, it holds vector-affecting changes. Safe tunables can still sync. It updates `batch_size` and `timeout` only when their environment variables are set, and the embedder vendor only when `EMBEDDER_PROVIDER` is set. An unset API key or an `EMPTY` value leaves the saved key in place. If an embedder change is held, startup can rotate a supplied key only when the saved URL and provider still match.
 
 An endpoint created by hand is never modified or deleted. An endpoint seeded before the marker existed is adopted on the first sync **only if it still matches the environment exactly** — if you have edited it, it is left alone rather than silently taken over.
 :::
@@ -375,6 +375,11 @@ For an opt-in named-volume profile, copy the values from `infra/compose/.env.nam
 | `ETCD_VOLUME` | `etcd` | Milvus etcd named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
 | `MINIO_VOLUME` | `minio` | Milvus object storage named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
 | `MILVUS_VOLUME` | `milvus` | Milvus named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
+| `OPENRAG_ENV_FILE` | `.env` | Absolute Compose environment file path. The default resolves to `infra/compose/.env`. For a custom `gen_env.py -o` output, use the same absolute path for `OPENRAG_ENV_FILE` and Docker Compose's `--env-file`; Compose interpolation (including database and storage credentials) and service `env_file` must read the same file. |
+| `OPENRAG_PREFLIGHT_UID` | `1000` | User ID used by Compose secret preflights to read the private shared env file. `gen_env.py` writes the file owner's ID; set it manually only when needed. |
+| `OPENRAG_PREFLIGHT_GID` | `1000` | Group ID paired with `OPENRAG_PREFLIGHT_UID`; `gen_env.py` writes the file owner's group ID. |
+
+The generator writes the file owner's IDs into the private `.env` file (`0600`). When a credential fails policy, the preflight uses the file to look up `ALLOW_INSECURE_SECRETS` if Compose did not supply an explicit value. If the preflight cannot read the file and no explicit override was supplied, it rejects the credential.
 
 ## Chat Pipeline
 ### LLM & VLM Configuration
