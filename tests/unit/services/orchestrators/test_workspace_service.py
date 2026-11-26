@@ -530,3 +530,118 @@ async def test_resolve_scope_raises_when_id_matches_several_searchable_partition
     assert "p1, p2" in str(excinfo.value)
     # Never silently picks one.
     assert wrepo.listed == []
+
+
+# --------------------------------------------------------------------------- #
+# uploaded originals of orphaned files
+# --------------------------------------------------------------------------- #
+
+
+class RecordingCleaner:
+    """Stands for OriginalsCleaner: each file's source is ``/data/<file_id>``."""
+
+    def __init__(self, wrepo: FakeWorkspaceRepo | None = None):
+        self.wrepo = wrepo
+        self.deleted: list[list[str]] = []
+        self.finalized_before: list[list[tuple[str, str]]] = []
+
+    async def source_of(self, file_id: str, partition: str) -> str | None:
+        return f"/data/{file_id}"
+
+    async def delete_unreferenced(self, sources) -> int:
+        self.deleted.append(list(sources))
+        if self.wrepo is not None:
+            self.finalized_before.append(list(self.wrepo.finalized))
+        return len(self.deleted[-1])
+
+
+def _svc_with_cleaner(cleaner, **kwargs) -> WorkspaceService:
+    svc = _svc(**kwargs)
+    svc._originals_cleaner = cleaner
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_an_orphaned_files_original_goes_once_its_row_is_finalized():
+    wrepo = FakeWorkspaceRepo(orphaned=["fA"])
+    cleaner = RecordingCleaner(wrepo)
+    out = await _svc_with_cleaner(cleaner, wrepo=wrepo).delete_workspace("p", "w1")
+    assert out["orphaned_files_deleted"] == 1
+    assert cleaner.deleted == [["/data/fA"]]
+    assert cleaner.finalized_before == [[("fA", "p")]]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_finalization_keeps_the_original():
+    class FinalizeFailureRepo(FakeWorkspaceRepo):
+        async def finalize_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
+            raise RuntimeError("database unavailable")
+
+    cleaner = RecordingCleaner()
+    out = await _svc_with_cleaner(cleaner, wrepo=FinalizeFailureRepo(orphaned=["bad"])).delete_workspace("p", "w1")
+    assert out["orphaned_files_failed"] == ["bad"]
+    assert cleaner.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_keep_files_keeps_the_originals():
+    cleaner = RecordingCleaner()
+    await _svc_with_cleaner(cleaner, wrepo=FakeWorkspaceRepo(orphaned=["fA"])).delete_workspace(
+        "p", "w1", keep_files=True
+    )
+    assert cleaner.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_a_retried_cleanup_deletes_the_original():
+    wrepo = FakeWorkspaceRepo(orphaned=["bad"])
+    cleaner = RecordingCleaner(wrepo)
+    svc = _svc_with_cleaner(cleaner, wrepo=wrepo)
+    assert await svc.retry_failed_file_cleanup("bad", "p")
+    assert cleaner.deleted == [["/data/bad"]]
+
+
+class SessionTrackingRepo(FakeWorkspaceRepo):
+    """Counts the cleanup sessions open: each holds a pool connection."""
+
+    open_sessions = 0
+
+    @asynccontextmanager
+    async def cleanup_session(self, file_id, partition):
+        self.open_sessions += 1
+        try:
+            yield self
+        finally:
+            self.open_sessions -= 1
+
+
+class SessionCheckingCleaner(RecordingCleaner):
+    """Records how many cleanup sessions were open at each catalog read."""
+
+    def __init__(self, wrepo):
+        super().__init__(wrepo)
+        self.sessions_open_at: list[int] = []
+
+    async def source_of(self, file_id, partition):
+        self.sessions_open_at.append(self.wrepo.open_sessions)
+        return await super().source_of(file_id, partition)
+
+    async def delete_unreferenced(self, sources):
+        self.sessions_open_at.append(self.wrepo.open_sessions)
+        return await super().delete_unreferenced(sources)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry", [False, True])
+async def test_the_originals_catalog_reads_run_outside_the_cleanup_session(retry):
+    # Inside it, a read would wait for a second pool connection: with as
+    # many orphans as the pool holds, every session waits on another.
+    wrepo = SessionTrackingRepo(orphaned=["fA", "fB"])
+    cleaner = SessionCheckingCleaner(wrepo)
+    svc = _svc_with_cleaner(cleaner, wrepo=wrepo)
+    if retry:
+        assert await svc.retry_failed_file_cleanup("fA", "p")
+    else:
+        await svc.delete_workspace("p", "w1")
+    assert cleaner.sessions_open_at and set(cleaner.sessions_open_at) == {0}
+    assert sorted(sum(cleaner.deleted, [])) == (["/data/fA"] if retry else ["/data/fA", "/data/fB"])

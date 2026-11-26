@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, embedder_fingerprint
@@ -125,6 +125,16 @@ async def _refuse_if_embedder_changed(
             "kept. Index the file again.",
             code="EMBEDDER_CHANGED_DURING_INDEXING",
         )
+
+
+async def fetch_partition_sources(executor: asyncpg.Pool | asyncpg.Connection, partition: str) -> list[str]:
+    """The distinct ``source`` paths of a partition's files, read on ``executor``."""
+    rows = await executor.fetch(
+        "SELECT DISTINCT file_metadata ->> 'source' AS source FROM files "
+        "WHERE partition_name = $1 AND file_metadata ->> 'source' IS NOT NULL",
+        partition,
+    )
+    return [row["source"] for row in rows]
 
 
 class PgDocumentRepository(DocumentRepository):
@@ -458,6 +468,21 @@ class PgDocumentRepository(DocumentRepository):
             "partition": row["partition_name"],
             "indexed_at": indexed_at.isoformat() if indexed_at else None,
         }
+
+    async def referenced_sources(self, sources: Iterable[str]) -> set[str]:
+        wanted = sorted({source for source in sources if source})
+        if not wanted:
+            return set()
+        # Matches the ``ix_files_source`` expression, so the lookup is an index scan.
+        rows = await self.pool.fetch(
+            "SELECT DISTINCT file_metadata ->> 'source' AS source FROM files "
+            "WHERE file_metadata ->> 'source' = ANY($1::text[])",
+            wanted,
+        )
+        return {row["source"] for row in rows}
+
+    async def list_partition_sources(self, partition: str) -> list[str]:
+        return await fetch_partition_sources(self.pool, partition)
 
     async def get_indexation_config(self, file_id: str, partition: str) -> dict[str, Any] | None:
         config = await self.pool.fetchval(

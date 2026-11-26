@@ -100,3 +100,68 @@ Choices made in the indexing refactor (#1428, #1429, #1430, #1431 and the issues
   - #1429 lists the port as a change with no behavior change. Injecting it where `data_dir` is used means changing those callers, which is its next change (upload routes, worker and `/static` through the port);
   - a setting with one possible value is dead configuration; `UPLOAD_STORE=fs|s3` comes with the S3 adapter.
 - **Rejected:** a container field that is rebuilt on each read. One store per process keeps one set of per-key locks (D6).
+
+## D8. A replace reads the previous `source` before its commit, under the fence
+
+**#1428**, `indexer_actor.process_file` (#1472). Status: taken.
+
+- **Decision:** the worker reads the row's `source` with `get_file_metadata` before `update_file_in_partition`, and deletes it once the commit succeeds, before it releases the fence.
+- **Why:** `update_file_in_partition` returns a bool that five tests assert on. Under Postgres fences (the v2.4.0 default) replaces are serialized, so the read is exact.
+- **Rejected:** `UPDATE … RETURNING`, which changes that return type for no gain under Postgres fences.
+- **Impact:** under Ray fences nothing is deleted (D11), so the leak two concurrent replaces could cause there never happens. A delete checks references first, so it never takes an original a row references at that moment; a copy still running is the exception (D12).
+
+## D9. A failed job's upload is deleted where the job settles, unless a row references it
+
+**#1428**, `indexer_pool` (#1472). Status: taken.
+
+- **Decision:** at settle, with `SAVE_UPLOADED_FILES=true` and an unsuccessful task, the pool deletes the upload and its `.md` unless a catalog row references it.
+- **Why:**
+  - pre-flight failures and a lost worker lease never enter `process_file`'s failure path;
+  - a job that fails after its catalog commit leaves an indexed file, whose original must stay;
+  - no row references a failed upload, so deleting it after the fence is released is safe.
+- **Rejected:** deleting it in `process_file`'s failure path, which misses those failures.
+- **Impact:** a task cancelled while still queued never reaches the pool, so its upload stays until the orphan script removes it.
+
+## D10. Originals are deleted only under `data_dir`, after a reference check
+
+**#1428**, `services/storage/originals.py` (#1472). Status: taken.
+
+- **Decision:** `OriginalsCleaner` deletes a path, with its `.md`, only if it resolves under `data_dir` (symlinks followed) and `referenced_sources` no longer names it. The `.md` is checked too, and a `.md` stays while its upload is referenced. If the check fails, the whole batch stays.
+- **Why:** a copy keeps its source's `source`, possibly in another partition. The resolve keeps a bad path from reaching outside the data directory.
+- **Impact:** since #1474 (closing #1003), an MCP `index_url` download is stored in `data_dir` like an upload, and deleted like one. A URL indexed before that kept its download in the node's temp directory, which is left alone.
+
+## D11. Originals are deleted only with `FILE_FENCES=postgres`
+
+**#1428**, `originals_cleaner_for`, used by the API container and each indexer worker (#1472). Status: taken.
+
+- **Decision:** a process builds the cleaner only with `FILE_FENCES=postgres`, the v2.4.0 default. Otherwise there is none: every delete, replace and failed job keeps the upload it saved, as today. With `SAVE_UPLOADED_FILES=false`, nothing is saved: a job's upload is deleted once it settles, failed or not, whatever the fences, as before this change.
+- **Why:** #1428 is a bug users have today, which could ship in a 2.3.x release, but the refactor keeps its behavior changes off until v2.4.0, and 2.3.x is cut from `develop`. A deleted file can't be brought back, so this lands with the release that announces it. Tying it to the fences adds no setting.
+- **Rejected:**
+  - shipping it in 2.3.x as a plain fix: `SAVE_UPLOADED_FILES` defaults to `true`, so every deployment would start deleting at once;
+  - a setting of its own, dead once v2.4.0 makes it the default.
+- **Impact:** 2.3.x keeps #1428. An operator who wants the fix sooner sets `FILE_FENCES=postgres`, and gets its 409s with it.
+
+## D12. A copy running while its source is deleted can lose its original
+
+**#1428**, `WorkerDispatcher.copy_file` (#1472). Status: taken.
+
+- **Decision:** the copy keeps running without the source file's fence, and the gap is accepted.
+- **Why:**
+  - the copy reads the source row, then writes its own row with the same `source` seconds later, or minutes when it re-embeds. A delete of the source in between finds no row left and deletes the original;
+  - the copy stays searchable: only its download and a re-index fail;
+  - a move (a copy, then a delete) is safe, since the route answers 201 only once the copy's row is written.
+- **Rejected:** holding the source's fence for the whole copy. A delete or replace of the source would then wait on the copy, a change to #1459's code for a rare case.
+- **Impact:** the orphan script can't bring that file back. If it happens in practice, the fence above is the fix.
+
+## D13. The orphan script considers only uploads, and deletes nothing where the catalog knows none
+
+**#1428**, `scripts/find_orphan_originals.py`, `services/storage/orphan_originals.py` (#1472). Status: taken.
+
+- **Decision:**
+  - it lists only files directly under `data_dir` named like an upload (`make_unique_filename`), with their `.md` copies, older than `--min-age-hours` (24 by default, at least 1);
+  - `--delete` fails, deleting nothing, when no upload there is referenced, or while an indexing job created before the cutoff hasn't settled: a job's record doesn't name its file, and its upload has no row yet;
+  - it deletes exactly the files it lists: a `.md` younger than the cutoff stays, even when its upload goes;
+  - it isn't gated by `FILE_FENCES` (D11): an operator runs it on purpose, and listing is the default.
+- **Why:** `data_dir` holds more than uploads, and the catalog stores paths as the API sees them. Run on the host, or against another database, every upload would look unreferenced.
+- **Rejected:** a `--force` past that refusal. A catalog that really references no upload is rare, and the list shows what to remove by hand.
+

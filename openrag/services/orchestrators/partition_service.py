@@ -9,6 +9,8 @@ not depend on Ray or pymilvus.
 partition's vectors from the store *and* the relational rows. Vector cleanup
 runs first through :class:`VectorStore.delete_by_filter`, so a failed vector
 delete does not leave catalog rows removed while chunks remain queryable.
+Once the rows are gone, the uploaded originals no other partition references
+are deleted in the background.
 
 Chunk reads return plain dicts (never LangChain ``Document`` objects —
 8H forbids LangChain in orchestrators); the thin router builds the
@@ -63,6 +65,7 @@ if TYPE_CHECKING:
     from core.ports.partition_repo import PartitionRepository
     from core.ports.user_repo import UserRepository
     from core.vector_stores import VectorStore
+    from services.storage.originals import OriginalsCleaner
 
 logger = get_logger()
 
@@ -108,6 +111,7 @@ class PartitionService:
         task_cancel_timeout: float = 60.0,
         prompt_repo: Any = None,
         topic_tag_repo: Any = None,
+        originals_cleaner: OriginalsCleaner | None = None,
     ) -> None:
         """Wire the repositories and optional collaborators used by every method."""
         self._partition_repo = partition_repo
@@ -123,6 +127,9 @@ class PartitionService:
         self._task_state_manager_factory = task_state_manager_factory
         self._task_cancel_timeout = task_cancel_timeout
         self._partition_locks: dict[str, asyncio.Lock] = {}
+        self._originals_cleaner = originals_cleaner
+        # Held so a running cleanup isn't garbage-collected before it ends.
+        self._original_cleanups: set[asyncio.Task[int]] = set()
 
     # ------------------------------------------------------------------
     # Existence guards (mirror the legacy _check_* helpers, core exceptions)
@@ -529,9 +536,19 @@ class PartitionService:
                 "No vector collection to clean up before deleting partition",
                 partition=partition,
             )
+        cleaner = self._originals_cleaner
+        sources: list[str] = []
+        if cleaner is not None:
+            # On the operation lock's connection when there is one: another
+            # from the pool, while that one is held, could wait for ever.
+            sources = await cleaner.sources_in_partition(partition, getattr(operation, "list_partition_sources", None))
         deleted = await self._delete_partition_for_operation(partition, operation=operation)
         if deleted and self._config is not None:
             self._config.partitions.pop(partition, None)
+        if cleaner is not None and sources:
+            # Right after the rows: a failure of the leftover-vector cleanup
+            # below fails the delete, and a retry finds the partition gone.
+            self._delete_originals_in_background(cleaner, partition, sources)
         if collection_exists:
             try:
                 deleted = await self._vector_store.delete_by_filter({"partition": partition})
@@ -549,6 +566,22 @@ class PartitionService:
                     count=deleted,
                 )
         logger.info("Partition successfully deleted.", partition=partition)
+
+    def _delete_originals_in_background(self, cleaner: OriginalsCleaner, partition: str, sources: list[str]) -> None:
+        """Delete a deleted partition's originals without holding the request.
+
+        A partition can hold thousands of files. A cleanup the process stops
+        before it ends leaves files for the orphan script.
+        """
+        task = asyncio.create_task(
+            cleaner.delete_unreferenced(sources),
+            name=f"delete-originals:{partition}",
+        )
+        self._original_cleanups.add(task)
+        task.add_done_callback(self._original_cleanups.discard)
+        logger.bind(partition=partition, count=len(sources)).info(
+            "Deleting a deleted partition's uploaded originals in the background."
+        )
 
     async def update_partition(self, partition: str, **fields: object) -> dict | None:
         """Update a partition's config columns and re-resolve the cache.

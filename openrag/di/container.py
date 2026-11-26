@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from services.orchestrators.retrieval_snapshot_service import RetrievalSnapshotService
     from services.orchestrators.user_service import UserService
     from services.orchestrators.workspace_service import WorkspaceService
+    from services.storage.originals import OriginalsCleaner
 
 
 logger = get_logger()
@@ -135,6 +136,7 @@ class ServiceContainer:
         self._preset_service: PresetService | None = None
         self._prompt_service: PromptService | None = None
         self._workspace_service: WorkspaceService | None = None
+        self._originals_cleaner: OriginalsCleaner | None = None
         self._retrieval_service: RetrievalService | None = None
         self._retrieval_snapshot_service: RetrievalSnapshotService | None = None
         self._query_service: QueryService | None = None
@@ -490,6 +492,7 @@ class ServiceContainer:
                 task_state_manager_factory=get_task_state_manager,
                 prompt_repo=self.prompt_repo,
                 topic_tag_repo=self.topic_tag_repo,
+                originals_cleaner=self.originals_cleaner,
             )
         return self._partition_service
 
@@ -566,6 +569,19 @@ class ServiceContainer:
         return self._prompt_service
 
     @property
+    def originals_cleaner(self) -> OriginalsCleaner | None:
+        """Deletes uploaded originals under ``paths.data_dir`` once no row references them.
+
+        ``None`` unless ``FILE_FENCES=postgres`` (``originals_cleaner_for``).
+        """
+        settings = self._require_settings()
+        if self._originals_cleaner is None:
+            from services.storage.originals import originals_cleaner_for
+
+            self._originals_cleaner = originals_cleaner_for(settings, self.document_repo)
+        return self._originals_cleaner
+
+    @property
     def workspace_service(self) -> WorkspaceService:
         """WorkspaceService — lazily built, cached for the container's lifetime."""
         if self._workspace_service is None:
@@ -577,6 +593,7 @@ class ServiceContainer:
                 document_repo=self.document_repo,
                 vector_store=self.vector_store,
                 collection=settings.vectordb.collection_name,
+                originals_cleaner=self.originals_cleaner,
             )
         return self._workspace_service
 
@@ -742,6 +759,7 @@ class ServiceContainer:
                     file_fence_repo=(
                         self.catalog_store.file_fence_repo if settings.loader.file_fences == "postgres" else None
                     ),
+                    originals_cleaner=self.originals_cleaner,
                 ),
                 config=settings,
                 partition_service=self.partition_service,

@@ -19,6 +19,7 @@ from core.models.catalog import (
 from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import ConfigError, NotFoundError
+from services.storage.originals import originals_cleaner_for
 from services.workers.failure_reporting import log_interrupted_failure, log_task_failure, submit_task_failure
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.indexing_callback import send_indexing_callback
@@ -230,6 +231,7 @@ class IndexerWorkerActor:
             data_dir=cfg.paths.data_dir,
         )
         self._catalog_store = PostgresStore(_catalog_rdb_config(cfg), run_migrations=False)
+        self._originals_cleaner = originals_cleaner_for(cfg, self._catalog_store.document_repo)
         self._catalog_initialized = False
         self._catalog_init_lock = asyncio.Lock()
         # Model-endpoint registry hydration. Unlike the API process, the indexer
@@ -277,6 +279,7 @@ class IndexerWorkerActor:
             vector_store=self._vector_store,
             collection=cfg.vectordb.collection_name,
             stage_writer_max_active_tasks=cfg.ray.indexer.max_tasks_per_worker,
+            originals_cleaner=self._originals_cleaner,
         )
         # When False (e.g. Twake, which keeps its own copy), the raw upload is
         # purged from ``paths.data_dir`` once indexing settles. Enforced at this
@@ -543,6 +546,7 @@ class IndexerWorkerActor:
         # task state this task left the actor's queue. Until the finally below,
         # a renewal answered False cancels this task.
         working = True
+        succeeded = False
         fence_file_id = str(metadata.get("file_id") or "")
         # The workspace attachment below is the file's last write.
         attachment_follows = bool(workspace_ids) and not replace and bool(fence_file_id)
@@ -720,6 +724,7 @@ class IndexerWorkerActor:
                         "Workspace attachment failed after indexing.", error_reason=failure_reason_from_exception(exc)
                     )
                     raise
+            succeeded = True
             return result
         except asyncio.CancelledError:
             # The lease stopped this worker because the task state stopped
@@ -768,6 +773,10 @@ class IndexerWorkerActor:
             try:
                 if not self._save_uploaded_files:
                     await delete_uploaded_file(path, self._logger)
+                elif not succeeded and self._originals_cleaner is not None:
+                    # A failed job's upload, unless the job wrote its row
+                    # before it failed and the file is indexed after all.
+                    await self._originals_cleaner.delete_unreferenced([path])
             finally:
                 worker_lease.cancel()
                 await asyncio.gather(

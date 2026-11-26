@@ -33,6 +33,7 @@ from core.utils.exceptions import (
 from core.utils.logging import get_logger
 from core.vector_stores.vector_field import is_vector_field_key
 from ray.exceptions import TaskCancelledError
+from services.storage.originals import OriginalsCleaner
 from services.workers.embedder_provenance import embedder_provenance
 from services.workers.failure_reporting import submit_task_failure
 from services.workers.ray_utils import (
@@ -78,6 +79,7 @@ class WorkerDispatcher(IndexingDispatcher):
         collection: str,
         job_repo: Any = None,
         file_fence_repo: Any = None,
+        originals_cleaner: OriginalsCleaner | None = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         self._pool = pool
@@ -92,6 +94,8 @@ class WorkerDispatcher(IndexingDispatcher):
         self._file_fences = file_fence_repo
         self._collection = collection
         self._timeout = timeout
+        # Deletes a deleted file's uploaded original; ``None`` keeps it.
+        self._originals_cleaner = originals_cleaner
 
     async def _call(self, future: Any, task_description: str) -> Any:
         from services.workers.ray_utils import call_ray_actor_with_timeout
@@ -820,11 +824,17 @@ class WorkerDispatcher(IndexingDispatcher):
         if cancelled:
             logger.info("Cancelled active indexing tasks before deleting file", file_id=file_id, partition=partition)
 
+        cleaner = self._originals_cleaner
+        source = await cleaner.source_of(file_id, partition) if cleaner is not None else None
         collection_exists = await self._vector_store.collection_exists(self._collection)
         if collection_exists:
             await self._vector_store.delete_by_filter({"partition": partition, "file_id": file_id})
         await self._workspace_repo.remove_file_from_all_workspaces(file_id, partition)
         await self._document_repo.remove_file_from_partition(file_id=file_id, partition=partition)
+        if cleaner is not None and source is not None:
+            # Right after the row: a failure of the leftover-vector cleanup below
+            # fails the delete, and its retry no longer finds the row's source.
+            await cleaner.delete_unreferenced([source])
         if collection_exists:
             try:
                 await self._vector_store.delete_by_filter({"partition": partition, "file_id": file_id})
@@ -1201,6 +1211,7 @@ def from_ray_namespace(
     collection: str,
     job_repo: Any = None,
     file_fence_repo: Any = None,
+    originals_cleaner: OriginalsCleaner | None = None,
 ) -> WorkerDispatcher:
     import ray
     from services.workers.indexer_pool import build_indexer_pool
@@ -1215,6 +1226,7 @@ def from_ray_namespace(
         collection=collection,
         job_repo=job_repo,
         file_fence_repo=file_fence_repo,
+        originals_cleaner=originals_cleaner,
         timeout=timeout,
     )
 

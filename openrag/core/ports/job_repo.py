@@ -52,6 +52,10 @@ class JobRepository(ABC):
     async def get_job(self, job_id: str) -> IndexationJob | None: ...
 
     @abstractmethod
+    async def count_unsettled_jobs(self, *, created_before: datetime) -> int:
+        """How many jobs created before ``created_before`` are neither completed, failed nor cancelled."""
+
+    @abstractmethod
     async def get_jobs(self, job_ids: list[str]) -> list[IndexationJob]:
         """Return durable rows for the supplied task IDs."""
 
