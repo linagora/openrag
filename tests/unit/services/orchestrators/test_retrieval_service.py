@@ -1291,8 +1291,8 @@ class _RefreshingPromptService:
 @pytest.mark.parametrize("path", ["groups", "plan"])
 async def test_a_group_is_built_from_the_settings_it_was_grouped_by(path):
     """Building the hyde group's pipeline waits on its prompt, and a config
-    refresh can land meanwhile. The next group is still built from what it was
-    grouped by, not from a fresh read of its first partition's config."""
+    refresh can land meanwhile. The next group and its public configuration
+    still use the settings it was grouped by."""
     prompt_service = _RefreshingPromptService("HYDE {question}")
     svc, searchers = _grouping_svc(
         [
@@ -1316,10 +1316,19 @@ async def test_a_group_is_built_from_the_settings_it_was_grouped_by(path):
     else:
         plan = await svc.resolve_retrieval_plan(["h1", "p1", "p2"], contextualizer_prompt=_CONTEXTUALIZER_PROMPT)
         groups = [(list(group.partitions), group.pipeline) for group in plan.groups]
+        public = {partition["name"]: partition for partition in plan.public_configuration["partitions"]}
+        assert public["p1"]["embedder"]["name"] == "embed-a"
+        assert public["p1"]["retrieval"]["rrf_k"] == RetrievalPipelineConfig().rrf_k
 
     assert [names for names, _ in groups] == [["h1"], ["p1", "p2"]]
     assert groups[1][1].rrf_k == RetrievalPipelineConfig().rrf_k
     assert "embed-b" not in searchers
+
+    if path == "plan":
+        next_plan = await svc.resolve_retrieval_plan(["p1"], contextualizer_prompt=_CONTEXTUALIZER_PROMPT)
+        (public_partition,) = next_plan.public_configuration["partitions"]
+        assert public_partition["embedder"]["name"] == "embed-b"
+        assert public_partition["retrieval"]["rrf_k"] == 7
 
 
 # --- #708: the "all" fan-out must be concurrency-bounded (production safety) ---
