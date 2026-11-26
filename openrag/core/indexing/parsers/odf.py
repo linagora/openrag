@@ -41,8 +41,9 @@ _EXTRACTION_TIMEOUT_SECONDS = 300
 # entry, such as an embedded OLE object. Its limits on content size still apply.
 _MAX_COMPRESSION_RATIO = 100_000
 
-# xberg writes a picture's title as its alt text, which may hold brackets in pairs.
-# A bracket of its own ends it, which keeps matching linear on text full of "![".
+# xberg writes a picture's title as its alt text. Patching takes titles out, but a
+# package left unpatched keeps them, and they may hold brackets in pairs. A bracket
+# of its own ends the alt text, which keeps matching linear on text full of "![".
 _IMAGE_REF = re.compile(r"!\[(?:[^\[\]]|\[[^\[\]]*\])*\]\(image_(\d+)\.\w+\)")
 # xberg writes this line before each slide, and as is any text line that reads the same.
 _SLIDE_SEPARATOR_LINE = "-----"
@@ -57,6 +58,7 @@ _TEXT = "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}"
 _DRAW = "{urn:oasis:names:tc:opendocument:xmlns:drawing:1.0}"
 _TABLE = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
 _CHART = "{urn:oasis:names:tc:opendocument:xmlns:chart:1.0}"
+_SVG = "{urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0}"
 _XLINK_HREF = "{http://www.w3.org/1999/xlink}href"
 _PRESENTATION = "{urn:oasis:names:tc:opendocument:xmlns:presentation:1.0}"
 _PRESENTATION_CLASS = f"{_PRESENTATION}class"
@@ -227,6 +229,19 @@ def _patch_content(root, package: zipfile.ZipFile) -> None:
                 anchor.addnext(table)
                 anchor.addnext(heading)
     _detach_all(inline_frames)
+    # xberg writes a picture's title, or else its description, as the alt text of its
+    # ref, where an unpaired bracket hides the ref, and as text where the picture is,
+    # glued to the words around it. That text stays there, as words of its own.
+    labels = []
+    for frame in root.iter(f"{_DRAW}frame"):
+        if frame.find(f"{_DRAW}image") is None:
+            continue
+        own = [child for child in frame if child.tag in (f"{_SVG}title", f"{_SVG}desc")]
+        words = " ".join(" ".join(label.itertext()) for label in own).split()
+        if words:
+            frame.tail = f" {' '.join(words)} {frame.tail or ''}"
+        labels.extend(own)
+    _detach_all(labels)
     for page in root.iter(f"{_DRAW}page"):
         title = ""
         skipped = []

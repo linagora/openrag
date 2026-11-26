@@ -176,20 +176,36 @@ async def test_pictures_become_refs_with_image_blocks(odf_package, encoded_image
     assert image.image_bytes.startswith(b"\x89PNG")
 
 
+_SVG = 'xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"'
+
+
 @pytest.mark.asyncio
-async def test_a_picture_titled_with_brackets_becomes_a_ref(odf_package, encoded_image):
-    """xberg writes the title as alt text: ``![Figure [1]](image_0.png)``."""
-    title = '<svg:title xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0">Figure [1]</svg:title>'
+@pytest.mark.parametrize(
+    ("labels", "words"),
+    [
+        (f"<svg:title {_SVG}>Figure [1]</svg:title>", "Figure [1]"),
+        (f"<svg:title {_SVG}>Fig [1</svg:title>", "Fig [1"),
+        (f"<svg:title {_SVG}>a [b [c]] d</svg:title>", "a [b [c]] d"),
+        (f"<svg:title {_SVG}>x ] y</svg:title>", "x ] y"),
+        (f"<svg:desc {_SVG}>desc [x</svg:desc>", "desc [x"),
+        (f"<svg:title {_SVG}>Titre</svg:title><svg:desc {_SVG}>Une description</svg:desc>", "Titre Une description"),
+    ],
+    ids=["paired", "unpaired-opening", "nested", "unpaired-closing", "description", "title-and-description"],
+)
+async def test_a_picture_s_title_and_description_stay_text_and_leave_its_ref_whole(
+    odf_package, encoded_image, labels, words
+):
+    """xberg writes the title, or else the description, as alt text: ``![Fig [1](image_0.png)``
+    was no ref. It writes them in the paragraph too, glued to the words around them."""
     processed = await _parse(
         odf_package(
             "odt",
-            f'<text:p><draw:frame><draw:image xlink:href="Pictures/a.png"/>{title}</draw:frame></text:p>',
+            f'<text:p>avant <draw:frame><draw:image xlink:href="Pictures/a.png"/>{labels}</draw:frame> après</text:p>',
             pictures={"Pictures/a.png": encoded_image("PNG")},
         )
     )
 
-    assert processed.text_blocks[0].text.startswith("![](odt-image-0)")
-    assert "image_0" not in processed.text_blocks[0].text
+    assert processed.text_blocks[0].text == f"![](odt-image-0)\n\navant {words} après"
     assert len(processed.images) == 1
 
 
