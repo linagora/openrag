@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+# tests/resources: the fixtures are part of the repository, so a missing one is
+# a broken test and fails, never a reason to skip.
 RESOURCES_DIR = Path(__file__).parents[2] / "resources"
 PDF_FILE = RESOURCES_DIR / "test_file.pdf"
 TEXT_FILE = RESOURCES_DIR / "test_file.txt"
@@ -12,16 +14,14 @@ TEXT_FILE = RESOURCES_DIR / "test_file.txt"
 @pytest.fixture
 def pdf_file_path():
     """Path to the test PDF file."""
-    if not PDF_FILE.exists():
-        pytest.skip(f"Test PDF not found: {PDF_FILE}")
+    assert PDF_FILE.exists(), f"Test PDF not found: {PDF_FILE}"
     return PDF_FILE
 
 
 @pytest.fixture
 def text_file_path():
     """Path to the test text file."""
-    if not TEXT_FILE.exists():
-        pytest.skip(f"Test text file not found: {TEXT_FILE}")
+    assert TEXT_FILE.exists(), f"Test text file not found: {TEXT_FILE}"
     return TEXT_FILE
 
 
