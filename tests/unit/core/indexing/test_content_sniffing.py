@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import os
+import tracemalloc
 import zipfile
 from pathlib import Path
 
@@ -463,13 +464,23 @@ def test_an_archive_that_is_not_an_opendocument_of_that_kind_is_refused(extensio
 
 
 def test_the_mimetype_entry_is_read_with_a_bound():
-    """A huge ``mimetype`` entry is read only as far as the expected value."""
+    """A huge ``mimetype`` entry is read only as far as the expected value. The
+    length check refuses it either way: what the bound saves is memory."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("mimetype", "application/vnd.oasis.opendocument.text" + " " * (64 * 1024 * 1024) + "x")
+        archive.writestr("mimetype", "application/vnd.oasis.opendocument.text" + " " * (4 * 1024 * 1024) + "x")
         archive.writestr("content.xml", "<x/>")
-    with pytest.raises(ValidationError):
-        validate_ooxml_package("odt", io.BytesIO(buf.getvalue()))
+    upload = io.BytesIO(buf.getvalue())
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValidationError):
+            validate_ooxml_package("odt", upload)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 1024 * 1024
 
 
 @pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA], ids=["bzip2", "lzma"])
