@@ -317,6 +317,27 @@ async def test_what_charts_add_is_bounded(odf_package, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("limit", "value"), [("_MAX_CHART_NODES", 400), ("_MAX_CHART_XML_BYTES", 5_000)])
+async def test_what_charts_parse_is_bounded(odf_package, monkeypatch, limit, value):
+    """Each chart's tree is kept until the document is patched, whatever its table:
+    20 charts in a 942 KB file took 4.6 GB."""
+    import core.indexing.parsers.odf as odf
+
+    monkeypatch.setattr(odf, limit, value)
+    chart = _CHART_OBJECT.replace("<chart:chart>", "<chart:chart>" + "<chart:legend/>" * 100)
+    frames = "".join(f'<draw:frame><draw:object xlink:href="./Object {i}"/></draw:frame>' for i in range(10))
+    processed = await _parse(
+        odf_package(
+            "odp",
+            f"<draw:page>{frames}</draw:page>",
+            pictures={f"Object {i}/content.xml": chart.encode() for i in range(10)},
+        )
+    )
+
+    assert 0 < processed.text_blocks[0].text.count("### Chart: Ventes") < 10
+
+
+@pytest.mark.asyncio
 async def test_a_title_written_as_a_list_header_is_kept(odf_package):
     title = "<text:list><text:list-header><text:p>Agenda</text:p></text:list-header></text:list>"
     processed = await _parse(odf_package("odp", f"<draw:page>{_frame('title', title)}</draw:page>"))

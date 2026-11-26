@@ -59,6 +59,12 @@ _PRESENTATION_CLASS = f"{_PRESENTATION}class"
 # What charts may add to a document, in XML elements. Frames may all name one object,
 # so a small file can ask for a large table many times over.
 _MAX_CHART_ELEMENTS = 500_000
+# What parsing charts may cost, all of them together, as each one's tree is kept
+# until the document is patched: in XML read, as much as content.xml may hold, and
+# in nodes parsed (elements, attributes, comments), as many as they may add.
+_MAX_CHART_XML_BYTES = _MAX_XML_BYTES
+_MAX_CHART_NODES = _MAX_CHART_ELEMENTS
+_CHART_READ_BYTES = 64 * 1024
 # Slide placeholders that repeat on every slide rather than carry its content.
 _SKIPPED_SLIDE_CLASSES = frozenset({"page-number", "footer", "header", "date-time", "page"})
 _NOTES_FORMAT = "odp-speaker-notes"
@@ -183,6 +189,7 @@ def _patch_content(root, package: zipfile.ZipFile) -> None:
     # A chart renders as one garbled formula: its table goes in its place.
     charts: dict[str, Any] = {}
     remaining = _MAX_CHART_ELEMENTS
+    budget = _ChartBudget()
     inline_frames = []
     for frame in list(root.iter(f"{_DRAW}frame")):
         obj = frame.find(f"{_DRAW}object")
@@ -190,7 +197,7 @@ def _patch_content(root, package: zipfile.ZipFile) -> None:
             continue
         name = f"{(obj.get(_XLINK_HREF) or '').removeprefix('./').rstrip('/')}/content.xml"
         if name not in charts:
-            charts[name] = _chart_table(package, name)
+            charts[name] = _chart_table(package, name, budget)
         if charts[name] and charts[name][2] <= remaining:
             table = copy.deepcopy(charts[name][0])
             remaining -= charts[name][2]
@@ -231,14 +238,40 @@ def _patch_content(root, package: zipfile.ZipFile) -> None:
     etree.cleanup_namespaces(root)
 
 
-def _chart_table(package: zipfile.ZipFile, name: str) -> tuple[Any, str, int] | None:
-    """The data table, title and element count of the chart at *name*, if it is one."""
+class _ChartBudget:
+    """What parsing chart objects may still cost, all charts together."""
+
+    def __init__(self) -> None:
+        self.xml_bytes = _MAX_CHART_XML_BYTES
+        self.nodes = _MAX_CHART_NODES
+
+    def spent(self) -> bool:
+        return self.xml_bytes <= 0 or self.nodes <= 0
+
+
+def _chart_table(package: zipfile.ZipFile, name: str, budget: _ChartBudget) -> tuple[Any, str, int] | None:
+    """The data table, title and element count of the chart at *name*, if it is one.
+
+    Parsing it is paid from *budget*, and stops when that runs out: no chart is
+    parsed past it."""
     from lxml import etree
 
+    if budget.spent():
+        return None
+    parser = etree.XMLPullParser(events=("start", "comment", "pi"), **_XML_OPTIONS)
     try:
-        if package.getinfo(name).file_size > _MAX_XML_BYTES:
+        info = package.getinfo(name)
+        if info.file_size > _MAX_XML_BYTES:
             return None
-        root = etree.fromstring(_read(package, package.getinfo(name)), parser=_xml_parser())
+        # Read up to the declared size, as _read does, a chunk at a time.
+        with package.open(info) as entry:
+            while chunk := entry.read(_CHART_READ_BYTES):
+                budget.xml_bytes -= len(chunk)
+                parser.feed(chunk)
+                budget.nodes -= sum(1 + len(node.attrib) for _, node in parser.read_events())
+                if budget.spent():
+                    return None
+        root = parser.close()
     except (KeyError, zipfile.BadZipFile, zlib.error, RuntimeError, NotImplementedError, etree.XMLSyntaxError):
         return None
     chart = next(root.iter(f"{_CHART}chart"), None)
@@ -261,11 +294,14 @@ def _read(package: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
         return entry.read(info.file_size)
 
 
+# No entity expansion, DTD loading or network access: the XML is untrusted.
+_XML_OPTIONS = {"resolve_entities": False, "load_dtd": False, "no_network": True, "huge_tree": False}
+
+
 def _xml_parser():
     from lxml import etree
 
-    # No entity expansion, DTD loading or network access: the XML is untrusted.
-    return etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True, huge_tree=False)
+    return etree.XMLParser(**_XML_OPTIONS)
 
 
 def _patched(raw: bytes) -> bytes:
