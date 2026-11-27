@@ -335,7 +335,7 @@ def test_resolve_llm_uses_partition_preset():
     factory = RecordingFactory({"mistral": preset_llm})
     svc = _svc(llm_factory=factory)
     svc._config.partitions = {"p": _partition(chat_llm="mistral")}
-    assert svc._resolve_llm(["p"]) is preset_llm
+    assert svc.resolve_chat_request(["p"]).llm is preset_llm
     assert factory.calls == ["mistral"]
 
 
@@ -348,10 +348,10 @@ def test_resolve_llm_default_paths_use_the_catalog_default_endpoint():
     factory = RecordingFactory({"default": catalog_default, "mistral": FakeLLM()})
     svc = _svc(llm=static_llm, llm_factory=factory)
     svc._config.partitions = {"p": _partition(chat_llm=None), "q": _partition(chat_llm="mistral")}
-    assert svc._resolve_llm(None) is catalog_default  # direct/web-only mode
-    assert svc._resolve_llm(["all"]) is catalog_default  # cross-partition sentinel
-    assert svc._resolve_llm(["p"]) is catalog_default  # partition without a preset
-    assert svc._resolve_llm(["missing"]) is catalog_default  # unknown partition
+    assert svc.resolve_chat_request(None).llm is catalog_default  # direct/web-only mode
+    assert svc.resolve_chat_request(["all"]).llm is catalog_default  # cross-partition sentinel
+    assert svc.resolve_chat_request(["p"]).llm is catalog_default  # partition without a preset
+    assert svc.resolve_chat_request(["missing"]).llm is catalog_default  # unknown partition
     assert factory.calls == ["default", "default", "default", "default"]
 
 
@@ -361,13 +361,13 @@ def test_resolve_llm_falls_back_to_static_llm_without_factory_or_catalog_default
     static_llm = FakeLLM()
     no_factory = _svc(llm=static_llm)
     no_factory._config.partitions = {"q": _partition(chat_llm="mistral")}
-    assert no_factory._resolve_llm(["q"]) is static_llm
-    assert no_factory._resolve_llm(None) is static_llm
+    assert no_factory.resolve_chat_request(["q"]).llm is static_llm
+    assert no_factory.resolve_chat_request(None).llm is static_llm
 
     empty_catalog = RecordingFactory()  # raises KeyError for "default"
     svc = _svc(llm=static_llm, llm_factory=empty_catalog)
     svc._config.partitions = {"p": _partition(chat_llm=None)}
-    assert svc._resolve_llm(["p"]) is static_llm
+    assert svc.resolve_chat_request(["p"]).llm is static_llm
     assert empty_catalog.calls == ["default"]
 
 
@@ -381,8 +381,8 @@ def test_resolve_llm_multi_partition_uses_preset_only_when_unanimous():
         "c": _partition(chat_llm=None),  # unset → doesn't veto
         "d": _partition(chat_llm="llama"),
     }
-    assert svc._resolve_llm(["a", "b", "c"]) is preset_llm  # unanimous among setters
-    assert svc._resolve_llm(["a", "d"]) is catalog_default  # conflicting presets → catalog default
+    assert svc.resolve_chat_request(["a", "b", "c"]).llm is preset_llm  # unanimous among setters
+    assert svc.resolve_chat_request(["a", "d"]).llm is catalog_default  # conflicting presets → catalog default
 
 
 def test_default_llm_name_recovers_the_is_default_endpoint_name():
@@ -410,7 +410,7 @@ def test_resolve_llm_unknown_preset_falls_through_to_catalog_default():
     factory = RecordingFactory({"default": catalog_default})  # "deleted" raises KeyError
     svc = _svc(llm=static_llm, llm_factory=factory)
     svc._config.partitions = {"p": _partition(chat_llm="deleted")}
-    assert svc._resolve_llm(["p"]) is catalog_default
+    assert svc.resolve_chat_request(["p"]).llm is catalog_default
     assert factory.calls == ["deleted", "default"]
 
 
@@ -2836,6 +2836,73 @@ async def test_generation_prompt_name_from_partition_reaches_resolver():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("entry_point", ["chat", "chat_stream", "complete"])
+async def test_chat_keeps_partition_settings_when_the_cache_refreshes(entry_point):
+    query_json = json.dumps({"query_list": [{"query": "rewritten"}]})
+    old_llm = FakeLLM(chat_responses=[query_json])
+    new_llm = FakeLLM(chat_responses=[query_json])
+    factory = RecordingFactory({"old-model": old_llm, "new-model": new_llm})
+    chunks = [Chunk(id=name, text=name, metadata={"_id": name}) for name in ("c1", "c2")]
+    svc = _svc(mode="ChatBotRag", llm_factory=factory, retrieval=FakeRetrieval(chunks))
+    old = _partition_cfg(top_n=1, chat_llm="old-model", generation_prompt_names={"sys_prompt": "old-answer"})
+    new = _partition_cfg(
+        top_n=2, chat_llm="new-model", chat_history_depth=1, generation_prompt_names={"sys_prompt": "new-answer"}
+    )
+    old.retrieval.query_contextualizer_prompt_name = "old-query"
+    new.retrieval.query_contextualizer_prompt_name = "new-query"
+    svc._config.partitions = {"p": old}
+
+    prompt_names = []
+    source_counts = []
+
+    class RefreshingPromptService:
+        async def resolve_prompt(self, prompt_type, names):
+            prompt_names.append((prompt_type, names[0]))
+            if prompt_type == "query_contextualizer":
+                svc._config.partitions["p"] = new
+                return "Rewrite the question"
+            return "Answer from {context}"
+
+    svc._prompt_service = RefreshingPromptService()
+
+    def prepare_sources(docs, _web):
+        source_counts.append(len(docs))
+        return []
+
+    async def request():
+        kwargs = {"partitions": ["p"], "prepare_sources": prepare_sources}
+        if entry_point == "complete":
+            await svc.complete(payload={"prompt": "What did we agree?"}, **kwargs)
+            return
+        payload = {
+            "messages": [
+                {"role": "user", "content": "Earlier question"},
+                {"role": "user", "content": "What did we agree?"},
+            ]
+        }
+        if entry_point == "chat":
+            await svc.chat(payload=payload, model_name="openrag-p", **kwargs)
+        else:
+            async for _ in svc.chat_stream(payload=payload, model_name="openrag-p", **kwargs):
+                pass
+
+    await request()
+    await request()
+
+    assert factory.calls == ["old-model", "new-model"]
+    assert prompt_names == [
+        ("query_contextualizer", "old-query"),
+        ("sys_prompt", "old-answer"),
+        ("query_contextualizer", "new-query"),
+        ("sys_prompt", "new-answer"),
+    ]
+    assert source_counts == [1, 2]
+    if entry_point != "complete":
+        assert "Earlier question" in old_llm.chat_calls[0][0][-1]["content"]
+        assert "Earlier question" not in new_llm.chat_calls[0][0][-1]["content"]
+
+
+@pytest.mark.asyncio
 async def test_spoken_style_metadata_swaps_the_answer_prompt():
     """`metadata.spoken_style_answer` is a public API flag (and a Chainlit
     command) that swaps the answer prompt for a voice-friendly one. Nothing
@@ -4278,3 +4345,50 @@ async def test_prepare_completions_selects_sources_by_relevance_and_shows_them_b
     assert [doc.metadata["_id"] for doc in docs] == ["mid", "best"]
     assert _in_reading_order(payload["prompt"], ["mid", "best"])
     assert "text of loose" not in payload["prompt"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entry_point", "trace_enabled"),
+    [("chat", False), ("chat", True), ("chat_stream", False), ("chat_stream", True), ("complete", False)],
+)
+async def test_chat_retrieval_keeps_the_partition_settings_from_request_start(entry_point, trace_enabled):
+    from test_retrieval_service import _grouping_svc
+    from test_retrieval_service import _partition as retrieval_partition
+
+    retrieval, searchers = _grouping_svc(
+        [retrieval_partition(name="support", embedder="embed-a")],
+        {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"},
+    )
+    query_json = json.dumps({"query_list": [{"query": "project schedule"}]})
+
+    class RefreshingLLM(FakeLLM):
+        async def chat(self, messages, **kwargs):
+            if kwargs.get("response_format"):
+                retrieval._config.partitions["support"] = retrieval_partition(name="support", embedder="embed-b")
+            return await super().chat(messages, **kwargs)
+
+    service = _svc(llm=RefreshingLLM(chat_responses=[query_json]), retrieval=retrieval, mode="ChatBotRag")
+    service._config.partitions = retrieval._config.partitions
+    args = {"partitions": ["support"], "prepare_sources": lambda *_: []}
+
+    async def request():
+        if entry_point == "complete":
+            await service.complete(payload={"prompt": "What is the project schedule?"}, **args)
+        else:
+            payload = {
+                "messages": [{"role": "user", "content": "What is the project schedule?"}],
+                "metadata": {"include_retrieval_trace": trace_enabled},
+            }
+            if entry_point == "chat":
+                await service.chat(payload=payload, model_name="openrag-support", **args)
+            else:
+                async for _ in service.chat_stream(payload=payload, model_name="openrag-support", **args):
+                    pass
+
+    await request()
+    assert searchers["embed-a"].search_calls
+    assert "embed-b" not in searchers
+
+    await request()
+    assert searchers["embed-b"].search_calls

@@ -14,7 +14,7 @@ handed to the service as a callable), and ``StreamingResponse`` /
 import asyncio
 import json
 import traceback
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from api.dependencies.auth import (
     current_user,
@@ -318,23 +318,7 @@ async def _fetch_max_model_tokens(
 
 
 def _resolve_llm_endpoint_name(config: "Settings", partitions: list[str] | None) -> str:
-    """Effective LLM endpoint registry name for *partitions*.
-
-    Delegates to ``resolve_partition_chat_llm`` — the same consensus rule
-    ``QueryService._resolve_llm`` uses to pick the LLM that actually answers
-    the request — so the token preflight is checked against the budget of the
-    model that will really be called, not always the global default. Falls
-    back to the ``"default"`` alias (see ``ModelEndpointService``) when no
-    single partition-scoped endpoint applies.
-
-    A partition's ``chat_llm`` can also go **stale** — the endpoint it names
-    may have been deleted or renamed after assignment (nothing cascades the
-    reference). ``QueryService._resolve_llm`` handles that by catching the
-    factory ``KeyError`` and answering with the catalog default; the preflight
-    must converge on the same endpoint, otherwise it would check the request
-    against the global budget while a differently-sized default endpoint
-    answers it. So an unresolvable name falls back to ``"default"`` here too.
-    """
+    """Resolve the registry name for callers that only need token limits."""
     name = resolve_partition_chat_llm(partitions, config.partitions)
     if name is None or name not in config.models.llm:
         return "default"
@@ -361,11 +345,28 @@ def get_max_model_tokens(partitions: list[str] | None = None, settings: "Setting
     """
     config = _runtime_config(settings)
     name = _resolve_llm_endpoint_name(config, partitions)
-    configured = config.models.llm_context_size(name)
-    if configured is not None:
-        return configured
-    probed = _max_model_tokens_by_name.get(name)
-    return probed or int(config.llm_context.max_llm_context_size)
+    return _context_window(config, name)
+
+
+def _context_window(config: "Settings", endpoint_name: str | None) -> int:
+    if endpoint_name is not None:
+        configured = config.models.llm_context_size(endpoint_name)
+        if configured is not None:
+            return configured
+        probed = _max_model_tokens_by_name.get(endpoint_name)
+        if probed is not None:
+            return probed
+    return int(config.llm_context.max_llm_context_size)
+
+
+class _TokenBudget(NamedTuple):
+    context_window: int
+    default_output_tokens: int
+
+
+def _token_budget(config: "Settings", endpoint_name: str | None) -> _TokenBudget:
+    configured = config.models.llm_output_tokens(endpoint_name) if endpoint_name is not None else None
+    return _TokenBudget(_context_window(config, endpoint_name), configured or int(config.llm_context.max_output_tokens))
 
 
 def _token_validation_unavailable(error: Exception) -> ServiceUnavailableError:
@@ -389,9 +390,13 @@ def validate_tokens_limit(
     max_tokens_allowed: int,
     settings: "Settings | None" = None,
     partitions: list[str] | None = None,
+    *,
+    default_output_tokens: int | None = None,
 ) -> tuple[bool, str]:
     """Validate the token budget, raising 503 if counting is unavailable."""
-    config = _runtime_config(settings)
+    if default_output_tokens is None:
+        default_output_tokens = _effective_max_output_tokens(_runtime_config(settings), partitions)
+    requested_tokens = request.max_tokens or default_output_tokens
     try:
         counter = get_num_tokens()
     except Exception as error:
@@ -407,8 +412,6 @@ def validate_tokens_limit(
         body = request.model_dump(exclude_none=True)
         messages_tokens = sum(message_tokens(m, _length_function) for m in body["messages"])
         tools_tokens = tool_definition_tokens(body, _length_function)
-        default_output_tokens = _effective_max_output_tokens(config, partitions)
-        requested_tokens = request.max_tokens or default_output_tokens
         total_tokens_needed = messages_tokens + tools_tokens + requested_tokens
         if total_tokens_needed > max_tokens_allowed:
             tools_part = f"Tool definitions: {tools_tokens} tokens + " if tools_tokens else ""
@@ -423,8 +426,6 @@ def validate_tokens_limit(
 
     elif isinstance(request, OpenAICompletionRequest):
         prompt_tokens = _length_function(request.prompt)
-        default_output_tokens = _effective_max_output_tokens(config, partitions)
-        requested_tokens = request.max_tokens or default_output_tokens
         total_tokens_needed = prompt_tokens + requested_tokens
         if total_tokens_needed > max_tokens_allowed:
             return False, (
@@ -442,6 +443,8 @@ def _apply_default_max_tokens(
     request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
     config: "Settings",
     partitions: list[str] | None,
+    *,
+    budget: _TokenBudget | None = None,
 ) -> None:
     """Fill an omitted ``max_tokens`` from the endpoint that will actually answer.
 
@@ -466,13 +469,17 @@ def _apply_default_max_tokens(
     llm_override = client_llm_override(getattr(request, "metadata", None))
     if llm_override.get("base_url") and custom_endpoint_override_enabled():
         return
-    request.max_tokens = _effective_max_output_tokens(config, partitions)
+    request.max_tokens = (
+        budget.default_output_tokens if budget is not None else _effective_max_output_tokens(config, partitions)
+    )
 
 
 def _max_prompt_tokens(
     request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
     config: "Settings",
     partitions: list[str] | None,
+    *,
+    budget: _TokenBudget | None = None,
 ) -> int | None:
     """Tokens the prompt may take on the endpoint answering this request.
 
@@ -488,7 +495,8 @@ def _max_prompt_tokens(
     llm_override = client_llm_override(getattr(request, "metadata", None))
     if llm_override.get("base_url") and custom_endpoint_override_enabled():
         return None
-    return get_max_model_tokens(partitions=partitions, settings=config) - request.max_tokens
+    context_window = budget.context_window if budget is not None else get_max_model_tokens(partitions, config)
+    return context_window - request.max_tokens
 
 
 def check_tokens_limit(
@@ -496,13 +504,16 @@ def check_tokens_limit(
     log,
     settings: "Settings | None" = None,
     partitions: list[str] | None = None,
+    *,
+    budget: _TokenBudget | None = None,
 ):
     """Validate token limit and raise HTTPException(413) if exceeded."""
     is_valid, error_message = validate_tokens_limit(
         request,
-        max_tokens_allowed=get_max_model_tokens(partitions=partitions, settings=settings),
+        max_tokens_allowed=budget.context_window if budget is not None else get_max_model_tokens(partitions, settings),
         settings=settings,
         partitions=partitions,
+        default_output_tokens=budget.default_output_tokens if budget is not None else None,
     )
     if not is_valid:
         log.info("Request exceeds token limit", detail=error_message)
@@ -626,9 +637,11 @@ async def openai_chat_completion(
     # Resolve the output budget now that the answering endpoint is known, so the
     # preflight below and the payload sent downstream both use the resolved
     # endpoint's budget rather than the default endpoint's.
-    _apply_default_max_tokens(request, config, partitions)
-    check_tokens_limit(request, log, config, partitions=partitions)
-    max_prompt_tokens = _max_prompt_tokens(request, config, partitions)
+    resolved = service.resolve_chat_request(partitions)
+    budget = _token_budget(config, resolved.endpoint_name)
+    _apply_default_max_tokens(request, config, partitions, budget=budget)
+    check_tokens_limit(request, log, config, partitions=partitions, budget=budget)
+    max_prompt_tokens = _max_prompt_tokens(request, config, partitions, budget=budget)
 
     def prep(docs, web):
         return __prepare_sources(request2, docs, web)
@@ -644,6 +657,7 @@ async def openai_chat_completion(
                     model_name=model_name,
                     request_id=getattr(request2.state, "request_id", None),
                     max_prompt_tokens=max_prompt_tokens,
+                    resolved_request=resolved,
                 ):
                     yield sse_line
             except asyncio.CancelledError:
@@ -668,6 +682,7 @@ async def openai_chat_completion(
         model_name=model_name,
         request_id=getattr(request2.state, "request_id", None),
         max_prompt_tokens=max_prompt_tokens,
+        resolved_request=resolved,
     )
     log.debug("Returning non-streaming completion chunk.")
     return JSONResponse(content=chunk)
@@ -766,14 +781,17 @@ async def openai_completion(
     # Resolve the output budget now that the answering endpoint is known, so the
     # preflight below and the payload sent downstream both use the resolved
     # endpoint's budget rather than the default endpoint's.
-    _apply_default_max_tokens(request, config, partitions)
-    check_tokens_limit(request, log, config, partitions=partitions)
+    resolved = service.resolve_chat_request(partitions)
+    budget = _token_budget(config, resolved.endpoint_name)
+    _apply_default_max_tokens(request, config, partitions, budget=budget)
+    check_tokens_limit(request, log, config, partitions=partitions, budget=budget)
 
     resp = await service.complete(
         partitions=partitions,
         payload=request.model_dump(exclude_none=True),
         prepare_sources=lambda docs, _web: __prepare_sources(request2, docs),
-        max_prompt_tokens=_max_prompt_tokens(request, config, partitions),
+        max_prompt_tokens=_max_prompt_tokens(request, config, partitions, budget=budget),
+        resolved_request=resolved,
     )
     log.debug("Returning completion response.")
     return JSONResponse(content=resp)
