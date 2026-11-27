@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal, get_args
 
 from core.config.model_endpoints import ModelEndpointConfig
 from core.indexing.parsers.document_parser import DocumentParser
@@ -30,6 +30,8 @@ logger = get_logger()
 
 TranscriptionPromptResolver = Callable[[], Awaitable[str | None]]
 TranscriptionEndpointResolver = Callable[[], ModelEndpointConfig | None | Awaitable[ModelEndpointConfig | None]]
+PdfEngines = Literal["ray", "local"]
+_PDF_ENGINES: frozenset[str] = frozenset(get_args(PdfEngines))
 
 # Translate the legacy ``file_loaders`` class-name values into new registry
 # backend names. Every pooled backend self-provisions its Ray pool on first
@@ -95,11 +97,15 @@ class ParserDispatcher(DocumentParser):
         *,
         transcription_prompt_resolver: TranscriptionPromptResolver | None = None,
         transcription_endpoint_resolver: TranscriptionEndpointResolver | None = None,
+        pdf_engines: PdfEngines = "ray",
     ) -> None:
+        if pdf_engines not in _PDF_ENGINES:
+            raise ValueError(f"Unknown pdf_engines {pdf_engines!r}; expected one of {sorted(_PDF_ENGINES)}")
         self._config = config
         self._transcription_prompt_resolver = transcription_prompt_resolver
         self._transcription_endpoint_resolver = transcription_endpoint_resolver
         self._by_name: dict[str, DocumentParser] = {}
+        self._pdf_engines = pdf_engines
 
     def supported_types(self) -> list[str]:
         return [doc_type.value for doc_type in DocumentType]
@@ -222,12 +228,20 @@ class ParserDispatcher(DocumentParser):
     def _build_marker(self) -> DocumentParser:
         from services.workers.parsers.marker_workers import MarkerLoader, RayMarkerConversion
 
+        if self._pdf_engines == "local":
+            raise ValueError("Marker has no local engine yet; this process can only convert PDFs with docling")
         return _create("core.indexing.parsers.pdf.marker", "marker", pool=MarkerLoader(RayMarkerConversion()))
 
     def _build_docling(self) -> DocumentParser:
         from services.workers.parsers.docling_workers import DoclingLoader, RayDoclingConversion
 
-        return _create("core.indexing.parsers.pdf.docling", "docling", pool=DoclingLoader(RayDoclingConversion()))
+        if self._pdf_engines == "local":
+            from services.workers.parsers.docling_engine import LocalDoclingEngine
+
+            conversion = LocalDoclingEngine(self._config)
+        else:
+            conversion = RayDoclingConversion()
+        return _create("core.indexing.parsers.pdf.docling", "docling", pool=DoclingLoader(conversion))
 
     def _build_local_whisper(self) -> DocumentParser:
         from services.workers.parsers.whisper_workers import LocalWhisperLoader
@@ -383,12 +397,19 @@ def build_parser_dispatcher(
     *,
     transcription_prompt_resolver: TranscriptionPromptResolver | None = None,
     transcription_endpoint_resolver: TranscriptionEndpointResolver | None = None,
+    pdf_engines: PdfEngines = "ray",
 ) -> ParserDispatcher:
-    """Build the content-type dispatcher over the new parser stack."""
+    """Build the content-type dispatcher over the new parser stack.
+
+    ``pdf_engines`` is where Marker and Docling convert: on the Ray pools
+    (``"ray"``), or in this process (``"local"``). The process decides, not a
+    setting: an indexer actor converts on the pools.
+    """
     return ParserDispatcher(
         config,
         transcription_prompt_resolver=transcription_prompt_resolver,
         transcription_endpoint_resolver=transcription_endpoint_resolver,
+        pdf_engines=pdf_engines,
     )
 
 
