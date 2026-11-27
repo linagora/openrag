@@ -1,11 +1,9 @@
 import asyncio
-import gc
 import os
 import re
 import threading
 import time
 
-import pypdfium2
 import ray
 import torch
 from core.config import load_config
@@ -18,54 +16,22 @@ from core.models.document import (
     ProcessedDocument,
     TextBlock,
 )
-from core.utils.child_process import kill_process_group, tie_to_parent
 from core.utils.logging import get_logger
-from core.utils.process_limits import apply_parse_memory_limit
-from marker.converters.pdf import PdfConverter
 from ray.exceptions import TaskCancelledError
 
 from ..ray_utils import call_ray_actor_with_timeout, caused_by, retry_with_backoff
+from . import marker_runtime
+from .marker_runtime import (
+    _MAX_PDF_PAGES,
+    PAGE_SEP,
+    _apply_parse_memory_limit,
+    _as_parse_memory_error,
+    _force_kill_executor,
+    converter_config,
+)
+from .pdf_conversion import MarkerConversion
 
 logger = get_logger()
-
-
-def _force_kill_executor(executor, log) -> None:
-    """SIGKILL an executor's worker processes, then shut it down.
-
-    ``ProcessPoolExecutor.shutdown()`` only asks workers to exit *after* their
-    current task finishes. A worker wedged on a pathological PDF never finishes,
-    so a plain shutdown leaves it running — holding its pool slot and the GPU
-    indefinitely (#659). Killing the OS processes directly is the only way to
-    reclaim a wedged worker. ``ProcessPoolExecutor`` doesn't expose which
-    process ran a given task, which is why ``MarkerWorker`` gives every slot its
-    own single-process executor: killing one never touches another slot's parse.
-
-    Each worker leads its own process group (``tie_to_parent``), and the whole
-    group is killed, so nothing a worker started outlives it (#1167).
-    """
-    if executor is None:
-        return
-    # Snapshot before shutdown(): the shutdown machinery clears ``_processes``.
-    procs = list(getattr(executor, "_processes", {}).values())
-    for proc in procs:
-        try:
-            # A broken pool keeps its crashed child, already reaped: its pid may
-            # belong to another process now. Nothing it started is left to
-            # reclaim, since pdftext runs inside the child (``pdftext_workers``).
-            if proc.exitcode is not None:
-                continue
-            kill_process_group(proc.pid)
-        except Exception:  # noqa: BLE001 - one unkillable proc must not block the rest
-            log.warning("Failed to kill Marker worker process", exc_info=True)
-    try:
-        executor.shutdown(wait=False, cancel_futures=True)
-    except Exception:  # noqa: BLE001 - teardown is best-effort; a fresh pool follows
-        log.warning("Failed to shut down Marker executor", exc_info=True)
-    for proc in procs:
-        try:
-            proc.join(timeout=5)
-        except Exception:  # noqa: BLE001 - a stuck join must not block the rebuild
-            pass
 
 
 def _marker_num_gpus(config) -> float:
@@ -86,86 +52,6 @@ def _marker_num_gpus(config) -> float:
         return requested_gpus if torch.cuda.is_available() else 0
 
 
-#: Headroom the ceiling must leave above the child's baseline ``VmData`` before a
-#: parse has room to work. Below this the limit is far more likely to be a
-#: misconfiguration than a tight budget, so it is reported rather than left to
-#: surface as a 100% Marker failure rate.
-_MIN_PARSE_HEADROOM_MB = 256
-
-
-#: Torch's CPU allocator reports a refused allocation as a ``RuntimeError`` with
-#: this text, not as ``MemoryError`` — measured under ``RLIMIT_DATA`` with torch
-#: 2.7.1. CUDA's out-of-memory error is also a ``RuntimeError`` subclass, but it is
-#: a different failure (device memory, not this ceiling), so the match is on this
-#: message and never on the type.
-_TORCH_CPU_ALLOC_FAILURE = "DefaultCPUAllocator: can't allocate memory"
-
-
-def _as_parse_memory_error(exc: BaseException) -> MemoryError | None:
-    """The ``MemoryError`` a child failure stands for, or ``None``.
-
-    Only the top-level exception *type* crosses the process pool back to the
-    parent — ``concurrent.futures`` replaces the chain with a remote traceback —
-    so the guards in ``_process_chunk`` see ``MemoryError`` only if the child
-    raises exactly that. Two shapes would otherwise arrive as something else:
-    torch's allocator ``RuntimeError``, and a ``MemoryError`` a library wrapped in
-    its own exception. ``None`` when *exc* already is one, or is unrelated.
-    """
-    if isinstance(exc, MemoryError):
-        return None
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, MemoryError) or (
-            isinstance(current, RuntimeError) and _TORCH_CPU_ALLOC_FAILURE in str(current)
-        ):
-            return MemoryError(str(current))
-        current = current.__cause__ or current.__context__
-    return None
-
-
-def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
-    """Cap what this child process may allocate, so one parse cannot take the pod.
-
-    Runs in the slot's child process, which ``MarkerPool`` hands at most one chunk
-    at a time — so with page chunking on each chunk runs under this bound rather
-    than a whole document doing so. The limit is set once per child and persists
-    across chunks until that child is recycled, so it is a per-*child* ceiling
-    that each chunk shares, not a fresh allowance per chunk. A chunk that blows through it
-    raises ``MemoryError`` in the process responsible instead of tripping a
-    pod-level OOM kill that takes every file sharing the worker with it (#997).
-
-    The limit covers the child's *whole* ``VmData`` — torch, Marker's startup
-    allocations and the parse together — and Linux accepts a limit below what the
-    process already uses, after which every allocation fails. The baseline is
-    logged beside the ceiling and thin headroom is reported, because otherwise a
-    plausible-looking value yields 100% Marker failures with nothing saying why.
-
-    ``RLIMIT_DATA`` bounds the heap and private anonymous mappings. Deliberately
-    not ``RLIMIT_AS``: that also counts file-backed mappings, so it would refuse
-    the model weights and CUDA's device maps and break the parse outright.
-
-    The ceiling is per process. Marker runs pdftext with one worker, which
-    extracts text inside the child instead of starting processes, so one ceiling
-    bounds a chunk's whole parse.
-
-    Best-effort — a platform without ``RLIMIT_DATA``, or an existing limit
-    below the request, must not stop the worker from starting.
-    """
-    apply_parse_memory_limit(
-        memory_limit_mb,
-        process="Marker child",
-        setting="MARKER_PARSE_MEMORY_LIMIT_MB",
-        min_headroom_mb=_MIN_PARSE_HEADROOM_MB,
-    )
-
-
-# Parser-bomb cap: never process more than this many pages from one PDF, so a
-# crafted high-page-count file can't exhaust CPU/memory during ingestion.
-# 0 or negative disables the cap.
-_MAX_PDF_PAGES = 2000
-
 # How many times a pool-recycle retries after its own reset call is cancelled
 # (rather than failing) before the worker slot is dropped for good.
 _RECYCLE_CANCEL_RETRIES = 3
@@ -180,24 +66,11 @@ class MarkerWorker:
 
         self.logger = get_logger()
         self.config = load_config()
-        self.page_sep = "[PAGE_SEP]"
+        self.page_sep = PAGE_SEP
 
         self._workers = self.config.loader.marker_max_processes
 
-        self.converter_config = {
-            "output_format": "markdown",
-            "paginate_output": True,
-            "page_separator": self.page_sep,
-            # One worker: pdftext extracts in the slot child itself. With more,
-            # it starts processes of its own, which do not die with the child
-            # and each get a full memory ceiling (#1167). The slots already
-            # parse chunks in parallel.
-            "pdftext_workers": 1,
-            # Surya passes disable= explicitly, which beats TQDM_DISABLE: honor
-            # it here (non-empty = off, as tqdm reads it), and turn the bars
-            # off with JSON logs even when TQDM_DISABLE was not set (#1297).
-            "disable_tqdm": bool(os.environ.get("TQDM_DISABLE")) or self.config.verbose.format == "json",
-        }
+        self.converter_config = converter_config(self.config)
         if self.config.loader.marker_pdftext_workers > 1:
             self.logger.warning(
                 f"MARKER_PDFTEXT_WORKERS={self.config.loader.marker_pdftext_workers} is ignored: "
@@ -274,49 +147,10 @@ class MarkerWorker:
             )
             self.logger.debug(f"MarkerWorker slot {slot} executor ready")
 
-    @staticmethod
-    def _worker_init(model_dict, memory_limit_mb: int = 0, parent_pid: int | None = None):
-        global worker_model_dict
-        # First, so a child whose actor is already gone exits before loading
-        # anything, and one whose actor dies later dies with it (#1167).
-        if parent_pid is not None:
-            tie_to_parent(parent_pid)
-        worker_model_dict = model_dict
-        # Logged before the ceiling, like `_apply_parse_memory_limit`'s own lines:
-        # under a tight limit the log call's allocation could raise MemoryError,
-        # and nothing catches it in the pool initializer.
-        logger.debug("Worker initialized with model dictionary")
-        _apply_parse_memory_limit(memory_limit_mb)
-
-    @staticmethod
-    def _process_pdf(file_path, config):
-        global worker_model_dict
-
-        page_range = config.get("page_range")
-        if page_range is not None:
-            label = f"[p{page_range[0]}-{page_range[-1]}]"
-        else:
-            label = "(all pages)"
-
-        try:
-            logger.debug("Processing PDF", path=file_path, label=label)
-            converter = PdfConverter(
-                artifact_dict=worker_model_dict,
-                config=config,
-            )
-            render = converter(file_path)
-            return render
-        except Exception as e:
-            logger.exception("Error processing PDF", path=file_path, label=label, error=str(e))
-            ceiling = _as_parse_memory_error(e)
-            if ceiling is not None:
-                raise ceiling from e
-            raise
-        finally:
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
+    # The child's initializer and conversion, in one module without Ray: they
+    # share the models the initializer stores.
+    _worker_init = staticmethod(marker_runtime.init_child)
+    _process_pdf = staticmethod(marker_runtime.convert_in_child)
 
     async def process_pdf(self, file_path: str, page_range: list[int] | None = None, *, slot: int):
         from concurrent.futures import TimeoutError as FuturesTimeoutError
@@ -411,25 +245,8 @@ class MarkerPool:
             f"{self.pool_size * self.max_processes} PDF concurrency"
         )
 
-    @staticmethod
-    def _get_page_count(file_path: str) -> int:
-        pdf = pypdfium2.PdfDocument(file_path)
-        try:
-            return len(pdf)
-        finally:
-            pdf.close()
-
-    @staticmethod
-    def _create_chunks(page_count: int, chunk_size: int) -> list[tuple[list[int], str]]:
-        if page_count <= chunk_size:
-            return [(list(range(page_count)), f"({page_count}p)")]
-        chunks = []
-        for start in range(0, page_count, chunk_size):
-            end = min(start + chunk_size, page_count)
-            page_range = list(range(start, end))
-            label = f"[p{start}-{end - 1}]"
-            chunks.append((page_range, label))
-        return chunks
+    _get_page_count = staticmethod(marker_runtime.page_count)
+    _create_chunks = staticmethod(marker_runtime.create_chunks)
 
     async def _check_pool_broken(self, worker):
         actor, slot = worker
@@ -579,28 +396,17 @@ class MarkerPool:
         chunk_size = self.config.loader.marker_chunk_size
 
         total_pages = self._get_page_count(file_path)
-        capped = _MAX_PDF_PAGES > 0 and total_pages > _MAX_PDF_PAGES
-        if capped:
+        if _MAX_PDF_PAGES > 0 and total_pages > _MAX_PDF_PAGES:
             self.logger.warning(
                 f"PDF has {total_pages} pages; processing only the first {_MAX_PDF_PAGES} (max page cap)"
             )
-        page_count = min(total_pages, _MAX_PDF_PAGES) if _MAX_PDF_PAGES > 0 else total_pages
-
-        if chunk_size <= 0:
-            # When capped, restrict to the first page_count pages instead of all.
-            page_range = list(range(page_count)) if capped else None
-            label = f"(first {page_count}p)" if capped else "(all pages)"
-            return await self._process_chunk(file_path, page_range=page_range, label=label)
-
-        chunks = self._create_chunks(page_count, chunk_size)
+        chunks = marker_runtime.plan_chunks(total_pages, chunk_size)
 
         if len(chunks) == 1:
             page_range, label = chunks[0]
-            # When capped, the single chunk only covers the first page_count pages,
-            # so pass that explicit range — page_range=None would process the whole
-            # file and bypass the cap. Uncapped, None means "all pages".
-            return await self._process_chunk(file_path, page_range=(page_range if capped else None), label=label)
+            return await self._process_chunk(file_path, page_range=page_range, label=label)
 
+        page_count = min(total_pages, _MAX_PDF_PAGES) if _MAX_PDF_PAGES > 0 else total_pages
         self.logger.info(
             f"Splitting {page_count}-page PDF into {len(chunks)} chunks of ~{chunk_size} pages for parallel processing"
         )
@@ -614,15 +420,7 @@ class MarkerPool:
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
-        # Reassemble: concatenate markdown in order, merge image dicts
-        all_markdown = []
-        all_images = {}
-        for markdown, images in results:
-            all_markdown.append(markdown)
-            all_images.update(images)
-
-        combined_markdown = "\n\n".join(all_markdown)
-        return combined_markdown, all_images
+        return marker_runtime.join_chunks(results)
 
 
 _MARKER_KEY_PAGE_RE = re.compile(r"_page_(\d+)_")
@@ -645,27 +443,8 @@ def _marker_key_to_page(key: str) -> int | None:
         return None
 
 
-class MarkerLoader(BasePooledParser):
-    """Public ``BasePooledParser`` facade for the Marker Ray pool.
-
-    Holds a handle to the named ``MarkerPool`` Ray actor and dispatches
-    each ``parse()`` call to it. Marker requires a file path on disk, so
-    ``Document.raw_bytes`` is materialized to a temporary file (via
-    ``Document.as_temporary_file``) before handoff.
-
-    Output: one ``TextBlock`` per page (1-indexed ``page_number``) plus
-    one ``ImageBlock`` per Marker image. Each ``ImageBlock`` carries the
-    ``![](key)`` markdown ref in ``metadata['markdown_ref']`` so a
-    downstream caption stage can substitute the wrapped caption back
-    into the markdown by string match. Captioning is not done here —
-    see :class:`ImageBlock` for the parser→caption contract.
-    """
-
-    PAGE_SEP = "[PAGE_SEP]"
-    # The page is read with int(), which refuses more than 4,300 digits, and the
-    # PDF's own text can contain ``{N}[PAGE_SEP]``: a number no page count reaches
-    # leaves it plain text, as ``PAGE_RE`` does for ``[PAGE_N]``.
-    _PAGE_MARKER_RE = re.compile(r"\{(\d{1,9})\}" + re.escape(PAGE_SEP))
+class RayMarkerConversion:
+    """``MarkerConversion`` through the named ``MarkerPool`` Ray actor."""
 
     def __init__(self) -> None:
         self.config = load_config()
@@ -673,7 +452,7 @@ class MarkerLoader(BasePooledParser):
     def _pool(self) -> MarkerPool:
         """Look up the named ``MarkerPool`` actor; call once per dispatch.
 
-        Never cached: this loader lives as long as its indexer worker, and
+        Never cached: this conversion lives as long as its indexer worker, and
         ``POST /actors/MarkerPool/restart`` replaces the pool with a new actor,
         so a cached handle would keep dispatching to the killed one. Store the
         result before calling a method on it: Ray's ``ActorMethod`` holds its
@@ -686,6 +465,48 @@ class MarkerLoader(BasePooledParser):
         from services.workers.bootstrap import get_or_create_actor
 
         return get_or_create_actor("MarkerPool", MarkerPool, lifetime="detached")
+
+    async def convert(self, file_path: str) -> tuple[str, dict]:
+        pool = self._pool()
+        try:
+            return await call_ray_actor_with_timeout(
+                pool.process_pdf.remote(file_path),
+                timeout=self.config.loader.marker_timeout,
+                task_description=f"MarkerLoader PDF loading ({file_path})",
+            )
+        except Exception as exc:
+            # The pool raises MemoryError itself, but it reaches here wrapped in
+            # the Ray error: raise the type the conversion promises.
+            if not caused_by(exc, MemoryError):
+                raise
+            raise MemoryError(str(exc)) from exc
+
+
+class MarkerLoader(BasePooledParser):
+    """Public ``BasePooledParser`` facade over a Marker conversion.
+
+    Hands each ``parse()`` call to its ``MarkerConversion`` (the Ray pool:
+    ``RayMarkerConversion``). Marker requires a file path on disk, so
+    ``Document.raw_bytes`` is materialized to a temporary file (via
+    ``Document.as_temporary_file``) before handoff.
+
+    Output: one ``TextBlock`` per page (1-indexed ``page_number``) plus
+    one ``ImageBlock`` per Marker image. Each ``ImageBlock`` carries the
+    ``![](key)`` markdown ref in ``metadata['markdown_ref']`` so a
+    downstream caption stage can substitute the wrapped caption back
+    into the markdown by string match. Captioning is not done here —
+    see :class:`ImageBlock` for the parser→caption contract.
+    """
+
+    PAGE_SEP = PAGE_SEP
+    # The page is read with int(), which refuses more than 4,300 digits, and the
+    # PDF's own text can contain ``{N}[PAGE_SEP]``: a number no page count reaches
+    # leaves it plain text, as ``PAGE_RE`` does for ``[PAGE_N]``.
+    _PAGE_MARKER_RE = re.compile(r"\{(\d{1,9})\}" + re.escape(PAGE_SEP))
+
+    def __init__(self, conversion: MarkerConversion) -> None:
+        self.config = load_config()
+        self._conversion = conversion
 
     def supported_types(self) -> list[str]:
         return [DocumentType.PDF.value]
@@ -721,20 +542,13 @@ class MarkerLoader(BasePooledParser):
         return self._split_pages(markdown), self._build_image_blocks(images)
 
     async def _convert_pdf(self, file_path: str):
-        pool = self._pool()
         try:
-            return await call_ray_actor_with_timeout(
-                pool.process_pdf.remote(file_path),
-                timeout=self.config.loader.marker_timeout,
-                task_description=f"MarkerLoader PDF loading ({file_path})",
-            )
-        except Exception as exc:
-            # The Ray wrapper's message names the remote cause, but only as
+            return await self._conversion.convert(file_path)
+        except MemoryError as exc:
+            # The conversion's message names the remote cause, but only as
             # "MemoryError" at the end of a chain of task names. Name the memory
             # failure up front, and the setting that decides it, so an admin
             # can act from the jobs view.
-            if not caused_by(exc, MemoryError):
-                raise
             raise MemoryError(self._out_of_memory_message()) from exc
 
     def _out_of_memory_message(self) -> str:
@@ -832,3 +646,15 @@ class MarkerLoader(BasePooledParser):
         elif not pairs and markdown.strip():
             pairs.append((1, markdown.strip()))
         return pairs
+
+
+__all__ = [
+    "MarkerLoader",
+    "MarkerPool",
+    "MarkerWorker",
+    "RayMarkerConversion",
+    # Moved to ``marker_runtime``; still importable from here.
+    "_apply_parse_memory_limit",
+    "_as_parse_memory_error",
+    "_force_kill_executor",
+]
