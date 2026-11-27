@@ -1443,6 +1443,7 @@ class QueryService:
         disable_reranker: bool = False,
         disable_expansion: bool = False,
         request_id: str | None = None,
+        resolved_request: ResolvedChatRequest | None = None,
     ) -> dict[str, object]:
         """Run contextualization and retrieval diagnostics without answer generation."""
         if query_mode not in {"contextualized", "original", "compare"}:
@@ -1469,7 +1470,7 @@ class QueryService:
             diagnostics=self._retrieval_diagnostics_context(metadata),
         )
         started = time.perf_counter()
-        resolved = self.resolve_chat_request(partitions)
+        resolved = resolved_request if resolved_request is not None else self.resolve_chat_request(partitions)
         result = await self._prepare_chat(
             partitions,
             {"messages": messages, "metadata": metadata},

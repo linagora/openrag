@@ -70,10 +70,8 @@ def resolve_partition_chat_llm(
     ``None`` means "no single owning endpoint — the caller should fall back to
     the default LLM": a direct-LLM request (no partitions), the ``"all"``
     cross-partition sentinel, or a multi-partition request whose partitions
-    disagree (or none set one). Shared by the answering-LLM resolution
-    (``QueryService.resolve_chat_request``) and the chat-completions token preflight
-    (``api.routers.user.chat``), so the LLM that actually answers a request
-    and the budget it was checked against never fall out of sync.
+    disagree (or none set one). The query service uses this rule to select
+    the endpoint whose budget is checked before generation.
     """
     if not partitions or "all" in partitions:
         return None
