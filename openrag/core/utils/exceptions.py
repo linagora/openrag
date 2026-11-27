@@ -315,6 +315,24 @@ class ServiceUnavailableError(OpenRAGError):
         super().__init__(message, code=code, status_code=status_code, **kwargs)
 
 
+class FileFenceUnavailableError(ServiceUnavailableError):
+    """An operation stopped because its file fence could not be renewed (#1430).
+
+    The catalog database did not answer the renewals until the lease was about
+    to end, so the operation stopped before another one could take the file.
+    Nothing else changed the file: unlike ``FileFenceLostError``, retrying is
+    the answer once the database is reachable again.
+    """
+
+    def __init__(self, file_id: str, partition: str, **kwargs):
+        super().__init__(
+            f"The operation on file '{file_id}' in partition '{partition}' stopped: the catalog database "
+            "did not answer while it ran. Please retry.",
+            code="FILE_FENCE_UNAVAILABLE",
+            **kwargs,
+        )
+
+
 class CircuitBreakerOpenError(ServiceUnavailableError):
     """Circuit breaker is open. Maps to HTTP 503."""
 

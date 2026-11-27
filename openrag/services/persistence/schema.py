@@ -322,8 +322,8 @@ _FILE_FENCE_KIND_CHECK = "holder_kind IN ({})".format(",".join(f"'{kind.value}'"
 
 
 # One row per file an operation is changing right now (#1430): indexing (a new
-# file or a replace) or a delete; metadata updates and copies don't take one
-# yet. The primary key is what makes it exclusive. ``holder_id`` is the fencing token:
+# file, a replace or a copy into it), a delete or a metadata update. The
+# primary key is what makes it exclusive. ``holder_id`` is the fencing token:
 # the indexing task id, or a fresh id for a request. A row rather than an
 # advisory lock, because the process that takes an indexing fence (the API at
 # admission) is not the one that releases it (whatever settles the task).

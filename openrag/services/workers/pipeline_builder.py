@@ -467,11 +467,11 @@ class IndexingPipeline:
             # than the pre-fix behaviour, which duplicated on every re-index):
             #   * Not atomic under concurrency. Two overlapping re-indexes of the
             #     *same* file snapshot the same old ids and both keep their new
-            #     set, leaving duplicates. Serializing replace per (partition,
-            #     file_id) belongs with the durable job/lifecycle work (#658/#660).
+            #     set, leaving duplicates. With ``FILE_FENCES=postgres`` the file
+            #     fence serializes replaces per (partition, file_id) (#1430); the
+            #     ``ray`` default still allows the overlap.
             #   * A crash after store but before cleanup can orphan the old
-            #     chunks with no reconciler yet — the reconciliation job is
-            #     tracked in #658/#660.
+            #     chunks; no reconciler removes them yet.
             row.pop(REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY, None)
             row.pop(REPLACE_OLD_CHUNK_IDS_ROW_KEY, None)
             replace = bool(row.get("replace"))

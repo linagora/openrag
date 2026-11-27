@@ -94,6 +94,10 @@ def _document_repo() -> MagicMock:
     )
     repo.update_file_metadata_in_db = AsyncMock(return_value=True)
     repo.add_file_to_partition = AsyncMock(return_value=True)
+    # A copy's target is new unless a test says otherwise.
+    repo.file_exists_in_partition = AsyncMock(return_value=False)
+    # The source's hash as the copy reads it again: unchanged since the caller read it.
+    repo.get_content_sha256 = AsyncMock(return_value="abc123")
     repo.get_indexation_config = AsyncMock(return_value=None)
     return repo
 
@@ -1879,6 +1883,7 @@ async def test_copy_receives_grace_before_catalog_write_and_matches_afterward() 
 
     async def add(**kwargs):
         entries[kwargs["partition"], kwargs["file_id"]] = kwargs["indexed_at"]
+        return True
 
     catalog.get_indexed_documents.side_effect = lookup
     catalog.list_indexed_documents = AsyncMock(side_effect=list_documents)
@@ -3687,7 +3692,20 @@ async def test_a_copy_cancelled_during_its_catalog_write_keeps_its_chunks() -> N
     # deleting the chunks then would leave a registered file with none.
     store = _vector_store()
     repo = _document_repo()
-    repo.add_file_to_partition = AsyncMock(side_effect=asyncio.CancelledError())
+    source_record = repo.get_file_metadata.return_value
+    committed: dict[str, str] = {}
+
+    async def commit_then_cancel(**kwargs) -> None:
+        committed["indexed_at"] = kwargs["indexed_at"].isoformat()
+        raise asyncio.CancelledError()
+
+    async def read_metadata(file_id, _partition) -> dict | None:
+        if file_id == "copy-1":
+            return {"file_id": "copy-1", "indexed_at": committed["indexed_at"]} if committed else None
+        return source_record
+
+    repo.add_file_to_partition = AsyncMock(side_effect=commit_then_cancel)
+    repo.get_file_metadata = AsyncMock(side_effect=read_metadata)
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=_task_state_manager(),

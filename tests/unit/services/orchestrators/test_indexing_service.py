@@ -90,8 +90,11 @@ class FakeDispatcher:
     async def update_file_metadata(self, file_id, metadata, partition, user):
         self.updated.append((file_id, metadata, partition, user))
 
-    async def copy_file(self, file_id, metadata, partition, user, *, quota_reservation_id=None, **destination):
+    async def copy_file(
+        self, file_id, metadata, partition, user, *, deduplicate=False, quota_reservation_id=None, **destination
+    ):
         self.copied.append((file_id, metadata, partition, user))
+        self.copy_deduplicate = deduplicate
         self.copy_reservations.append(quota_reservation_id)
         self.copy_destination = destination
 
@@ -1028,6 +1031,8 @@ async def test_copy_file_preserves_content_hash_when_deduplication_is_enabled():
     )
 
     assert disp.copied[0][1]["content_sha256"] == "abc123"
+    # The dispatcher reads the hash again with its snapshot, even one this read found empty.
+    assert disp.copy_deduplicate is True
 
 
 @pytest.mark.asyncio

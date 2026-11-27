@@ -549,7 +549,9 @@ async def patch_file(
 - Requires editor access to destination partition
 
 **Response:**
-Returns 201 Created on successful copy.
+Returns 201 Created on successful copy, 409 (`DOCUMENT_ALREADY_EXISTS`) when
+`file_id` already exists in the destination partition, and 404 when the source
+file or the destination partition doesn't exist.
 """,
 )
 async def copy_file_between_partitions(

@@ -49,6 +49,17 @@ SELECT partition_name, file_id, holder_kind, holder_id, acquired_at, expires_at
  WHERE partition_name = $1 AND file_id = $2
 """
 
+# The fence while its lease runs. Unlike _ACQUIRE_SQL, a terminal job does not
+# free an index fence here: a job can turn FAILED while its worker still writes
+# (fail_orphaned_jobs at startup), and only the lease is kept fresh by the
+# holder that is actually running.
+_LIVE_SQL = """
+SELECT partition_name, file_id, holder_kind, holder_id, acquired_at, expires_at
+  FROM file_fences
+ WHERE partition_name = $1 AND file_id = $2
+   AND expires_at > now()
+"""
+
 # Each retry means the holder released the fence between the two statements;
 # a handful bounds a pathological loop without ever being reached in practice.
 _ACQUIRE_ATTEMPTS = 5
@@ -70,7 +81,11 @@ class PgFileFenceRepository(FileFenceRepository):
         kind: FileFenceKind,
         holder_id: str,
         ttl_seconds: float,
+        take_over_finished_task: bool = True,
     ) -> FileFence:
+        # No status matches an empty list: an unexpired INDEX fence then stays
+        # with its task whatever its jobs row says.
+        finished_statuses = _TERMINAL_JOB_STATUSES if take_over_finished_task else []
         for _ in range(_ACQUIRE_ATTEMPTS):
             row = await self.pool.fetchrow(
                 _ACQUIRE_SQL,
@@ -79,7 +94,7 @@ class PgFileFenceRepository(FileFenceRepository):
                 kind.value,
                 holder_id,
                 float(ttl_seconds),
-                _TERMINAL_JOB_STATUSES,
+                finished_statuses,
             )
             if row is None:
                 row = await self.pool.fetchrow(_HOLDER_SQL, partition, file_id)
@@ -186,6 +201,10 @@ class PgFileFenceRepository(FileFenceRepository):
             partition,
             file_id,
         )
+        return _row_to_fence(row) if row is not None else None
+
+    async def get_live(self, *, partition: str, file_id: str) -> FileFence | None:
+        row = await self.pool.fetchrow(_LIVE_SQL, partition, file_id)
         return _row_to_fence(row) if row is not None else None
 
 

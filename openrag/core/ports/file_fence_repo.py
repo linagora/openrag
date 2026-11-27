@@ -1,9 +1,9 @@
 """File fence repository interface (#1430).
 
 One fence per ``(partition, file_id)``, held by at most one operation at a
-time: indexing (a new file or a replace) or a delete. Metadata updates and
-copies don't take one yet. The fence lives in the catalog database, so it holds
-for every process that shares it, whatever runs the operation.
+time: indexing (a new file or a replace, or a copy into it), a delete or a
+metadata update. The fence lives in the catalog database, so it holds for
+every process that shares it, whatever runs the operation.
 
 The holder id is the fencing token. An indexing fence is held by its task id
 and released by whichever process settles the task, so it is a row with an
@@ -32,13 +32,14 @@ class FileFenceRepository(ABC):
         kind: FileFenceKind,
         holder_id: str,
         ttl_seconds: float,
+        take_over_finished_task: bool = True,
     ) -> FileFence:
         """Take the fence if it is free, and return whoever holds it now.
 
         The caller holds the fence when the returned ``holder_id`` is its own.
-        A fence is free when nobody holds it, when its lease has expired, or
-        when it is an ``INDEX`` fence whose task's ``jobs`` row is in a
-        terminal state. Acquiring again with the same ``holder_id`` renews it,
+        A fence is free when nobody holds it, when its lease has expired, or,
+        with ``take_over_finished_task``, when it is an ``INDEX`` fence whose
+        task's ``jobs`` row is in a terminal state. Acquiring again with the same ``holder_id`` renews it,
         so a retried admission is harmless. The partition row must exist.
         """
 
@@ -80,3 +81,14 @@ class FileFenceRepository(ABC):
     @abstractmethod
     async def get(self, *, partition: str, file_id: str) -> FileFence | None:
         """The current fence, expired or not, or ``None``."""
+
+    @abstractmethod
+    async def get_live(self, *, partition: str, file_id: str) -> FileFence | None:
+        """The fence whose lease still runs, or ``None``.
+
+        The lease is what a running holder keeps renewing, so this is the
+        fence an operation may still be writing under. Unlike ``acquire``, a
+        terminal ``jobs`` row does not free an ``INDEX`` fence here: a job can
+        turn terminal while its worker still writes. A row whose release
+        failed stops counting once its lease ends.
+        """
