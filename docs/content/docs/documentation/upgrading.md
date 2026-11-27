@@ -145,7 +145,7 @@ who did go over their quota can upload again once their file count is below the
 limit: they delete enough files to get below it, or an administrator raises the
 quota above their current count.
 
-## UNRELEASED: credential checks and embedder sync
+## OpenRAG 2.3.6: credential checks and embedder sync
 
 Compose now checks service credentials before PostgreSQL, MinIO, Milvus initialization,
 and bundled Grafana start. The first startup may need to download the `python:3.12-slim`

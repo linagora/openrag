@@ -21,7 +21,7 @@ x-openrag-env: &openrag_env
   OPENRAG_ADMIN_UI_PROXY_IP: ${OPENRAG_ADMIN_UI_PROXY_IP:-172.31.253.200}
 
 x-openrag: &openrag_template
-  image: linagoraai/openrag:v2.3.5
+  image: linagoraai/openrag:v2.3.6
   # Start as root so entrypoint.sh can grant GID-0 write on the bind-mounted
   # writable dirs (data/, the HF cache) — which a non-root container
   # can't write when Docker auto-creates them root-owned — then it immediately
@@ -122,7 +122,7 @@ x-vllm: &vllm_template
 services:
   # ── Admin UI (React SPA + nginx, same-origin reverse proxy to the API) ──
   admin-ui:
-    image: linagoraai/openrag-admin-ui:v2.3.5
+    image: linagoraai/openrag-admin-ui:v2.3.6
     build:
       context: ../..
       dockerfile: infra/docker/ui.Dockerfile
