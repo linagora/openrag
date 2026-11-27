@@ -12,7 +12,6 @@ The OpenRAG HTTP dashboard starts with a service-level health summary and progre
 Start OpenRAG with its monitoring overlay from `infra/compose`:
 
 ```bash
-export SHARED_ENV="$PWD/.env"
 docker compose --env-file .env \
   -f docker-compose.yaml \
   -f monitoring.docker-compose.yaml \

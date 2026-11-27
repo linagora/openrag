@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 
 from core.config.model_endpoints import ModelEndpointRow, ModelEndpointType
 from core.models.readiness import ModelEndpointDiscovery
@@ -38,6 +38,7 @@ class ModelEndpointRepository(ABC):
         model_type: str,
         *,
         guard: EndpointEditGuard | None = None,
+        extra_patch: Mapping[str, object] | None = None,
         **fields: object,
     ) -> ModelEndpointRow | None:
         """Apply ``fields`` to the endpoint; ``None`` if it does not exist.
@@ -46,6 +47,10 @@ class ModelEndpointRepository(ABC):
         before the write, in one transaction: a file being recorded against
         this endpoint meanwhile either commits first, and the guard's usage read
         counts it, or waits for the edit and sees it (#958).
+
+        ``extra_patch`` atomically merges only the supplied keys into the
+        existing JSON object. It is for credential updates that must preserve
+        concurrent, unrelated endpoint settings.
         """
 
     @abstractmethod
