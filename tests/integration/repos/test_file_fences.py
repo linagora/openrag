@@ -70,6 +70,27 @@ async def test_a_free_fence_is_taken(store):
     assert await store.file_fence_repo.get(partition=PARTITION, file_id=FILE_ID) == fence
 
 
+async def test_acquiring_on_the_callers_connection_rolls_back_with_its_transaction(store):
+    async with store.pool.acquire() as connection:
+        transaction = connection.transaction()
+        await transaction.start()
+        try:
+            fence = await store.file_fence_repo.acquire(
+                partition=PARTITION,
+                file_id=FILE_ID,
+                kind=FileFenceKind.INDEX,
+                holder_id="queue-job",
+                ttl_seconds=HOUR,
+                _connection=connection,
+            )
+            assert fence.holder_id == "queue-job"
+            assert await store.file_fence_repo.get(partition=PARTITION, file_id=FILE_ID) is None
+        finally:
+            await transaction.rollback()
+
+    assert await store.file_fence_repo.get(partition=PARTITION, file_id=FILE_ID) is None
+
+
 async def test_a_held_fence_reports_its_holder(store):
     await _acquire(store, "task-a")
 

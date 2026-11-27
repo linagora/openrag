@@ -70,9 +70,12 @@ class PgFileFenceRepository(FileFenceRepository):
         kind: FileFenceKind,
         holder_id: str,
         ttl_seconds: float,
+        _connection: asyncpg.Connection | None = None,
     ) -> FileFence:
+        """Use the caller's transaction when acquiring a fence for queue admission."""
+        connection = self.pool if _connection is None else _connection
         for _ in range(_ACQUIRE_ATTEMPTS):
-            row = await self.pool.fetchrow(
+            row = await connection.fetchrow(
                 _ACQUIRE_SQL,
                 partition,
                 file_id,
@@ -82,7 +85,7 @@ class PgFileFenceRepository(FileFenceRepository):
                 _TERMINAL_JOB_STATUSES,
             )
             if row is None:
-                row = await self.pool.fetchrow(_HOLDER_SQL, partition, file_id)
+                row = await connection.fetchrow(_HOLDER_SQL, partition, file_id)
             if row is not None:
                 return _row_to_fence(row)
         raise RuntimeError(f"Could not read the fence of file {file_id!r} in partition {partition!r}")

@@ -52,6 +52,7 @@ class RDBConfig(ConfigMixin):
     user: str = "root"
     password: str = Field(default="", repr=False)
     default_file_quota: int = -1
+    indexing_max_unfinished_jobs_per_user: int | None = Field(default=None, ge=1)
     # `database` is intentionally optional — historically the database name is
     # derived from the Milvus collection name (`partitions_for_collection_{collection}`)
     # by the caller wiring the catalog store. The connection manager raises if

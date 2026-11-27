@@ -169,7 +169,13 @@ async def openrag_exception_handler(request: Request, exc: OpenRAGError) -> JSON
         # Copy so we never mutate the exception's own ``extra`` dict —
         # the same instance may be re-raised / logged elsewhere.
         body["extra"] = {**body.get("extra", {}), "request_id": request_id}
-    return JSONResponse(status_code=status_code, content=body)
+    retry_after = exc.extra.get("retry_after")
+    headers = (
+        {"Retry-After": str(retry_after)}
+        if status_code == 429 and type(retry_after) is int and retry_after > 0
+        else None
+    )
+    return JSONResponse(status_code=status_code, content=body, headers=headers)
 
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:

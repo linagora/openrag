@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
 
+from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.model_endpoints import ModelEndpointConfig
 from core.indexing.parsers.document_parser import DocumentParser
 from core.indexing.parsers.progress import report_parser_substage
@@ -168,13 +169,7 @@ class ParserDispatcher(DocumentParser):
         return content_type.value
 
     def _resolve_pdf_backend(self) -> str:
-        configured = self._config.loader.file_loaders.pdf
-        backend = _PDF_BACKENDS.get(configured)
-        if backend is None:
-            raise ValueError(
-                f"Unsupported PDF loader configuration {configured!r}; expected one of {sorted(_PDF_BACKENDS)}"
-            )
-        return backend
+        return _configured_pdf_backend(self._config)
 
     def _resolve_audio_backend(self, ext: str) -> str:
         configured = _configured_audio_loader(self._config, ext)
@@ -347,6 +342,33 @@ _BUILDERS: dict[str, Any] = {
         charts=d._config.loader.xlsx_charts,
     ),
 }
+
+
+def _configured_pdf_backend(config: Any) -> str:
+    configured = config.loader.file_loaders.pdf
+    backend = _PDF_BACKENDS.get(configured)
+    if backend is None:
+        raise ValueError(
+            f"Unsupported PDF loader configuration {configured!r}; expected one of {sorted(_PDF_BACKENDS)}"
+        )
+    return backend
+
+
+def lane_for(
+    filename: str,
+    mimetype: str | None,
+    indexation_config: IndexationPipelineConfig | None,
+    settings: Any,
+) -> Literal["cpu", "gpu"]:
+    """Route to the lane that runs the selected parser."""
+    content_type = Document.detect_content_type(filename, mimetype)
+    if content_type not in {DocumentType.PDF, DocumentType.EML}:
+        return "cpu"
+    # Per-preset overrides apply only to standalone PDFs. EML attachments
+    # use the PDF backend selected by the shared dispatcher.
+    strategy = indexation_config.parsing_strategy if content_type is DocumentType.PDF and indexation_config else None
+    backend = strategy or _configured_pdf_backend(settings)
+    return "gpu" if backend in {"marker", "docling"} else "cpu"
 
 
 def _configured_audio_loader(config: Any, ext: str) -> str | None:

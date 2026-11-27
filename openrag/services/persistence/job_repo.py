@@ -18,7 +18,13 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 import asyncpg
-from core.models.catalog import TERMINAL_TASK_STATES, IndexationJob
+from core.models.catalog import (
+    FILE_FENCE_TTL_SECONDS,
+    TERMINAL_TASK_STATES,
+    DocumentStatus,
+    FileFenceKind,
+    IndexationJob,
+)
 from core.models.stage_progress import (
     DurableStageProgress,
     StageEventStatus,
@@ -29,8 +35,14 @@ from core.models.stage_progress import (
     StageProgressSummary,
     StageProgressWriteResult,
 )
+from core.models.user import FileSlotGrant
 from core.observability.metric_specs import STAGE_VALUES
 from core.ports.job_repo import JobListSnapshot, JobRepository
+from core.utils.exceptions import AuthError, ConflictError, OpenRAGError
+from cryptography.fernet import InvalidToken
+from services.persistence.file_fence_repo import PgFileFenceRepository
+from services.persistence.queue_callback import queue_callback_cipher
+from services.persistence.user_repo import PgUserRepository
 
 _COLUMNS = (
     "id, partition, file_id, filename, user_id, status, error, error_reason, degraded_stages, stage_tracking_version, "
@@ -95,8 +107,16 @@ class _PgJobListSnapshot:
 class PgJobRepository(JobRepository):
     """Store one row per indexing task, keyed by task id."""
 
-    def __init__(self, pool_getter: Callable[[], asyncpg.Pool]) -> None:
+    def __init__(
+        self,
+        pool_getter: Callable[[], asyncpg.Pool],
+        *,
+        max_unfinished_per_user: int | None = None,
+    ) -> None:
         self._pool_getter = pool_getter
+        self._max_unfinished_per_user = max_unfinished_per_user
+        self._user_repo = PgUserRepository(pool_getter)
+        self._file_fence_repo = PgFileFenceRepository(pool_getter)
 
     @property
     def pool(self) -> asyncpg.Pool:
@@ -112,6 +132,133 @@ class PgJobRepository(JobRepository):
     @staticmethod
     def _row_to_job(row: asyncpg.Record) -> IndexationJob:
         return IndexationJob(**dict(row))
+
+    async def enqueue(
+        self,
+        job: IndexationJob,
+        *,
+        default_quota: int,
+        max_unfinished_per_user: int | None = None,
+        replace: bool = False,
+        callback_token: str | None = None,
+    ) -> IndexationJob:
+        """Admit a prepared indexing submission in one Postgres transaction."""
+        if job.status != DocumentStatus.QUEUED or not job.lane or not job.file_id or not job.object_key:
+            raise ValueError("Enqueue requires a queued job with a lane, file ID, and object key.")
+        if job.user_id is None:
+            raise ValueError("Enqueue requires a submitting user.")
+        if max_unfinished_per_user is None:
+            max_unfinished_per_user = self._max_unfinished_per_user
+        if max_unfinished_per_user is not None and max_unfinished_per_user < 1:
+            raise ValueError("The unfinished-job limit must be positive.")
+
+        payload = job.payload or {}
+        reserved_keys = {"callback_token", "callback_token_encrypted", "replace"}
+        if reserved_keys.intersection(payload):
+            raise ValueError("Pass the callback token and replace flag as enqueue arguments.")
+        # Compare the same JSON representation that asyncpg reads back.
+        payload = json.loads(json.dumps({**payload, "replace": replace}, allow_nan=False))
+        cipher = queue_callback_cipher() if callback_token is not None else None
+
+        async with self.pool.acquire() as conn, conn.transaction(isolation="read_committed"):
+            # Serialize retries for this job ID, including unlimited users for
+            # whom quota admission doesn't take a users-row lock.
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f"indexing-enqueue:{job.id}")
+            row = await conn.fetchrow(
+                f"""
+                SELECT {_COLUMNS}, payload - 'callback_token_encrypted' = $2::jsonb AS same_payload
+                FROM jobs WHERE id = $1
+                """,
+                job.id,
+                payload,
+            )
+            if row is not None:
+                existing = self._row_to_job(row)
+                encrypted = (existing.payload or {}).get("callback_token_encrypted")
+                same_token = encrypted is None and callback_token is None
+                if encrypted is not None and cipher is not None:
+                    try:
+                        same_token = cipher.decrypt(encrypted.encode()).decode() == callback_token
+                    except InvalidToken:
+                        same_token = False
+                if (
+                    existing.partition == job.partition
+                    and existing.file_id == job.file_id
+                    and existing.user_id == job.user_id
+                    and existing.filename == job.filename
+                    and existing.object_key == job.object_key
+                    and existing.lane == job.lane
+                    and existing.max_attempts == job.max_attempts
+                    and existing.priority == job.priority
+                    and row["same_payload"]
+                    and same_token
+                ):
+                    return existing
+                raise ConflictError("The job ID belongs to a different submission.", code="INDEXING_JOB_ID_CONFLICT")
+
+            if max_unfinished_per_user is not None:
+                # Hold the lock until commit so the next submission counts
+                # this job, including when quota admission takes no row lock.
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext('openrag.indexing.enqueue.user'), $1::integer)",
+                    job.user_id,
+                )
+                count = await conn.fetchval(
+                    "SELECT count(*) FROM jobs WHERE user_id = $1 AND status IN ('QUEUED', 'SERIALIZING')",
+                    job.user_id,
+                )
+                if count >= max_unfinished_per_user:
+                    raise OpenRAGError(
+                        "The user has reached their unfinished indexing job limit.",
+                        code="INDEXING_QUEUE_LIMIT_REACHED",
+                        status_code=429,
+                        retry_after=60,
+                    )
+
+            if not replace:
+                grant = await self._user_repo.try_reserve_file_slot(
+                    job.user_id, job.id, default_quota=default_quota, _connection=conn
+                )
+                if grant is FileSlotGrant.DENIED:
+                    raise AuthError("The user has reached their file quota.", code="FILE_QUOTA_EXCEEDED")
+
+            fence = await self._file_fence_repo.acquire(
+                partition=job.partition,
+                file_id=job.file_id,
+                kind=FileFenceKind.INDEX,
+                holder_id=job.id,
+                ttl_seconds=FILE_FENCE_TTL_SECONDS,
+                _connection=conn,
+            )
+            if fence.holder_id != job.id and not (replace and fence.kind is FileFenceKind.INDEX):
+                codes = {
+                    FileFenceKind.INDEX: "DOCUMENT_INDEXING_IN_PROGRESS",
+                    FileFenceKind.DELETE: "DOCUMENT_DELETE_IN_PROGRESS",
+                    FileFenceKind.METADATA: "DOCUMENT_METADATA_UPDATE_IN_PROGRESS",
+                }
+                raise ConflictError("Another operation holds the file fence.", code=codes[fence.kind])
+
+            if cipher is not None and callback_token is not None:
+                payload["callback_token_encrypted"] = cipher.encrypt(callback_token.encode()).decode()
+            row = await conn.fetchrow(
+                f"""
+                INSERT INTO jobs (id, partition, file_id, filename, user_id, status, lane, payload, object_key,
+                                  max_attempts, priority)
+                VALUES ($1, $2, $3, $4, $5, 'QUEUED', $6, $7, $8, $9, $10)
+                RETURNING {_COLUMNS}
+                """,
+                job.id,
+                job.partition,
+                job.file_id,
+                job.filename,
+                job.user_id,
+                job.lane,
+                payload,
+                job.object_key,
+                job.max_attempts,
+                job.priority,
+            )
+            return self._row_to_job(row)
 
     async def upsert_job(self, job: IndexationJob) -> IndexationJob:
         row = await self.pool.fetchrow(
