@@ -10,6 +10,7 @@ from core.utils.exceptions import ConflictError, OpenRAGError
 from cryptography.fernet import Fernet, InvalidToken
 from services.persistence.queue_callback import queue_callback_cipher
 
+from .test_file_fences import _wait_until_blocked_by
 from .test_file_quota_reservations import _create_user, _file_count, _reservations
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
@@ -98,6 +99,45 @@ async def test_unfinished_job_cap_applies_to_admin_and_unlimited_users(postgres_
     assert await postgres_store.job_repo.get_job(second.id) is None
     assert await _reservations(postgres_store, admin) == 0
     await postgres_store.job_repo.enqueue(second, default_quota=-1)
+
+
+@pytest.mark.parametrize("is_admin", [False, True])
+async def test_unfinished_job_cap_serializes_concurrent_submissions(postgres_store, submission, monkeypatch, is_admin):
+    user_id = await _create_user(postgres_store, is_admin=is_admin)
+    first = submission.model_copy(update={"user_id": user_id})
+    second = first.model_copy(update={"id": "second", "file_id": "other"})
+    repository = postgres_store.job_repo
+    acquire_fence = repository._file_fence_repo.acquire
+    fence_reached = asyncio.get_running_loop().create_future()
+    release_first = asyncio.Event()
+
+    async def pause_first_before_insert(**kwargs):
+        if kwargs["holder_id"] == first.id:
+            fence_reached.set_result(kwargs["_connection"])
+            await release_first.wait()
+        return await acquire_fence(**kwargs)
+
+    monkeypatch.setattr(repository._file_fence_repo, "acquire", pause_first_before_insert)
+
+    async def enqueue(job):
+        return await repository.enqueue(job, default_quota=-1, max_unfinished_per_user=1)
+
+    first_task = asyncio.create_task(enqueue(first))
+    second_task = None
+    try:
+        connection = await asyncio.wait_for(fence_reached, timeout=5)
+        second_task = asyncio.create_task(enqueue(second))
+        await _wait_until_blocked_by(postgres_store, connection)
+    finally:
+        release_first.set()
+        results = await asyncio.gather(*(task for task in (first_task, second_task) if task), return_exceptions=True)
+
+    accepted, refused = results
+    assert accepted.id == first.id
+    assert isinstance(refused, OpenRAGError)
+    assert refused.code == "INDEXING_QUEUE_LIMIT_REACHED"
+    assert await repository.get_job(second.id) is None
+    assert await postgres_store.file_fence_repo.get(partition=second.partition, file_id=second.file_id) is None
 
 
 async def test_quota_refusal_leaves_no_job_or_fence(postgres_store, submission):

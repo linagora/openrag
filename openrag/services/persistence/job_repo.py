@@ -160,7 +160,7 @@ class PgJobRepository(JobRepository):
         payload = json.loads(json.dumps({**payload, "replace": replace}, allow_nan=False))
         cipher = queue_callback_cipher() if callback_token is not None else None
 
-        async with self.pool.acquire() as conn, conn.transaction():
+        async with self.pool.acquire() as conn, conn.transaction(isolation="read_committed"):
             # Serialize retries for this job ID, including unlimited users for
             # whom quota admission doesn't take a users-row lock.
             await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f"indexing-enqueue:{job.id}")
@@ -191,6 +191,12 @@ class PgJobRepository(JobRepository):
                 raise ConflictError("The job ID belongs to a different submission.", code="INDEXING_JOB_ID_CONFLICT")
 
             if max_unfinished_per_user is not None:
+                # Hold the lock until commit so the next submission counts
+                # this job, including when quota admission takes no row lock.
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext('openrag.indexing.enqueue.user'), $1::integer)",
+                    job.user_id,
+                )
                 count = await conn.fetchval(
                     "SELECT count(*) FROM jobs WHERE user_id = $1 AND status IN ('QUEUED', 'SERIALIZING')",
                     job.user_id,
