@@ -1,4 +1,4 @@
-"""Add queue fields to existing indexing jobs.
+"""Add queue fields to indexing jobs and files.
 
 Revision ID: d9f1c27b5e40
 Revises: f4a5b6c7d8e9
@@ -78,6 +78,9 @@ def _create_queue_index(name: str, columns: list[str | TextClause], predicate: s
 
 
 def upgrade() -> None:
+    if not column_exists("files", "indexed_by_job"):
+        op.add_column("files", sa.Column("indexed_by_job", sa.Text(), nullable=True))
+
     for column in _queue_columns():
         if not column_exists(_TABLE, column.name):
             op.add_column(_TABLE, column)
@@ -91,6 +94,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if column_exists("files", "indexed_by_job"):
+        op.drop_column("files", "indexed_by_job")
+
     op.execute("ALTER TABLE jobs RESET (fillfactor, autovacuum_vacuum_scale_factor)")
     for index in (_RUNNING_INDEX, _CLAIM_INDEX):
         if index_exists(_TABLE, index):

@@ -267,6 +267,8 @@ files = Table(
     Column("relationship_id", String, nullable=True, index=True),
     Column("parent_id", String, nullable=True, index=True),
     Column("content_sha256", String(64), nullable=True),
+    # A retry can recognize the catalog row committed by its own job.
+    Column("indexed_by_job", Text, nullable=True),
     Column("chunk_count", Integer, nullable=True),
     Column(
         "indexed_at",

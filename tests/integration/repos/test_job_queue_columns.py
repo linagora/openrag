@@ -56,6 +56,8 @@ async def test_upgrade_downgrade_upgrade_preserves_ray_jobs(migration_database):
     conn = await asyncpg.connect(dsn)
     try:
         await conn.execute("INSERT INTO jobs (id, partition, status) VALUES ('old-ray', 'default', 'QUEUED')")
+        await conn.execute("INSERT INTO partitions (partition, created_at) VALUES ('queue-test', now())")
+        await conn.execute("INSERT INTO files (file_id, partition_name) VALUES ('existing-file', 'queue-test')")
         await asyncio.to_thread(command.upgrade, cfg, REVISION)
 
         row = await conn.fetchrow(
@@ -64,6 +66,9 @@ async def test_upgrade_downgrade_upgrade_preserves_ray_jobs(migration_database):
         assert row is not None
         assert (row["lane"], row["attempt"], row["max_attempts"], row["cancel_requested"]) == (None, 0, 3, False)
         assert row["available_at"] is not None
+        assert await conn.fetchrow("SELECT indexed_by_job FROM files WHERE file_id = 'existing-file'") == (None,)
+        await conn.execute("UPDATE files SET indexed_by_job = 'queue-job' WHERE file_id = 'existing-file'")
+        assert await conn.fetchval("SELECT indexed_by_job FROM files WHERE file_id = 'existing-file'") == "queue-job"
         indexes = await _queue_indexes(conn)
         assert "(lane, priority DESC, available_at)" in indexes["ix_jobs_queue_claim"]
         assert "QUEUED" in indexes["ix_jobs_queue_claim"]
@@ -76,10 +81,13 @@ async def test_upgrade_downgrade_upgrade_preserves_ray_jobs(migration_database):
         assert await conn.fetchval("SELECT status FROM jobs WHERE id = 'old-ray'") == "QUEUED"
         with pytest.raises(asyncpg.UndefinedColumnError):
             await conn.fetchval("SELECT lane FROM jobs")
+        with pytest.raises(asyncpg.UndefinedColumnError):
+            await conn.fetchval("SELECT indexed_by_job FROM files")
 
         await asyncio.to_thread(command.upgrade, cfg, REVISION)
         assert await _queue_indexes(conn) == indexes
         assert await conn.fetchval("SELECT lane FROM jobs WHERE id = 'old-ray'") is None
+        assert await conn.fetchrow("SELECT indexed_by_job FROM files WHERE file_id = 'existing-file'") == (None,)
     finally:
         await conn.close()
 
