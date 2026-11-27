@@ -364,7 +364,7 @@ async def test_callback_token_is_redacted_from_logged_errors(monkeypatch: pytest
 
         mock_logger.warning.assert_called_once()
         assert "s3cret-token" not in mock_logger.warning.call_args[1]["error"]
-        assert "REDACTED" in mock_logger.warning.call_args[1]["error"]
+        assert "ConnectError" in mock_logger.warning.call_args[1]["error"]
         assert "ConnectError" in mock_logger.warning.call_args[1]["error"]
 
 
@@ -539,3 +539,77 @@ async def test_a_percent_encoded_secret_in_the_callback_path_is_not_logged(
         assert "PATH" not in logged["error"]
         assert "%20" not in logged["error"]
         assert "cozy.example.com" in logged["error"]
+
+
+# Issue #1337: the logged error must not contain anything from the callback URL
+# except the host, whatever the failure looks like.
+
+
+async def _logged_error(monkeypatch: pytest.MonkeyPatch, callback_url: str, handler, callback_token=None) -> str:
+    """Run a callback that fails with *handler* and return the logged error."""
+    _patch_async_client(monkeypatch, handler)
+    with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
+        await send_indexing_callback(callback_url, "p", "f1", "success", callback_token=callback_token)
+    mock_logger.warning.assert_called_once()
+    return mock_logger.warning.call_args[1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_token_inside_the_path_is_not_logged(monkeypatch: pytest.MonkeyPatch) -> None:
+    error = await _logged_error(
+        monkeypatch,
+        "https://cozy.example.com/hooks/TOK123/pathsecret",
+        lambda request: httpx.Response(500),
+        callback_token="TOK123",
+    )
+    assert error == "HTTPStatusError (HTTP 500) for https://cozy.example.com"
+
+
+@pytest.mark.asyncio
+async def test_a_username_repeated_in_the_query_does_not_leak_the_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    error = await _logged_error(
+        monkeypatch,
+        "https://alice@cozy.example.com/cb?user=alice&sig=SIGSECRET",
+        lambda request: httpx.Response(500),
+    )
+    assert error == "HTTPStatusError (HTTP 500) for https://cozy.example.com"
+
+
+@pytest.mark.asyncio
+async def test_the_url_fragment_is_not_logged(monkeypatch: pytest.MonkeyPatch) -> None:
+    error = await _logged_error(
+        monkeypatch,
+        "https://cozy.example.com/cb?x=1#fragsecret",
+        lambda request: httpx.Response(500),
+    )
+    assert error == "HTTPStatusError (HTTP 500) for https://cozy.example.com"
+
+
+@pytest.mark.asyncio
+async def test_the_redirect_location_is_not_logged(monkeypatch: pytest.MonkeyPatch) -> None:
+    error = await _logged_error(
+        monkeypatch,
+        "https://cozy.example.com/cb",
+        lambda request: httpx.Response(302, headers={"Location": "https://cozy.example.com/x?session=SESSSECRET"}),
+    )
+    assert error == "HTTPStatusError (HTTP 302) for https://cozy.example.com"
+
+
+@pytest.mark.asyncio
+async def test_a_short_username_does_not_corrupt_the_error_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Replacing the username "Read" everywhere used to log "REDACTEDTimeout".
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("")
+
+    error = await _logged_error(monkeypatch, "https://Read@cozy.example.com/cb", handler)
+    assert error == "ReadTimeout for https://cozy.example.com"
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_url_does_not_log_part_of_the_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    # urlparse reads "pa" as the port and quotes it in its error message.
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must never be called
+        raise AssertionError("no HTTP call should be made for an invalid callback_url")
+
+    error = await _logged_error(monkeypatch, "https://user:pa/ss@host/x", handler)
+    assert error == "ValueError"

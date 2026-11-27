@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from urllib.parse import ParseResult, urlparse
+from urllib.parse import urlparse
 
 import httpx
 from core.config import load_config
@@ -37,23 +37,17 @@ def _allow_private_callback_urls() -> bool:
         return False
 
 
-def _url_credentials(callback_url: str, parsed: ParseResult) -> tuple[str, ...]:
-    """Credential substrings of *callback_url* to scrub from any logged message."""
-    secrets: list[str] = []
-    if "@" in parsed.netloc:
-        secrets.append(parsed.netloc.rsplit("@", 1)[0])
-    for part in (parsed.password, parsed.username):
-        if part:
-            secrets.append(part)
-    try:
-        userinfo = httpx.URL(callback_url).userinfo.decode("ascii", errors="ignore")
-    except Exception:
-        userinfo = ""
-    if userinfo:
-        secrets.append(userinfo)
-        secrets.extend(part for part in userinfo.split(":", 1) if part)
-    # Longest first, so redacting "user" can't leave "REDACTED:pass" behind.
-    return tuple(sorted(set(secrets), key=len, reverse=True))
+def _describe_error(exc: Exception, safe_url: str) -> str:
+    """Return a description of a failed callback that is safe to log.
+
+    We don't log str(exc): httpx puts the full URL (credentials, path, query,
+    fragment) and the redirect location in its error messages. We only keep
+    the exception type, the HTTP status code and the host.
+    """
+    description = type(exc).__name__
+    if isinstance(exc, httpx.HTTPStatusError):
+        description += f" (HTTP {exc.response.status_code})"
+    return f"{description} for {safe_url}"
 
 
 async def send_indexing_callback(
@@ -83,14 +77,14 @@ async def send_indexing_callback(
             netloc = f"{netloc}:{parsed.port}"
         # Scheme and host only: path/query/userinfo can carry secrets.
         safe_url = f"{parsed.scheme}://{netloc}"
-        url_secrets = _url_credentials(callback_url, parsed)
     except Exception as exc:
         logger.warning(
             "Invalid indexing callback_url; skipping callback",
             partition=partition,
             file_id=file_id,
             status=status,
-            error=str(exc),
+            # Only the type: the message can quote part of the password (parsed as the port).
+            error=type(exc).__name__,
         )
         return
 
@@ -123,32 +117,11 @@ async def send_indexing_callback(
             response = await client.post(callback_url, json=payload, headers=headers)
             response.raise_for_status()
     except Exception as exc:
-        error_message = f"{type(exc).__name__}: {exc}"
-        for secret in url_secrets:
-            error_message = error_message.replace(secret, "REDACTED")
-        if callback_token:
-            error_message = error_message.replace(callback_token, "REDACTED")
-        if len(parsed.path) > 1:
-            error_message = error_message.replace(parsed.path, "/REDACTED")
-            try:
-                encoded_path = httpx.URL(callback_url).raw_path.split(b"?", 1)[0].decode("ascii", errors="ignore")
-                if encoded_path and encoded_path != parsed.path:
-                    error_message = error_message.replace(encoded_path, "/REDACTED")
-            except Exception:
-                pass
-        if parsed.query:
-            error_message = error_message.replace(parsed.query, "REDACTED")
-            try:
-                encoded_query = httpx.URL(callback_url).query.decode("ascii", errors="ignore")
-                if encoded_query:
-                    error_message = error_message.replace(encoded_query, "REDACTED")
-            except Exception:
-                pass
         logger.warning(
             "Failed to send indexing callback",
             callback_url=safe_url,
             partition=partition,
             file_id=file_id,
             status=status,
-            error=error_message,
+            error=_describe_error(exc, safe_url),
         )
