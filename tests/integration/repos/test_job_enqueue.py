@@ -53,6 +53,23 @@ async def test_concurrent_retries_return_the_same_job_and_reserve_one_slot(postg
         await postgres_store.job_repo.enqueue(submission.model_copy(update={"lane": "gpu"}), default_quota=-1)
 
 
+async def test_retry_payload_ignores_object_key_order_but_preserves_json_types(postgres_store, submission):
+    repository = postgres_store.job_repo
+    first = submission.model_copy(update={"payload": {"options": {"flag": True, "items": [False, 1]}}})
+    stored = await repository.enqueue(first, default_quota=-1)
+
+    reordered = first.model_copy(update={"payload": {"options": {"items": [False, 1.0], "flag": True}}})
+    assert await repository.enqueue(reordered, default_quota=-1) == stored
+
+    for options in ({"flag": 1, "items": [False, 1]}, {"flag": True, "items": [0, 1]}):
+        changed = first.model_copy(update={"payload": {"options": options}})
+        with pytest.raises(ConflictError, match="INDEXING_JOB_ID_CONFLICT"):
+            await repository.enqueue(changed, default_quota=-1)
+
+    assert await repository.get_job(first.id) == stored
+    assert await _reservations(postgres_store, first.user_id) == 1
+
+
 @pytest.mark.parametrize(
     ("kind", "replace", "code"),
     [

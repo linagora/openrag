@@ -164,11 +164,17 @@ class PgJobRepository(JobRepository):
             # Serialize retries for this job ID, including unlimited users for
             # whom quota admission doesn't take a users-row lock.
             await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f"indexing-enqueue:{job.id}")
-            row = await conn.fetchrow(f"SELECT {_COLUMNS} FROM jobs WHERE id = $1", job.id)
+            row = await conn.fetchrow(
+                f"""
+                SELECT {_COLUMNS}, payload - 'callback_token_encrypted' = $2::jsonb AS same_payload
+                FROM jobs WHERE id = $1
+                """,
+                job.id,
+                payload,
+            )
             if row is not None:
                 existing = self._row_to_job(row)
-                saved_payload = dict(existing.payload or {})
-                encrypted = saved_payload.pop("callback_token_encrypted", None)
+                encrypted = (existing.payload or {}).get("callback_token_encrypted")
                 same_token = encrypted is None and callback_token is None
                 if encrypted is not None and cipher is not None:
                     try:
@@ -184,7 +190,7 @@ class PgJobRepository(JobRepository):
                     and existing.lane == job.lane
                     and existing.max_attempts == job.max_attempts
                     and existing.priority == job.priority
-                    and saved_payload == payload
+                    and row["same_payload"]
                     and same_token
                 ):
                     return existing
