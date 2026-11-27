@@ -47,7 +47,7 @@ def test_compose_proxy_trust(tmp_path, scenario):
     project_env.write_text(project_values, encoding="utf-8")
     shared_env = tmp_path / "shared.env"
     shared_env.write_text(shared_values, encoding="utf-8")
-    render_env = {"SHARED_ENV": str(shared_env)}
+    render_env = {"OPENRAG_ENV_FILE": str(shared_env)}
     if scenario == "custom-subnet":
         render_env.update(
             OPENRAG_COMPOSE_SUBNET="172.31.252.0/24",

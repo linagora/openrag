@@ -31,6 +31,8 @@ class DocumentType(str, Enum):
     VIDEO = "video"
     DOCX = "docx"
     PPTX = "pptx"
+    ODT = "odt"
+    ODP = "odp"
     DOC = "doc"
     EML = "eml"
 
@@ -65,6 +67,8 @@ _EXTENSION_TYPES: dict[str, DocumentType] = {
     "flv": DocumentType.VIDEO,
     "docx": DocumentType.DOCX,
     "pptx": DocumentType.PPTX,
+    "odt": DocumentType.ODT,
+    "odp": DocumentType.ODP,
     "doc": DocumentType.DOC,
     "eml": DocumentType.EML,
 }
@@ -322,6 +326,8 @@ _DEFAULT_TEMPFILE_SUFFIX: dict[DocumentType, str] = {
     DocumentType.PPTX: ".pptx",
     DocumentType.XLS: ".xls",
     DocumentType.XLSX: ".xlsx",
+    DocumentType.ODT: ".odt",
+    DocumentType.ODP: ".odp",
     DocumentType.DOC: ".doc",
     DocumentType.AUDIO: ".wav",
     DocumentType.VIDEO: ".mp4",

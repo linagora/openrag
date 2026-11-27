@@ -63,7 +63,6 @@ x-openrag: &openrag_template
     # (or a writable host path) override the running code. Uncomment for local
     # development; keep it off in production.
     # - ../../openrag:/app/openrag # For dev mode
-    - ${SHARED_ENV:-./.env}:/ray_mount/.env # Shared environment variables (falls back to ./.env)
   ports:
     - ${APP_PORT:-8080}:${APP_iPORT:-8080}
     # The Ray dashboard (8265) is not published: it has no authentication and
@@ -76,7 +75,7 @@ x-openrag: &openrag_template
         - openrag
   env_file:
     - ./proxy-defaults.env
-    - ${SHARED_ENV:-.env}
+    - ${OPENRAG_ENV_FILE:-.env}
   environment:
     <<: *openrag_env
   shm_size: 10.24gb
@@ -189,11 +188,36 @@ services:
         condition: service_healthy
     # No hard dependency on vllm-cpu (see the GPU service above).
 
+  compose-postgres-secret-check:
+    image: python:3.12-slim
+    user: "${OPENRAG_PREFLIGHT_UID:-1000}:${OPENRAG_PREFLIGHT_GID:-1000}"
+    command: ["python3", "/workspace/scripts/gen_env.py", "--check-compose-postgres"]
+    environment:
+      OPENRAG_PREFLIGHT_ALLOW_INSECURE_OVERRIDE: ${ALLOW_INSECURE_SECRETS-}
+      OPENRAG_PREFLIGHT_ALLOW_INSECURE_OVERRIDE_SET: ${ALLOW_INSECURE_SECRETS+set}
+      OPENRAG_PREFLIGHT_SHARED_ENV: /run/openrag/shared.env
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env}
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ../../scripts/gen_env.py:/workspace/scripts/gen_env.py:ro
+      - ../../openrag/core:/workspace/openrag/core:ro
+      - ${OPENRAG_ENV_FILE:-./.env}:/run/openrag/shared.env:ro
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
   rdb:
     image: postgres:15
     environment:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env}
       - POSTGRES_USER=${POSTGRES_USER:-root}
+    depends_on:
+      compose-postgres-secret-check:
+        condition: service_completed_successfully
     volumes:
       - ${DB_VOLUME:-../../db}:/var/lib/postgresql/data
       - ../../scripts/postgres-init:/docker-entrypoint-initdb.d:ro
