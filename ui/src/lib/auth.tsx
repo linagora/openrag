@@ -6,6 +6,7 @@ import {
   useEffect,
   type ReactNode,
 } from "react";
+import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { getMyInfo, type MyInfo } from "./api/account";
 import { apiUrl, isTokenRejection, TOKEN_KEY } from "./api/client";
 
@@ -53,6 +54,18 @@ async function consumeChainlitLogoutSignal(): Promise<boolean> {
   }
 }
 
+// Issue #1435: the module-level React Query client outlives login sessions and
+// query keys are account-agnostic, so switching accounts in the same tab
+// rendered the previous account's cached data until the new requests resolved —
+// whether or not the new account could read that data. Reset the cache on every
+// identity transition. Cancel in-flight queries FIRST so a slow response issued
+// under the previous identity cannot repopulate the cache after the clear, then
+// drop every entry; mounted pages refetch fresh under the new identity.
+async function resetQueryCache(queryClient: QueryClient): Promise<void> {
+  await queryClient.cancelQueries();
+  queryClient.clear();
+}
+
 // Identity comes from the backend, not a decoded token: /users/info resolves the
 // current principal from either a stored bearer token (AUTH_MODE=token) or the
 // same-origin OIDC session cookie. The capability layer reads `isAdmin` from here.
@@ -77,13 +90,15 @@ const AuthContext = createContext<AuthContextType | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<MyInfo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const queryClient = useQueryClient();
 
   const applyExternalLogout = useCallback(async () => {
     if (!(await consumeChainlitLogoutSignal())) return false;
     localStorage.removeItem(TOKEN_KEY);
     setUser(null);
+    void resetQueryCache(queryClient);
     return true;
-  }, []);
+  }, [queryClient]);
 
   const load = useCallback(async () => {
     setIsLoading(true);
@@ -117,6 +132,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [applyExternalLogout]);
 
   const loginWithToken = useCallback(async (token: string) => {
+    // Clear before the new identity resolves so no data from a previous
+    // session (or the pre-login state) survives into it.
+    void resetQueryCache(queryClient);
     localStorage.setItem(TOKEN_KEY, token.trim());
     try {
       setUser(await getMyInfo());
@@ -126,7 +144,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(null);
       throw e;
     }
-  }, []);
+  }, [queryClient]);
 
   const logout = useCallback(() => {
     // A stored bearer token means token-mode auth: clearing it IS the full
@@ -134,10 +152,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // cookie — signal the caller to hand off to the backend RP-initiated logout
     // so the server revokes the session (and ends the IdP SSO session).
     const wasOidcSession = !localStorage.getItem(TOKEN_KEY);
+    void resetQueryCache(queryClient);
     localStorage.removeItem(TOKEN_KEY);
     setUser(null);
     return wasOidcSession;
-  }, []);
+  }, [queryClient]);
 
   return (
     <AuthContext.Provider
