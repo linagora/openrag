@@ -1642,3 +1642,32 @@ async def test_dropped_partition_is_named_in_the_log():
     assert dropped, f"the dropped partition was not logged: {messages}"
     assert "RuntimeError" in dropped[0]
     assert "healthy" not in dropped[0], "only the failed partition should be named"
+
+
+@pytest.mark.asyncio
+async def test_resolved_plan_keeps_the_model_of_its_searcher():
+    prompt = _RefreshingPromptService("HYDE {question}")
+    svc, _ = _grouping_svc(
+        [_partition(name="support", retrieval=RetrievalPipelineConfig(type="hyde"))],
+        {"embed-a": "vector_embed_a"},
+        llm_factory=lambda _: object(),
+        prompt_service=prompt,
+    )
+    endpoints = svc._config.models.embedder
+    endpoints["embed-a"].model_name = "old-model"
+
+    def searcher_factory(name):
+        searcher = FakeSearcher()
+        searcher.model_name = endpoints[name].model_name
+        return searcher
+
+    svc._searcher_factory = searcher_factory
+    prompt.refresh = lambda: endpoints.update(
+        {"embed-a": SimpleNamespace(vector_field="vector_embed_a", model_name="new-model")}
+    )
+    plan = await svc.resolve_retrieval_plan(["support"], contextualizer_prompt=_CONTEXTUALIZER_PROMPT)
+    assert plan.groups[0].pipeline.retriever.searcher.model_name == "old-model"
+    assert plan.public_configuration["partitions"][0]["embedder"]["model"] == "old-model"
+    next_plan = await svc.resolve_retrieval_plan(["support"], contextualizer_prompt=_CONTEXTUALIZER_PROMPT)
+    assert next_plan.groups[0].pipeline.retriever.searcher.model_name == "new-model"
+    assert next_plan.public_configuration["partitions"][0]["embedder"]["model"] == "new-model"
