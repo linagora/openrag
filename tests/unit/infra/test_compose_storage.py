@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
+import os
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -70,6 +76,232 @@ def test_compose_defaults_preserve_existing_host_paths() -> None:
     assert "logs" not in top_level_volumes
     assert "${DATA_VOLUME:-appdata}:/app/data" not in openrag_volumes
     assert "${DB_VOLUME:-pgdata}:/var/lib/postgresql/data" not in rdb_volumes
+
+
+def test_bundled_storage_waits_for_secret_preflight() -> None:
+    for path in (COMPOSE_DIR / "milvus" / "milvus.yaml", COMPOSE_DIR / "milvus" / "milvus.named-volumes.yaml"):
+        services = _load_yaml(path)["services"]
+        check = services["compose-secret-check"]
+        assert check["command"] == ["python3", "/workspace/scripts/gen_env.py", "--check-compose-storage"]
+        assert check["user"] == "${OPENRAG_PREFLIGHT_UID:-1000}:${OPENRAG_PREFLIGHT_GID:-1000}"
+        assert check["network_mode"] == "none"
+        assert check["read_only"] is True
+        assert check["volumes"] == [
+            "../../../scripts/gen_env.py:/workspace/scripts/gen_env.py:ro",
+            "../../../openrag/core:/workspace/openrag/core:ro",
+            "${OPENRAG_ENV_FILE:-../.env}:/run/openrag/shared.env:ro",
+        ]
+        assert "MINIO_ACCESS_KEY" in check["environment"]
+        assert "MINIO_SECRET_KEY" in check["environment"]
+        assert services["minio"]["depends_on"]["compose-secret-check"]["condition"] == "service_completed_successfully"
+        assert (
+            services["milvus-init"]["depends_on"]["compose-secret-check"]["condition"]
+            == "service_completed_successfully"
+        )
+
+
+def test_postgres_waits_for_effective_password_preflight() -> None:
+    services = _load_yaml(COMPOSE_DIR / "docker-compose.yaml")["services"]
+    check = services["compose-postgres-secret-check"]
+
+    assert check["command"] == ["python3", "/workspace/scripts/gen_env.py", "--check-compose-postgres"]
+    assert check["user"] == "${OPENRAG_PREFLIGHT_UID:-1000}:${OPENRAG_PREFLIGHT_GID:-1000}"
+    assert check["network_mode"] == "none"
+    assert check["read_only"] is True
+    assert check["volumes"] == [
+        "../../scripts/gen_env.py:/workspace/scripts/gen_env.py:ro",
+        "../../openrag/core:/workspace/openrag/core:ro",
+        "${OPENRAG_ENV_FILE:-./.env}:/run/openrag/shared.env:ro",
+    ]
+    assert "POSTGRES_PASSWORD" in check["environment"]
+    assert (
+        services["rdb"]["depends_on"]["compose-postgres-secret-check"]["condition"] == "service_completed_successfully"
+    )
+
+
+def test_compose_preflights_run_as_the_shared_env_owner() -> None:
+    profiles = (
+        (COMPOSE_DIR / "docker-compose.yaml", "compose-postgres-secret-check"),
+        (COMPOSE_DIR / "milvus" / "milvus.yaml", "compose-secret-check"),
+        (COMPOSE_DIR / "milvus" / "milvus.named-volumes.yaml", "compose-secret-check"),
+        (COMPOSE_DIR / "monitoring.docker-compose.yaml", "compose-grafana-secret-check"),
+    )
+    for path, service_name in profiles:
+        service = _load_yaml(path)["services"][service_name]
+        assert service["user"] == "${OPENRAG_PREFLIGHT_UID:-1000}:${OPENRAG_PREFLIGHT_GID:-1000}"
+        assert (
+            service["environment"]["OPENRAG_PREFLIGHT_ALLOW_INSECURE_OVERRIDE_SET"] == "${ALLOW_INSECURE_SECRETS+set}"
+        )
+        assert any("OPENRAG_ENV_FILE" in volume for volume in service["volumes"])
+
+
+def test_rendered_compose_uses_explicit_env_file_without_exposing_host_path_to_api(tmp_path: Path) -> None:
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker Compose is required to render Compose configuration")
+
+    template = tmp_path / ".env.example"
+    template_text = (COMPOSE_DIR / ".env.example").read_text(encoding="utf-8")
+    template.write_text(template_text, encoding="utf-8")
+    env_file = tmp_path / "prod.env"
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "gen_env.py"), "-t", str(template), "-o", str(env_file)],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    env_text = env_file.read_text(encoding="utf-8")
+    env_text += f"SHARED_ENV={env_file.resolve()}\n"
+    env_file.write_text(env_text, encoding="utf-8")
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "gen_env.py"), "-t", str(template), "-o", str(env_file)],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    env_text = env_file.read_text(encoding="utf-8")
+    env_text = env_text.replace(f"OPENRAG_PREFLIGHT_UID={os.geteuid()}", "OPENRAG_PREFLIGHT_UID=1002")
+    env_text = env_text.replace(f"OPENRAG_PREFLIGHT_GID={os.getegid()}", "OPENRAG_PREFLIGHT_GID=2002")
+    env_file.write_text(env_text, encoding="utf-8")
+
+    for cwd, compose_file, monitoring_file in (
+        (COMPOSE_DIR, "docker-compose.yaml", "monitoring.docker-compose.yaml"),
+        (ROOT, "infra/compose/docker-compose.yaml", "infra/compose/monitoring.docker-compose.yaml"),
+    ):
+        env = os.environ.copy()
+        env["OPENRAG_ENV_FILE"] = str(env_file.resolve())
+        env["PWD"] = str(cwd)
+        env["GRAFANA_ADMIN_PASSWORD"] = "or-unit-test-token-0123"
+        env["METRICS_TOKEN"] = "or-unit-test-token-4567"
+        result = subprocess.run(
+            [
+                docker,
+                "compose",
+                "--env-file",
+                str(env_file),
+                "-f",
+                compose_file,
+                "-f",
+                monitoring_file,
+                "config",
+                "--format",
+                "json",
+            ],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        services = json.loads(result.stdout)["services"]
+
+        for service_name in (
+            "compose-postgres-secret-check",
+            "compose-secret-check",
+            "compose-grafana-secret-check",
+        ):
+            service = services[service_name]
+            assert service["user"] == "1002:2002"
+            shared_mount = next(v for v in service["volumes"] if v["target"] == "/run/openrag/shared.env")
+            assert Path(shared_mount["source"]).resolve() == env_file.resolve()
+
+        assert "SHARED_ENV" not in services["openrag"]["environment"]
+        assert not any(volume["target"] == "/ray_mount/.env" for volume in services["openrag"]["volumes"])
+        expected_auth_token = next(
+            line.partition("=")[2] for line in env_text.splitlines() if line.startswith("AUTH_TOKEN=")
+        )
+        expected_postgres_password = next(
+            line.partition("=")[2] for line in env_text.splitlines() if line.startswith("POSTGRES_PASSWORD=")
+        )
+        assert services["openrag"]["environment"]["AUTH_TOKEN"] == expected_auth_token
+        assert services["openrag"]["environment"]["POSTGRES_PASSWORD"] == expected_postgres_password
+        assert services["rdb"]["environment"]["POSTGRES_PASSWORD"] == expected_postgres_password
+        assert services["compose-postgres-secret-check"]["environment"]["POSTGRES_PASSWORD"] == expected_postgres_password
+
+
+def test_legacy_compose_rollback_uses_env_file_default_after_generator_migration(tmp_path: Path) -> None:
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker Compose is required to render Compose configuration")
+
+    template = tmp_path / ".env.example"
+    template.write_text(
+        "AUTH_TOKEN=__GENERATE_ME__\nOPENRAG_PREFLIGHT_UID=__GENERATE_ME__\nOPENRAG_PREFLIGHT_GID=__GENERATE_ME__\n",
+        encoding="utf-8",
+    )
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "SHARED_ENV=/home/operator/openrag/infra/compose/.env\nAUTH_TOKEN=or-existing-token\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "gen_env.py"), "-t", str(template), "-o", str(env_file)],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    legacy_compose = tmp_path / "docker-compose-v2.3.5.yaml"
+    legacy_compose.write_text(
+        "services:\n"
+        "  openrag:\n"
+        "    image: linagoraai/openrag:v2.3.5\n"
+        "    env_file:\n"
+        "      - ${SHARED_ENV:-.env}\n"
+        "    volumes:\n"
+        "      - ${SHARED_ENV:-./.env}:/ray_mount/.env\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env.pop("SHARED_ENV", None)
+    result = subprocess.run(
+        [docker, "compose", "-f", str(legacy_compose), "config", "--format", "json"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    service = json.loads(result.stdout)["services"]["openrag"]
+
+    assert "SHARED_ENV" not in service["environment"]
+    assert service["environment"]["AUTH_TOKEN"] == "or-existing-token"
+    assert Path(service["volumes"][0]["source"]).resolve() == env_file.resolve()
+
+
+@pytest.mark.parametrize("compose_file", ["milvus/milvus.yaml", "milvus/milvus.named-volumes.yaml"])
+def test_milvus_preflight_default_resolves_to_compose_env_file(tmp_path: Path, compose_file: str) -> None:
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker Compose is required to render Compose configuration")
+
+    template = COMPOSE_DIR / ".env.example"
+    env_file = tmp_path / "compose.env"
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "gen_env.py"), "-t", str(template), "-o", str(env_file)],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    env = os.environ.copy()
+    env.pop("OPENRAG_ENV_FILE", None)
+    env.pop("SHARED_ENV", None)
+    result = subprocess.run(
+        [docker, "compose", "--env-file", str(env_file), "-f", compose_file, "config", "--format", "json"],
+        cwd=COMPOSE_DIR,
+        env=env,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    services = json.loads(result.stdout)["services"]
+    shared_mount = next(
+        volume
+        for volume in services["compose-secret-check"]["volumes"]
+        if volume["target"] == "/run/openrag/shared.env"
+    )
+
+    assert Path(shared_mount["source"]).resolve() == (COMPOSE_DIR / ".env").resolve()
 
 
 def test_milvus_compose_defaults_preserve_existing_host_paths() -> None:

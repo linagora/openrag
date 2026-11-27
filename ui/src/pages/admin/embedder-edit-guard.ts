@@ -46,6 +46,12 @@ function show(value: unknown): string {
   return String(value);
 }
 
+function showTruncation(value: unknown): string {
+  if (value === null) return "Truncation disabled";
+  if (value === undefined) return "Deployment default";
+  return show(value);
+}
+
 /** Fields this edit would change, in a fixed order, most consequential first.
  *
  *  Secret `extra` keys are skipped: a stored API key comes back redacted, so
@@ -105,12 +111,16 @@ function diffExtra(
   const keys = [...new Set([...Object.keys(from), ...Object.keys(after)])].filter((k) => !isSecretField(k)).sort();
   const changes: EndpointFieldChange[] = [];
   for (const key of keys) {
-    if (show(from[key]) === show(after[key])) continue;
+    const isTruncation = isEmbedder && key === "max_model_len";
+    const previous = from[key];
+    const next = after[key];
+    const samePresence = !isTruncation || (previous === undefined) === (next === undefined);
+    if (samePresence && show(previous) === show(next)) continue;
     changes.push({
       field: `extra.${key}`,
       label: key,
-      from: show(from[key]),
-      to: show(after[key]),
+      from: isTruncation ? showTruncation(previous) : show(previous),
+      to: isTruncation ? showTruncation(next) : show(next),
       material: isEmbedder && MATERIAL_EXTRA_KEYS.has(key),
     });
   }

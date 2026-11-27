@@ -94,7 +94,7 @@ def test_entrypoint_empty_allowlist_uses_compose_proxy_default(tmp_path):
     env = {
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
-        "SHARED_ENV": "",
+        "OPENRAG_ENV_FILE": "",
         "UVICORN_FORWARDED_ALLOW_IPS": "",
         "OPENRAG_ADMIN_UI_PROXY_IP": "192.0.2.10",
     }
