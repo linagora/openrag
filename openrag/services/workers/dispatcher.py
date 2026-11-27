@@ -808,11 +808,17 @@ class WorkerDispatcher(IndexingDispatcher):
         target_catalog_metadata.update(public_metadata)
         try:
             await self._upsert_entities(entities, protected_metadata=target_catalog_metadata)
-        except BaseException:
+        except BaseException as error:
             # A large file is written in several requests: those before a failed
             # or cancelled one carry the new metadata while the catalog keeps the
             # old, and a metadata filter would find part of the file. Its rows go
             # back as they were read.
+            if isinstance(error, asyncio.CancelledError) and self._file_fences.enabled:
+                # Except when cancelled under a fence: that can be the fence's
+                # own stop, one round before its lease ends, and rows written
+                # back after it could land once a delete has taken the file,
+                # bringing its chunks back. Sending the change again completes it.
+                raise
             try:
                 await self._upsert_entities(rows, protected_metadata=catalog_metadata)
             except Exception as exc:

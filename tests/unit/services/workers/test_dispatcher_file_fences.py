@@ -648,6 +648,41 @@ async def test_a_metadata_update_of_a_busy_file_is_refused_and_writes_nothing(ki
 
 
 @pytest.mark.asyncio
+async def test_a_metadata_update_stopped_by_its_fence_writes_no_old_rows_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    _short_lease(monkeypatch)
+    fences = InMemoryFileFences()
+    fences.renew = AsyncMock(side_effect=ConnectionError("postgres unreachable"))
+    dispatcher, repo, store = _metadata_dispatcher(fences)
+
+    async def slow_upsert(*_args, **_kwargs) -> None:
+        await asyncio.sleep(5)
+
+    store.upsert_entities.side_effect = slow_upsert
+
+    with pytest.raises(FileFenceUnavailableError):
+        await asyncio.wait_for(dispatcher.update_file_metadata(FILE_ID, {"title": "new"}, PARTITION, None), timeout=5)
+
+    # Only the change itself: the lease is about to end, so nothing is written after the stop.
+    store.upsert_entities.assert_awaited_once()
+    repo.update_file_metadata_in_db.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_fenced_metadata_update_whose_write_fails_puts_the_rows_back() -> None:
+    fences = InMemoryFileFences()
+    dispatcher, repo, store = _metadata_dispatcher(fences)
+    store.upsert_entities.side_effect = [RuntimeError("milvus refused batch 2"), None]
+
+    with pytest.raises(RuntimeError, match="batch 2"):
+        await dispatcher.update_file_metadata(FILE_ID, {"title": "new"}, PARTITION, None)
+
+    # The fence is still held when a write fails, so the rows read are written back.
+    assert store.upsert_entities.await_count == 2
+    assert store.upsert_entities.await_args.args[0] == [{"_id": 1, "text": "a", "file_id": FILE_ID}]
+    repo.update_file_metadata_in_db.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_a_failed_metadata_update_releases_the_fence() -> None:
     fences = InMemoryFileFences()
     dispatcher, _, store = _metadata_dispatcher(fences)
