@@ -345,7 +345,10 @@ class ModelEndpointService:
                 # #720: rows created before the fix never had the sampling params
                 # written, so backfill them before anything else — independent of
                 # whether the env still points anywhere or sync_on_boot is set.
-                await self._backfill_sampling_params(existing, getattr(self._config, model_type))
+                if await self._backfill_sampling_params(existing, getattr(self._config, model_type)):
+                    # Re-read the rows, or the sync below would write the stale
+                    # ``extra`` back and drop the keys just backfilled.
+                    existing = await self._repo.list_all(model_type=model_type)
 
             endpoint: str = data["endpoint"]
             model_name: str = data["model_name"]
@@ -683,7 +686,7 @@ class ModelEndpointService:
             },
         }
 
-    async def _backfill_sampling_params(self, rows: list[ModelEndpointRow], llm_cfg: Any) -> None:
+    async def _backfill_sampling_params(self, rows: list[ModelEndpointRow], llm_cfg: Any) -> bool:
         """Fill in sampling params missing from pre-existing llm/vlm rows' ``extra``.
 
         ``seed_defaults()`` only seeds a type when the DB has no rows for it,
@@ -692,16 +695,21 @@ class ModelEndpointService:
         ``logprobs`` (see ``_with_sampling_params``). Only keys *absent* from
         ``extra`` are filled in here, so a value an admin explicitly set (or a
         prior backfill already wrote) is never overwritten.
+
+        Returns whether any row was written, so the caller knows ``rows`` is stale.
         """
+        backfilled = False
         for row in rows:
             missing = {k: v for k, v in _sampling_params(llm_cfg).items() if k not in row.extra}
             if not missing:
                 continue
             await self._repo.update(row.name, row.model_type, extra={**row.extra, **missing})
+            backfilled = True
             logger.info(
                 f"Backfilled sampling params on existing {row.model_type} endpoint '{row.name}'.",
                 keys=sorted(missing),
             )
+        return backfilled
 
     async def load_all(self) -> None:
         """Fetch all endpoints from DB, rebuild config.models dicts atomically.
