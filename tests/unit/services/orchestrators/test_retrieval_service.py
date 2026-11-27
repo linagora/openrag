@@ -1291,8 +1291,8 @@ class _RefreshingPromptService:
 @pytest.mark.parametrize("path", ["groups", "plan"])
 async def test_a_group_is_built_from_the_settings_it_was_grouped_by(path):
     """Building the hyde group's pipeline waits on its prompt, and a config
-    refresh can land meanwhile. The next group is still built from what it was
-    grouped by, not from a fresh read of its first partition's config."""
+    refresh can land meanwhile. The next group and its public configuration
+    still use the settings it was grouped by."""
     prompt_service = _RefreshingPromptService("HYDE {question}")
     svc, searchers = _grouping_svc(
         [
@@ -1316,10 +1316,19 @@ async def test_a_group_is_built_from_the_settings_it_was_grouped_by(path):
     else:
         plan = await svc.resolve_retrieval_plan(["h1", "p1", "p2"], contextualizer_prompt=_CONTEXTUALIZER_PROMPT)
         groups = [(list(group.partitions), group.pipeline) for group in plan.groups]
+        public = {partition["name"]: partition for partition in plan.public_configuration["partitions"]}
+        assert public["p1"]["embedder"]["name"] == "embed-a"
+        assert public["p1"]["retrieval"]["rrf_k"] == RetrievalPipelineConfig().rrf_k
 
     assert [names for names, _ in groups] == [["h1"], ["p1", "p2"]]
     assert groups[1][1].rrf_k == RetrievalPipelineConfig().rrf_k
     assert "embed-b" not in searchers
+
+    if path == "plan":
+        next_plan = await svc.resolve_retrieval_plan(["p1"], contextualizer_prompt=_CONTEXTUALIZER_PROMPT)
+        (public_partition,) = next_plan.public_configuration["partitions"]
+        assert public_partition["embedder"]["name"] == "embed-b"
+        assert public_partition["retrieval"]["rrf_k"] == 7
 
 
 # --- #708: the "all" fan-out must be concurrency-bounded (production safety) ---
@@ -1633,3 +1642,58 @@ async def test_dropped_partition_is_named_in_the_log():
     assert dropped, f"the dropped partition was not logged: {messages}"
     assert "RuntimeError" in dropped[0]
     assert "healthy" not in dropped[0], "only the failed partition should be named"
+
+
+@pytest.mark.asyncio
+async def test_resolved_plan_keeps_the_model_of_its_searcher():
+    prompt = _RefreshingPromptService("HYDE {question}")
+    svc, _ = _grouping_svc(
+        [_partition(name="support", retrieval=RetrievalPipelineConfig(type="hyde"))],
+        {"embed-a": "vector_embed_a"},
+        llm_factory=lambda _: object(),
+        prompt_service=prompt,
+    )
+    endpoints = svc._config.models.embedder
+    endpoints["embed-a"].model_name = "old-model"
+
+    def searcher_factory(name):
+        searcher = FakeSearcher()
+        searcher.model_name = endpoints[name].model_name
+        return searcher
+
+    svc._searcher_factory = searcher_factory
+    prompt.refresh = lambda: endpoints.update(
+        {"embed-a": SimpleNamespace(vector_field="vector_embed_a", model_name="new-model")}
+    )
+    plan = await svc.resolve_retrieval_plan(["support"], contextualizer_prompt=_CONTEXTUALIZER_PROMPT)
+    assert plan.groups[0].pipeline.retriever.searcher.model_name == "old-model"
+    assert plan.public_configuration["partitions"][0]["embedder"]["model"] == "old-model"
+    next_plan = await svc.resolve_retrieval_plan(["support"], contextualizer_prompt=_CONTEXTUALIZER_PROMPT)
+    assert next_plan.groups[0].pipeline.retriever.searcher.model_name == "new-model"
+    assert next_plan.public_configuration["partitions"][0]["embedder"]["model"] == "new-model"
+
+
+@pytest.mark.asyncio
+async def test_resolved_plan_keeps_expansion_llms_aligned_with_public_configuration():
+    prompt = _RefreshingPromptService("HYDE {question}")
+    endpoints = {"default": SimpleNamespace(model_name="old-llm")}
+    svc, _ = _grouping_svc(
+        [
+            _partition(name="h1", embedder="embed-a", retrieval=RetrievalPipelineConfig(type="hyde")),
+            _partition(name="h2", embedder="embed-b", retrieval=RetrievalPipelineConfig(type="hyde")),
+        ],
+        {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"},
+        llm_factory=endpoints.__getitem__,
+        prompt_service=prompt,
+    )
+    svc._config.models.llm = endpoints
+    prompt.refresh = lambda: endpoints.update(default=SimpleNamespace(model_name="new-llm"))
+
+    for expected in ("old-llm", "new-llm"):
+        plan = await svc.resolve_retrieval_plan(["h1", "h2"], contextualizer_prompt=_CONTEXTUALIZER_PROMPT)
+        assert [group.partitions for group in plan.groups] == [("h1",), ("h2",)]
+        assert [group.pipeline.retriever.llm.model_name for group in plan.groups] == [expected, expected]
+        assert [
+            partition["retrieval"]["query_expansion_llm"]["model"]
+            for partition in plan.public_configuration["partitions"]
+        ] == [expected, expected]
