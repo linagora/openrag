@@ -19,7 +19,7 @@ from .test_similarity_threshold_migration import _alembic_config
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
 
-PREVIOUS = "4d7e2b9c1f35"
+PREVIOUS = "f4a5b6c7d8e9"
 REVISION = "d9f1c27b5e40"
 
 
