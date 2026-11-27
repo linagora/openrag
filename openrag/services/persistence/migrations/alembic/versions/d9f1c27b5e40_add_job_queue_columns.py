@@ -8,7 +8,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from schema_helpers import column_exists, index_exists
+from schema_helpers import check_constraint_exists, column_exists, index_exists
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql.elements import TextClause
 
@@ -18,6 +18,7 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 _TABLE = "jobs"
+_LANE_CONSTRAINT = "ck_jobs_lane"
 _CLAIM_INDEX = "ix_jobs_queue_claim"
 _RUNNING_INDEX = "ix_jobs_queue_running_user"
 
@@ -85,12 +86,24 @@ def upgrade() -> None:
         if not column_exists(_TABLE, column.name):
             op.add_column(_TABLE, column)
 
+    if not check_constraint_exists(_TABLE, _LANE_CONSTRAINT):
+        op.create_check_constraint(
+            _LANE_CONSTRAINT,
+            _TABLE,
+            "lane IS NULL OR lane IN ('cpu', 'gpu', 'remote')",
+            postgresql_not_valid=True,
+        )
+
     # Keep room for heartbeat updates on the same page. Vacuum before dead
     # tuples from these updates accumulate against a large terminal history.
     op.execute("ALTER TABLE jobs SET (fillfactor = 80, autovacuum_vacuum_scale_factor = 0.01)")
 
     _create_queue_index(_CLAIM_INDEX, ["lane", sa.text("priority DESC"), "available_at"], "status = 'QUEUED'")
     _create_queue_index(_RUNNING_INDEX, ["user_id"], "status = 'SERIALIZING' AND lane IS NOT NULL")
+
+    # Release the exclusive DDL lock before scanning existing rows.
+    with op.get_context().autocommit_block():
+        op.execute(f"ALTER TABLE {_TABLE} VALIDATE CONSTRAINT {_LANE_CONSTRAINT}")
 
 
 def downgrade() -> None:
@@ -101,6 +114,9 @@ def downgrade() -> None:
     for index in (_RUNNING_INDEX, _CLAIM_INDEX):
         if index_exists(_TABLE, index):
             op.drop_index(index, table_name=_TABLE)
+
+    if check_constraint_exists(_TABLE, _LANE_CONSTRAINT):
+        op.drop_constraint(_LANE_CONSTRAINT, _TABLE, type_="check")
 
     for column in reversed(_queue_columns()):
         if column_exists(_TABLE, column.name):

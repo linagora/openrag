@@ -92,6 +92,23 @@ async def test_upgrade_downgrade_upgrade_preserves_ray_jobs(migration_database):
         await conn.close()
 
 
+async def test_lane_constraint_accepts_known_lanes_and_null_after_migration(migration_database):
+    cfg, dsn = migration_database
+    await asyncio.to_thread(command.upgrade, cfg, REVISION)
+    conn = await asyncpg.connect(dsn)
+    try:
+        insert = "INSERT INTO jobs (id, partition, status, lane) VALUES ($1, 'default', 'QUEUED', $2)"
+        for lane in (None, "cpu", "gpu", "remote"):
+            await conn.execute(insert, f"job-{lane}", lane)
+        with pytest.raises(asyncpg.CheckViolationError, match="ck_jobs_lane"):
+            await conn.execute(insert, "job-unknown", "unknown")
+        assert await conn.fetchval(
+            "SELECT convalidated FROM pg_constraint WHERE conrelid = 'jobs'::regclass AND conname = 'ck_jobs_lane'"
+        )
+    finally:
+        await conn.close()
+
+
 async def test_upgrade_after_metadata_created_columns_and_indexes(migration_database):
     cfg, dsn = migration_database
 
@@ -111,6 +128,8 @@ async def test_upgrade_after_metadata_created_columns_and_indexes(migration_data
         await conn.execute(
             "INSERT INTO jobs (id, partition, status, lane) VALUES ('existing', 'default', 'QUEUED', 'cpu')"
         )
+        with pytest.raises(asyncpg.CheckViolationError, match="ck_jobs_lane"):
+            await conn.execute("UPDATE jobs SET lane = 'unknown' WHERE id = 'existing'")
         await asyncio.to_thread(command.upgrade, cfg, REVISION)
         assert await _queue_indexes(conn) == indexes_before
         assert await conn.fetchval("SELECT lane FROM jobs WHERE id = 'existing'") == "cpu"

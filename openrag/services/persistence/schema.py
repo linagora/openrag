@@ -419,6 +419,7 @@ jobs = Table(
     # excludes the legacy CHUNKING/INSERTING states, which #721 removed from the
     # public state machine and which no write path can produce.
     CheckConstraint(_JOB_STATUS_CHECK, name="ck_jobs_status"),
+    CheckConstraint("lane IS NULL OR lane IN ('cpu', 'gpu', 'remote')", name="ck_jobs_lane"),
     # Queue views filter by status and order by recency.
     Index("ix_jobs_status_created_at", "status", "created_at"),
     # Per-user task listing, which filters on user_id and often on status too.
