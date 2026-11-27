@@ -195,7 +195,14 @@ def test_the_chunks_are_joined_in_page_order():
 
 
 @pytest.mark.parametrize(
-    "module", ["services.workers.parsers.marker_runtime", "services.workers.parsers.pdf_conversion"]
+    "module",
+    [
+        "services.workers.parsers.marker_runtime",
+        "services.workers.parsers.pdf_conversion",
+        "services.workers.parsers.docling_runtime",
+        "services.workers.parsers.docling_engine",
+        "core.utils.retry",
+    ],
 )
 def test_an_engine_outside_ray_imports_its_helpers_without_ray(module):
     loaded = subprocess.run(

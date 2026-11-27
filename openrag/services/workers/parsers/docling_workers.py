@@ -24,17 +24,7 @@ from core.indexing.parsers.document_parser import BasePooledParser
 from core.indexing.parsers.progress import report_parser_substage
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from core.utils.logging import get_logger
-from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
-from docling.datamodel.base_models import InputFormat
 from docling.datamodel.document import ConversionResult
-from docling.datamodel.pipeline_options import (
-    AcceleratorDevice,
-    AcceleratorOptions,
-    PdfPipelineOptions,
-    TableFormerMode,
-    TableStructureOptions,
-)
-from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.transforms.serializer.base import BaseDocSerializer, SerializationResult
 from docling_core.transforms.serializer.markdown import (
     MarkdownDocSerializer,
@@ -60,6 +50,7 @@ from docling_core.types.doc.document import (
 from pydantic import PrivateAttr
 
 from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
+from .docling_runtime import build_converter
 from .pdf_conversion import DoclingConversion
 
 logger = get_logger()
@@ -318,22 +309,7 @@ def _page_markdown(
 @ray.remote
 class DoclingWorker:
     def __init__(self):
-        img_scale = 2
-        pipeline_options = PdfPipelineOptions(
-            do_ocr=True,
-            do_table_structure=True,
-            generate_picture_images=True,
-            images_scale=img_scale,
-        )
-        pipeline_options.table_structure_options = TableStructureOptions(
-            do_cell_matching=True, mode=TableFormerMode.ACCURATE
-        )
-        pipeline_options.accelerator_options = AcceleratorOptions(device=AcceleratorDevice.AUTO)
-        self.converter = DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options, backend=PyPdfiumDocumentBackend)
-            }
-        )
+        self.converter = build_converter()
 
     async def convert(self, file_path: str) -> ConversionResult:
         with torch.no_grad():
