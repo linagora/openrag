@@ -18,24 +18,24 @@ export interface Release {
  * dialog content are derived from it.
  */
 export const releaseNotes: Release = {
-  version: "2.3.5",
-  date: "2026-11-13",
+  version: "2.3.6",
+  date: "2026-11-30",
   summary:
-    'OpenRAG 2.3.5 shows each file\'s indexing progress, indexes Excel workbooks (.xlsx), sorts sources by date for "the latest" questions, and upgrades Milvus to 3.0.5.',
+    "OpenRAG 2.3.6 indexes OpenDocument files (.odt, .odp) and legacy Excel workbooks (.xls), adds workspaces to the admin console, and makes large files, file quotas and the bundled proxy more reliable.",
 
   newFeatures: [
-    "The Jobs page shows each file's current indexing stage, its elapsed time and its stage history.",
-    "Excel workbooks (.xlsx) can now be indexed, sheet by sheet.",
-    "Questions about the latest documents get sources sorted by date, with their dates shown, for documents that carry a creation date (created_at metadata).",
-    "Figure and table captions stay attached to the block they label.",
-    "Admin console usability improvements, and failed data loads shown as errors instead of empty lists.",
+    "Workspaces can be created and managed in the admin console, and a chat can be scoped to one.",
+    "OpenDocument text and presentation files (.odt, .odp) and legacy Excel workbooks (.xls) can now be indexed, and charts in .xlsx workbooks become searchable text.",
+    "The model endpoint form lists the models the endpoint serves.",
+    "Large files no longer fail when their chunks are written to Milvus, and file quotas hold when several uploads arrive at once.",
+    "The Jobs page shows running jobs' stage in every tab, and a partial batch upload keeps its failed files listed.",
   ],
   breakingChange: {
-    title: "Remote images in Markdown files are no longer captioned",
+    title: "Docker Compose: recreate the network and check credentials before upgrading",
     description:
-      "An image a Markdown file links to by URL (![alt](https://...)) is no longer fetched or captioned; its link stays in the text. Images embedded in the file are still captioned. The IMAGE_CAPTIONING_URL setting is removed, and a configuration that still sets it keeps loading and ignores it.",
+      "Compose now trusts only the bundled admin UI proxy for forwarded client addresses, which requires recreating the project network once. Service credentials are checked before PostgreSQL, MinIO and Milvus start: an empty one stops the service, a published or too short one stops it unless ALLOW_INSECURE_SECRETS=true. Compose reads the API's environment file from OPENRAG_ENV_FILE and ignores SHARED_ENV. The default similarity threshold is now 0.2.",
     action:
-      "If you relied on captions of linked images, embed those images in the Markdown file, or convert the document to a format whose images are embedded, such as PDF or DOCX, and index it again.",
+      "Read the 2.3.6 sections of the upgrade guide before upgrading. On Compose, run docker compose down then docker compose up -d once, with the same files and profiles and without -v. On a shared Ray cluster, stop uploads and wait for queued indexing to finish first.",
   },
 };
 
