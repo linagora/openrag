@@ -11,36 +11,35 @@ from core.ports.file_fence_repo import FileFenceRepository
 
 _TERMINAL_JOB_STATUSES = sorted(state.value for state in TERMINAL_TASK_STATES)
 
-# Takes a free fence, renews our own, or takes one whose holder is gone; returns
-# nothing when another holder keeps it. Who that holder is comes from a second
-# statement: a fallback branch in this one would read the snapshot the statement
-# started with, so after waiting on a concurrent take-over it would name the
-# holder that was just replaced.
-_ACQUIRE_SQL = """
-WITH taken AS (
-    INSERT INTO file_fences (partition_name, file_id, holder_kind, holder_id, expires_at)
-    VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))
-    ON CONFLICT (partition_name, file_id) DO UPDATE
-       SET holder_kind = EXCLUDED.holder_kind,
-           holder_id = EXCLUDED.holder_id,
-           acquired_at = CASE
-               WHEN file_fences.holder_id = EXCLUDED.holder_id THEN file_fences.acquired_at
-               ELSE now()
-           END,
-           expires_at = EXCLUDED.expires_at
-     WHERE file_fences.holder_id = EXCLUDED.holder_id
-        OR file_fences.expires_at <= now()
-        OR (
-            file_fences.holder_kind = 'index'
-            AND EXISTS (
-                SELECT 1 FROM jobs
-                 WHERE jobs.id = file_fences.holder_id
-                   AND jobs.status = ANY($6::text[])
-            )
-        )
-    RETURNING partition_name, file_id, holder_kind, holder_id, acquired_at, expires_at
-)
-SELECT partition_name, file_id, holder_kind, holder_id, acquired_at, expires_at FROM taken
+_INSERT_SQL = """
+INSERT INTO file_fences (partition_name, file_id, holder_kind, holder_id, expires_at)
+VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))
+ON CONFLICT (partition_name, file_id) DO NOTHING
+RETURNING partition_name, file_id, holder_kind, holder_id, acquired_at, expires_at
+"""
+
+_UPDATE_SQL = """
+UPDATE file_fences
+   SET holder_kind = $3,
+       holder_id = $4,
+       acquired_at = CASE WHEN holder_id = $4 THEN acquired_at ELSE now() END,
+       expires_at = now() + make_interval(secs => $5)
+ WHERE partition_name = $1 AND file_id = $2
+   AND (
+       holder_id = $4
+       OR (expires_at <= now() AND NOT EXISTS (
+           SELECT 1 FROM jobs
+            WHERE jobs.id = file_fences.holder_id
+              AND file_fences.holder_kind = 'index'
+              AND jobs.lane IS NOT NULL
+              AND jobs.status IN ('QUEUED', 'SERIALIZING')
+       ))
+       OR (holder_kind = 'index' AND EXISTS (
+           SELECT 1 FROM jobs
+            WHERE jobs.id = file_fences.holder_id AND jobs.status = ANY($6::text[])
+       ))
+   )
+RETURNING partition_name, file_id, holder_kind, holder_id, acquired_at, expires_at
 """
 
 _HOLDER_SQL = """
@@ -73,21 +72,26 @@ class PgFileFenceRepository(FileFenceRepository):
         _connection: asyncpg.Connection | None = None,
     ) -> FileFence:
         """Use the caller's transaction when acquiring a fence for queue admission."""
-        connection = self.pool if _connection is None else _connection
+        args = (partition, file_id, kind.value, holder_id, float(ttl_seconds))
+        if _connection is not None:
+            return await self._acquire_in_transaction(_connection, args)
+        async with self.pool.acquire() as connection, connection.transaction(isolation="read_committed"):
+            return await self._acquire_in_transaction(connection, args)
+
+    async def _acquire_in_transaction(
+        self, connection: asyncpg.Connection, args: tuple[str, str, str, str, float]
+    ) -> FileFence:
         for _ in range(_ACQUIRE_ATTEMPTS):
-            row = await connection.fetchrow(
-                _ACQUIRE_SQL,
-                partition,
-                file_id,
-                kind.value,
-                holder_id,
-                float(ttl_seconds),
-                _TERMINAL_JOB_STATUSES,
-            )
-            if row is None:
-                row = await connection.fetchrow(_HOLDER_SQL, partition, file_id)
-            if row is not None:
-                return _row_to_fence(row)
+            inserted = await connection.fetchrow(_INSERT_SQL, *args)
+            if inserted is not None:
+                return _row_to_fence(inserted)
+            holder = await connection.fetchrow(_HOLDER_SQL + " FOR UPDATE", *args[:2])
+            if holder is not None:
+                # Read job state after locking the fence so a concurrent enqueue's
+                # committed job is visible, even if the fence lock made us wait.
+                updated = await connection.fetchrow(_UPDATE_SQL, *args, _TERMINAL_JOB_STATUSES)
+                return _row_to_fence(holder if updated is None else updated)
+        partition, file_id = args[:2]
         raise RuntimeError(f"Could not read the fence of file {file_id!r} in partition {partition!r}")
 
     async def take_over(
