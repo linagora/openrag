@@ -312,14 +312,7 @@ class QueryService:
         """Capture the partition settings before awaits can refresh the shared cache."""
         if not partitions:
             return {}
-        configs = self._config.partitions
-        if "all" in partitions:
-            return configs.copy()
-        return {
-            name: config
-            for name in dict.fromkeys(partitions)
-            if (config := PartitionService.lookup_cached_config(configs, name)) is not None
-        }
+        return self._config.partitions.copy()
 
     def _resolve_chat_history_depth(
         self, partition: list[str] | None, configs: dict[str, PartitionConfig] | None = None
@@ -910,6 +903,7 @@ class QueryService:
                         partition,
                         top_k=retrieval_top_k,
                         contextualizer_prompt=contextualizer_prompt,
+                        partition_configs=configs,
                         **retrieval_overrides,
                     )
                 except Exception as error:  # noqa: BLE001 - legacy resolution below keeps telemetry optional
@@ -973,6 +967,7 @@ class QueryService:
                 retrieval_top_k=retrieval_top_k,
                 trace=trace,
                 resolved_plan=resolved_retrieval_plan,
+                partition_configs=configs,
                 **retrieval_overrides,
             )
             web_results = _dedupe_web(web_lists)
@@ -986,6 +981,7 @@ class QueryService:
                 filter_params=filter_params,
                 **retrieval_overrides,
                 **trace_kwargs,
+                partition_configs=configs,
                 **({"resolved_plan": resolved_retrieval_plan} if resolved_retrieval_plan is not None else {}),
             )
         else:
@@ -1002,6 +998,7 @@ class QueryService:
                 filter_params=filter_params,
                 configuration_fingerprint=configuration_fingerprint,
                 resolved_plan=resolved_retrieval_plan,
+                partition_configs=configs,
                 **retrieval_overrides,
             )
 
@@ -1346,7 +1343,9 @@ class QueryService:
             else:
                 queries = SearchQueries(query_list=[Query(query=prompt)])
         if queries.query_list:
-            chunks = await self._retrieval.retrieve_multi(partitions=partition, search_queries=queries)
+            chunks = await self._retrieval.retrieve_multi(
+                partitions=partition, search_queries=queries, partition_configs=configs
+            )
             docs = [c.to_langchain() for c in chunks]
             # Full retrieval set before the token-budget selection below, kept
             # separately for `all_retrieved_sources` (#847).

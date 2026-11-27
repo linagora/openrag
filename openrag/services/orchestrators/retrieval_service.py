@@ -847,11 +847,14 @@ class RetrievalService:
         contextualizer_prompt: object | None = None,
         build_execution: bool = True,
         strict_prompt_resolution: bool = False,
+        partition_configs: dict[str, PartitionConfig] | None = None,
     ) -> ResolvedRetrievalPlan:
         """Resolve executable pipelines and their public identity once."""
-        await self.refresh_partition_configs()
+        if partition_configs is None:
+            await self.refresh_partition_configs()
+            partition_configs = self._partition_configs().copy()
+        configs = partition_configs
         requested = list(partitions)
-        configs = self._partition_configs().copy()
         selected = list(configs) if "all" in requested and configs else list(dict.fromkeys(requested))
         # Capture endpoint identity and routing before prompt lookups can yield.
         public = self._public_retrieval_configuration(requested, configs)
@@ -968,6 +971,7 @@ class RetrievalService:
         similarity_threshold: float | None = None,
         disable_reranker: bool = False,
         disable_expansion: bool = False,
+        partition_configs: dict[str, PartitionConfig] | None = None,
     ) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
         """The partitions grouped by the pipeline that retrieves them, each with that pipeline.
 
@@ -979,8 +983,10 @@ class RetrievalService:
         so every hydrated partition is in scope. With a single group it is kept,
         so the search stays unscoped, as in :meth:`_search_groups`.
         """
-        await self.refresh_partition_configs()
-        configs = self._partition_configs()
+        if partition_configs is None:
+            await self.refresh_partition_configs()
+            partition_configs = self._partition_configs()
+        configs = partition_configs
         if not partitions or not configs:
             # Nothing to expand (no partitions exist yet) — keep the single
             # legacy pipeline; there is no per-partition config to honour.
@@ -1564,6 +1570,7 @@ class RetrievalService:
         disable_reranker: bool = False,
         disable_expansion: bool = False,
         resolved_plan: ResolvedRetrievalPlan | None = None,
+        partition_configs: dict[str, PartitionConfig] | None = None,
     ) -> list[Chunk]:
         """Every sub-query in parallel, fused with RRF."""
         if resolved_plan is None:
@@ -1573,6 +1580,7 @@ class RetrievalService:
                 similarity_threshold=similarity_threshold,
                 disable_reranker=disable_reranker,
                 disable_expansion=disable_expansion,
+                partition_configs=partition_configs,
             )
         else:
             groups = [(list(group.partitions), group.pipeline, group.default_top_k) for group in resolved_plan.groups]
