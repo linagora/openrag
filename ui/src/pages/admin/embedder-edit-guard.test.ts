@@ -43,6 +43,29 @@ describe("diffEndpointUpdate", () => {
     expect(hasMaterialChange(changes)).toBe(true);
   });
 
+  it("preserves a disabled truncation setting on a timeout edit", () => {
+    const extra = { max_model_len: null };
+    const changes = diffEndpointUpdate({ ...embedder, extra }, update({ timeout: 45, extra }));
+
+    expect(changes.map(({ field }) => field)).toEqual(["timeout"]);
+    expect(hasMaterialChange(changes)).toBe(false);
+  });
+
+  it("flags switching from disabled truncation to the deployment default", () => {
+    const editing = { ...embedder, extra: { max_model_len: null } };
+    const changes = diffEndpointUpdate(editing, update({ extra: {} }));
+
+    expect(changes).toEqual([
+      {
+        field: "extra.max_model_len",
+        label: "max_model_len",
+        from: "Truncation disabled",
+        to: "Deployment default",
+        material: true,
+      },
+    ]);
+  });
+
   it("reports a throughput option without demanding an acknowledgement", () => {
     const withExtra = { ...embedder, extra: { embed_concurrency: 4 } } as ModelEndpointResponse;
 
