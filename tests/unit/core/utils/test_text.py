@@ -317,8 +317,8 @@ def test_literal_special_token_text_is_counted_and_budgeted(monkeypatch, fallbac
         request = OpenAICompletionRequest(prompt=content, max_tokens=1)
         budget = expected_tokens + 1
 
-    assert validate_tokens_limit(request, max_tokens_allowed=budget) == (True, "")
-    is_valid, message = validate_tokens_limit(request, max_tokens_allowed=budget - 1)
+    assert validate_tokens_limit(request, max_tokens_allowed=budget, default_output_tokens=1024) == (True, "")
+    is_valid, message = validate_tokens_limit(request, max_tokens_allowed=budget - 1, default_output_tokens=1024)
     assert is_valid is False
     assert "exceeds maximum token limit" in message
     assert (request.messages[0].content if request_type == "chat" else request.prompt) == content

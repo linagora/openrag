@@ -44,7 +44,7 @@ class RetrievalSnapshotService:
         self._commit = (commit if commit is not None else os.getenv("OPENRAG_COMMIT")) or None
 
     async def snapshot(self, partition: str, *, include_document_ids: bool = False) -> dict[str, object]:
-        detail = await self._partitions.get_partition_config(partition, strict_vector_dimension=True)
+        created_at = await self._partitions.get_partition_created_at(partition)
         has_loaded_config = getattr(self._retrieval, "has_loaded_partition_retrieval_config", None)
         if has_loaded_config is not None and not has_loaded_config(partition):
             refresh_partitions = getattr(self._partitions, "load_partitions", None)
@@ -61,22 +61,19 @@ class RetrievalSnapshotService:
                     f"Retrieval configuration for partition '{partition}' is not loaded; retry the snapshot request.",
                     code="PARTITION_RETRIEVAL_CONFIG_NOT_LOADED",
                 )
-        resolve_plan = getattr(self._retrieval, "resolve_retrieval_plan", None)
-        if resolve_plan is not None:
-            plan = await resolve_plan(
-                [partition],
-                build_execution=False,
-                strict_prompt_resolution=True,
-            )
-            public = plan.public_configuration
-            retrieval_fingerprint = plan.configuration_fingerprint
-        else:
-            public = await self._retrieval.resolved_public_retrieval_configuration([partition])
-            retrieval_fingerprint = canonical_fingerprint(public)
+        plan = await self._retrieval.resolve_retrieval_plan(
+            [partition],
+            build_execution=False,
+            strict_prompt_resolution=True,
+        )
+        public = plan.public_configuration
+        retrieval_fingerprint = plan.configuration_fingerprint
         partition_config = (public.get("partitions") or [{}])[0]
 
         embedder = self._keys(partition_config.get("embedder"), "name", "model")
-        embedder["dimensions"] = detail.get("dimension")
+        embedder["dimensions"] = await self._partitions.get_vector_dimension(
+            plan.vector_fields.get(partition), strict=True
+        )
         contextualizer = self._keys(
             partition_config.get("contextualizer"),
             "name",
@@ -153,7 +150,7 @@ class RetrievalSnapshotService:
             "partition": partition,
             "indexed_corpus_count": corpus_state.count,
             "indexed_corpus_digest": corpus_state.digest,
-            "created_at": self._json_value(detail.get("created_at")),
+            "created_at": self._json_value(created_at),
         }
         index: dict[str, object] = {
             **index_base,
