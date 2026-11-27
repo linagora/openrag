@@ -2885,9 +2885,7 @@ async def test_upload_renewal_reports_delete_after_reservation(monkeypatch) -> N
 async def test_upload_reservation_is_hidden_from_task_state() -> None:
     manager = _task_state_manager()
     assert (
-        await manager.reserve_upload_admission(
-            "upload-1", file_id="file-1", partition="tenant-a", admitted_bytes=1
-        )
+        await manager.reserve_upload_admission("upload-1", file_id="file-1", partition="tenant-a", admitted_bytes=1)
     )["accepted"]
 
     assert await manager.get_state("upload-1") is None
@@ -3244,3 +3242,38 @@ async def test_failed_worker_without_ref_holds_capacity_only_until_lease_expires
         )
         assert outcome["accepted"] is expected
         clock.now += manager._worker_lease_ttl_seconds + 1
+
+
+@pytest.mark.asyncio
+async def test_admission_settles_a_queued_orphan_when_it_observes_the_restart_first(clock, actor_table) -> None:
+    manager = _task_state_manager()
+    await _orphaned_queued_task_for_file_1(manager, restarts_at_submission=0)
+    actor_table.restarts = 1
+
+    result = await manager.reserve_upload_admission(
+        "new", file_id="new", partition="tenant-a", admitted_bytes=4, max_admitted_tasks=1, max_admitted_bytes=4
+    )
+
+    assert result["accepted"]
+    assert manager.tasks["task-1"].state == "FAILED"
+    assert manager.tasks["task-1"].error == task_state_module.ABANDONED_QUEUED_TASK_ERROR
+
+
+@pytest.mark.asyncio
+async def test_upload_transfer_requires_a_matching_reservation() -> None:
+    manager = _task_state_manager()
+    details = {"file_id": "original", "partition": "tenant-a", "metadata": {}, "user_id": 1}
+    await manager.set_details("ordinary", **details)
+    assert (
+        await manager.reserve_upload_admission("upload", file_id="original", partition="tenant-a", admitted_bytes=4)
+    )["accepted"]
+    for task_id, identity in (
+        ("ordinary", details),
+        ("upload", {**details, "file_id": "other"}),
+        ("upload", {**details, "partition": "tenant-b"}),
+    ):
+        result = await manager.set_queued_details_v2(task_id, **identity, require_upload_reservation=True)
+        assert result["reason"] == task_state_module.QUEUE_REFUSED_UPLOAD_RESERVATION_EXPIRED
+    for _ in range(2):
+        result = await manager.set_queued_details_v2("upload", **details, require_upload_reservation=True)
+        assert result["accepted"]

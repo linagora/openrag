@@ -30,12 +30,20 @@ When generating migrations, always provide a clear, descriptive revision message
 Replace **`<revision_message>`** with your descriptive message before running the following command. The command will automatically generate a new migration script based on detected model changes.
 :::
 
+:::note[Generating needs your checkout mounted and writable]
+Generating writes a new file into the source tree, so it only makes sense in dev mode. Uncomment the `../../openrag:/app/openrag` source mount on the `openrag` service in `docker-compose.yaml`, otherwise the script stays in the throwaway container. The command runs as the image's non-root app user (`APP_UID`, default `1000`), so build the image with your own UID so that user can write to your checkout. The prefix `APP_UID=$(id -u)` below does that, and `-e APP_UID="$(id -u)"` keeps an `APP_UID` set in your `.env` from overriding it at runtime. Applying migrations (`upgrade head`) only reads these files and needs neither.
+:::
+
+:::caution[If an earlier command fails with `Permission denied`]
+Older versions of these commands bypassed the entrypoint (`--entrypoint "..."`) and ran as root, which can leave root-owned files in the `openrag_venv` volume. Remove the volume once so it resyncs: `docker compose down`, then `docker volume rm <project>_openrag_venv` (`docker volume ls` lists the name).
+:::
+
 ```bash "<revision_message>" title="Generate a migration script..."
 docker compose up -d rdb
-docker compose \
-    run --no-deps --build --rm \
-    --entrypoint "uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini revision --autogenerate -m '<revision_message>'" \
-    openrag
+APP_UID=$(id -u) docker compose \
+    run --no-deps --build --rm -e APP_UID="$(id -u)" \
+    openrag \
+    uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini revision --autogenerate -m '<revision_message>'
 ```
 
 It will create a new migration script in the `openrag/services/persistence/migrations/alembic/versions/` directory.
@@ -54,18 +62,28 @@ Rebuilds the image to ensure the migration runs against the exact code being dep
 docker compose up -d rdb
 docker compose \
     run --no-deps --build --rm \
-    --entrypoint "uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head" \
-    openrag; docker compose down
+    openrag \
+    uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head; docker compose down
 ```
 
 #### Option B: Docker exec (stack already running)
 
-If the stack is already running, skip the rebuild:
+If the stack is already running, skip the rebuild. `docker compose exec` starts the command as root, so run it through the image's entrypoint, which drops to the app user first:
 
 ```bash title="Apply migrations (exec)"
-docker compose exec openrag \
+docker compose exec openrag /app/entrypoint.sh \
     uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head
 ```
+
+:::caution[Images up to 2.3.5]
+This command and the exec tip below need OpenRAG 2.3.6 or later. Older entrypoints ignore their arguments, so the command starts a second OpenRAG instead of migrating. With those images, run the migration as the app user with the entrypoint's umask:
+
+```bash title="Apply migrations (exec, up to 2.3.5)"
+APP_UID=$(docker compose exec -T openrag printenv APP_UID)
+docker compose exec --user "$APP_UID:0" openrag sh -c \
+    'umask 002 && exec uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head'
+```
+:::
 
 #### Option C: Local (development)
 
@@ -79,7 +97,7 @@ DATABASE_URL=postgresql://user:pass@localhost:5432/openrag \
 :::tip[Quick alternative: run inside a running container]
 If your stack is already running, you can apply migrations directly without rebuilding:
 ```bash title="Apply migrations via exec"
-docker compose exec -w /app/openrag openrag \
+docker compose exec -w /app/openrag openrag /app/entrypoint.sh \
   /app/.venv/bin/alembic -c services/persistence/migrations/alembic/alembic.ini upgrade head
 ```
 :::
@@ -109,19 +127,19 @@ This usually happens when two or more migration scripts are created independentl
 
      ```bash title="Merge Alembic heads"
      docker compose up -d rdb
-     docker compose run --no-deps --build --rm \
-         --entrypoint "uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini merge -m 'merge heads' <head1> <head2>" \
-         openrag
+     APP_UID=$(id -u) docker compose run --no-deps --build --rm -e APP_UID="$(id -u)" \
+         openrag \
+         uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini merge -m 'merge heads' <head1> <head2>
      ```
-     This will generate a new migration script that merges the two branches.
+     This will generate a new migration script that merges the two branches. Like generating, it needs the source mount and `APP_UID=$(id -u)` (see [Step 1](#step-1-generate-a-migration-script)).
 
 2. **Apply the migrations as usual:**
 
      ```bash title="Apply migrations after merge"
      docker compose up -d rdb
      docker compose run --no-deps --build --rm \
-         --entrypoint "uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head" \
-         openrag; docker compose down
+         openrag \
+         uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head; docker compose down
      ```
 
 ---

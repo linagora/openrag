@@ -321,7 +321,11 @@ Returns 201 Created with a task status URL for tracking indexing progress.
             "description": "The file exceeds either the per-upload size limit or shared indexing admission byte limit."
         },
         429: {"description": "Admission saturation includes `Retry-After`."},
-        503: {"description": "The upload-size ceiling exceeds the shared indexing admission byte budget."},
+        503: {
+            "description": "The file size cannot be determined (`INDEXING_ADMISSION_SIZE_UNAVAILABLE`), "
+            "admission is unavailable (`INDEXING_ADMISSION_UNAVAILABLE`), or indexing outcomes "
+            "are awaiting persistence (`INDEXING_OUTCOME_BACKLOG`)."
+        },
     },
 )
 async def add_file(
@@ -531,7 +535,11 @@ Returns 202 Accepted with a task status URL for tracking indexing progress.
             "description": "The file exceeds either the per-upload size limit or shared indexing admission byte limit."
         },
         429: {"description": "Admission saturation includes `Retry-After`."},
-        503: {"description": "The upload-size ceiling exceeds the shared indexing admission byte budget."},
+        503: {
+            "description": "The file size cannot be determined (`INDEXING_ADMISSION_SIZE_UNAVAILABLE`), "
+            "admission is unavailable (`INDEXING_ADMISSION_UNAVAILABLE`), or indexing outcomes "
+            "are awaiting persistence (`INDEXING_OUTCOME_BACKLOG`)."
+        },
     },
 )
 async def put_file(

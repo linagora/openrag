@@ -69,7 +69,6 @@ from core.utils.logging import get_logger
 from di.container import ServiceContainer
 from di.providers import get_container, set_container
 from di.workers import ensure_worker_bootstrap
-from dotenv import dotenv_values
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
@@ -90,10 +89,6 @@ validate_upload_admission_config(settings)
 CONTAINER_STARTUP_TIMEOUT = float(
     os.getenv("OPENRAG_CONTAINER_STARTUP_TIMEOUT", max(60, settings.rdb.command_timeout * 4))
 )
-
-SHARED_ENV = os.environ.get("SHARED_ENV", None)
-env_vars = dotenv_values(SHARED_ENV) if SHARED_ENV else {}
-env_vars["PYTHONPATH"] = "/app/openrag"
 
 AUTH_TOKEN: str | None = os.getenv("AUTH_TOKEN")
 # Host port the admin UI (nginx) is published on. The container listens on :8080

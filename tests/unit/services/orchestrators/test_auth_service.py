@@ -12,7 +12,9 @@ import pytest
 from core.config.auth import OIDCConfig
 from core.models.user import FileSlotGrant, PartitionRole, User, UserPartition
 from core.utils.exceptions import OpenRAGError
+from core.utils.logging import hash_oidc_sub
 from cryptography.fernet import Fernet
+from loguru import logger
 from services.auth import StateCookieSerializer, hash_session_token
 from services.auth.oidc_client import _CLOCK_SKEW_LEEWAY, LogoutTokenClaims, TokenBundle
 from services.orchestrators.auth_service import AuthService, OIDCFlowError
@@ -320,32 +322,121 @@ async def test_callback_state_mismatch():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("claims", "marker"),
+    [
+        ({}, None),
+        ({"sub": None}, None),
+        ({"sub": ""}, None),
+        ({"sub": "   "}, None),
+        ({"sub": 987654321}, "987654321"),
+        ({"sub": 0}, None),
+        ({"sub": ["malformed-subject-in-list"]}, "malformed-subject-in-list"),
+        ({"sub": []}, None),
+        ({"sub": {"nested": "malformed-subject-in-dict"}}, "malformed-subject-in-dict"),
+        ({"sub": {}}, None),
+    ],
+)
+async def test_callback_rejects_malformed_sub_claim(claims, marker):
+    svc = _service(client=FakeOIDCClient(bundle=_bundle(claims=claims)))
+
+    log_messages = []
+    handler_id = logger.add(
+        lambda message: log_messages.append(str(message)),
+        format="{message} {extra}\n{exception}",
+        level="DEBUG",
+    )
+
+    try:
+        state, cookie = await _login_and_get_state(svc)
+        with pytest.raises(OIDCFlowError) as ei:
+            await svc.handle_oidc_callback(
+                code="abc",
+                state=state,
+                state_cookie_raw=cookie,
+            )
+    finally:
+        logger.remove(handler_id)
+
+    assert ei.value.status_code == 400
+    assert "must be a non-empty string" in ei.value.message
+
+    captured_logs = "".join(log_messages)
+    assert "Invalid OIDC ID token: 'sub' claim must be a non-empty string" in captured_logs
+    assert "AttributeError" not in captured_logs
+    if marker is not None:
+        assert marker not in captured_logs
+
+
+@pytest.mark.asyncio
 async def test_callback_unregistered_user_rejected():
-    svc = _service(user_repo=FakeUserRepo({}), client=FakeOIDCClient(bundle=_bundle()))
-    state, cookie = await _login_and_get_state(svc)
-    with pytest.raises(OIDCFlowError) as ei:
-        await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+    sub = "kc-unregistered"
+    svc = _service(
+        user_repo=FakeUserRepo({}),
+        client=FakeOIDCClient(bundle=_bundle(claims={"sub": sub})),
+    )
+
+    log_messages = []
+    handler_id = logger.add(
+        lambda message: log_messages.append(str(message)),
+        level="WARNING",
+    )
+
+    try:
+        state, cookie = await _login_and_get_state(svc)
+        with pytest.raises(OIDCFlowError) as ei:
+            await svc.handle_oidc_callback(
+                code="abc",
+                state=state,
+                state_cookie_raw=cookie,
+            )
+    finally:
+        logger.remove(handler_id)
+
     assert ei.value.status_code == 403
     assert ei.value.message == "User not registered"
+
+    captured_logs = "".join(log_messages)
+    assert sub not in captured_logs
+    assert f"sub_hash={hash_oidc_sub(sub)}" in captured_logs
 
 
 @pytest.mark.asyncio
 async def test_callback_auto_provisions_when_enabled():
+    sub = "kc-bob"
     urepo = FakeUserRepo({})
     svc = _service(
         user_repo=urepo,
-        client=FakeOIDCClient(bundle=_bundle(claims={"sub": "kc-bob", "name": "Bob", "email": "bob@x.io"})),
+        client=FakeOIDCClient(bundle=_bundle(claims={"sub": sub, "name": "Bob", "email": "bob@x.io"})),
         cfg=_cfg(auto_provision_login=True),
     )
-    state, cookie = await _login_and_get_state(svc)
-    result = await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+
+    log_messages = []
+    handler_id = logger.add(
+        lambda message: log_messages.append(str(message)),
+        level="INFO",
+    )
+
+    try:
+        state, cookie = await _login_and_get_state(svc)
+        result = await svc.handle_oidc_callback(
+            code="abc",
+            state=state,
+            state_cookie_raw=cookie,
+        )
+    finally:
+        logger.remove(handler_id)
 
     assert len(urepo.created) == 1
     created = urepo.created[0]
-    assert created.external_user_id == "kc-bob"
+    assert created.external_user_id == sub
     assert created.display_name == "Bob"
     assert created.is_admin is False
     assert result.next_url == "/home"
+
+    captured_logs = "".join(log_messages)
+    assert sub not in captured_logs
+    assert f"sub_hash={hash_oidc_sub(sub)}" in captured_logs
 
 
 @pytest.mark.asyncio
@@ -358,13 +449,30 @@ async def test_callback_auto_provision_email_collision_returns_conflict():
         cfg=_cfg(auto_provision_login=True),
     )
 
-    state, cookie = await _login_and_get_state(svc)
-    with pytest.raises(OIDCFlowError) as ei:
-        await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+    log_messages = []
+    handler_id = logger.add(
+        lambda message: log_messages.append(str(message)),
+        level="ERROR",
+    )
+
+    try:
+        state, cookie = await _login_and_get_state(svc)
+        with pytest.raises(OIDCFlowError) as ei:
+            await svc.handle_oidc_callback(
+                code="abc",
+                state=state,
+                state_cookie_raw=cookie,
+            )
+    finally:
+        logger.remove(handler_id)
 
     assert ei.value.status_code == 409
     assert "already exists" in ei.value.message
     assert not urepo.created
+
+    captured_logs = "".join(log_messages)
+    assert "kc-new" not in captured_logs
+    assert f"sub_hash={hash_oidc_sub('kc-new')}" in captured_logs
 
 
 @pytest.mark.asyncio
@@ -396,6 +504,79 @@ async def test_callback_refuses_an_account_managed_by_config():
     assert (managed.display_name, managed.email, managed.is_admin) == ("cozy-stack", None, True)
     assert mrepo.assigned == [] and mrepo.updated == [] and mrepo.removed == []
     assert srepo.created == []
+
+
+class FailingUserRepo(FakeUserRepo):
+    def __init__(self, *, failure_message: str):
+        super().__init__({})
+        self.failure_message = failure_message
+
+    async def create_user(self, user: User) -> User:
+        error = RuntimeError(self.failure_message)
+        error.sqlstate = "23505"
+        raise error
+
+
+@pytest.mark.asyncio
+async def test_callback_auto_provision_failure_does_not_log_raw_sub():
+    sub = "kc-provision-failure"
+    id_token = "id-token-sensitive-value"
+    access_token = "access-token-sensitive-value"
+    refresh_token = "refresh-token-sensitive-value"
+    claim_secret = "private-claim-sensitive-value"
+    svc = _service(
+        user_repo=FailingUserRepo(
+            failure_message=f"database error {sub} {id_token} {access_token} {refresh_token} {claim_secret}"
+        ),
+        client=FakeOIDCClient(
+            bundle=_bundle(
+                id_token=id_token,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                claims={
+                    "sub": sub,
+                    "name": "Bob",
+                    "email": "bob@example.com",
+                    "private_claim": claim_secret,
+                },
+            )
+        ),
+        cfg=_cfg(auto_provision_login=True),
+    )
+
+    log_messages = []
+    handler_id = logger.add(
+        lambda message: log_messages.append(str(message)),
+        format="{message} {extra}\n{exception}",
+        level="ERROR",
+    )
+
+    try:
+        state, cookie = await _login_and_get_state(svc)
+        with pytest.raises(OIDCFlowError) as ei:
+            await svc.handle_oidc_callback(
+                code="abc",
+                state=state,
+                state_cookie_raw=cookie,
+            )
+    finally:
+        logger.remove(handler_id)
+
+    assert ei.value.status_code == 500
+
+    captured_logs = "".join(log_messages)
+    assert sub not in captured_logs
+    assert id_token not in captured_logs
+    assert access_token not in captured_logs
+    assert refresh_token not in captured_logs
+    assert claim_secret not in captured_logs
+    assert hash_oidc_sub(sub) in captured_logs
+    assert "RuntimeError" in captured_logs
+    assert "database error" not in captured_logs
+    assert "23505" in captured_logs
+    assert "exception_stack" in captured_logs
+    assert "auth_service.py" in captured_logs
+    assert "_resolve_user" in captured_logs
 
 
 @pytest.mark.asyncio
@@ -455,7 +636,7 @@ async def test_claim_mapping_rejects_userinfo_sub_mismatch():
 @pytest.mark.asyncio
 async def test_backchannel_logout_revokes_by_sid():
     srepo = FakeSessionRepo()
-    claims = LogoutTokenClaims(iss="i", aud="openrag", sub="s", sid="sess-9", iat=0, jti=None, exp=1)
+    claims = LogoutTokenClaims(iss="i", aud="openrag", sub="s", sid="sess-9", iat=0, jti="jti-revoke-sid", exp=1)
     svc = _service(session_repo=srepo, client=FakeOIDCClient(logout_claims=claims))
     count = await svc.handle_backchannel_logout("tok")
     assert count == 3
@@ -473,10 +654,77 @@ async def test_backchannel_logout_invalid_token_carries_description():
 @pytest.mark.asyncio
 async def test_backchannel_logout_sidless_is_noop_200():
     srepo = FakeSessionRepo()
-    claims = LogoutTokenClaims(iss="i", aud="openrag", sub="s", sid=None, iat=0, jti=None, exp=1)
+    claims = LogoutTokenClaims(iss="i", aud="openrag", sub="s", sid=None, iat=0, jti="jti-sidless-noop", exp=1)
     svc = _service(session_repo=srepo, client=FakeOIDCClient(logout_claims=claims))
     assert await svc.handle_backchannel_logout("tok") == 0
     assert srepo.revoked_sids == []
+
+
+@pytest.mark.asyncio
+async def test_backchannel_logout_sidless_logs_sub_hash_and_hides_raw_sub():
+    sub = "private-sidless-sub-123"
+    srepo = FakeSessionRepo()
+    claims = LogoutTokenClaims(iss="i", aud="openrag", sub=sub, sid=None, iat=0, jti="jti-sidless-logs", exp=1)
+    svc = _service(session_repo=srepo, client=FakeOIDCClient(logout_claims=claims))
+
+    log_messages = []
+    handler_id = logger.add(
+        lambda message: log_messages.append(str(message)),
+        format="{message} {extra}\n{exception}",
+        level="WARNING",
+    )
+
+    try:
+        count = await svc.handle_backchannel_logout("tok")
+    finally:
+        logger.remove(handler_id)
+
+    assert count == 0
+    assert srepo.revoked_sids == []
+
+    captured_logs = "".join(log_messages)
+    assert sub not in captured_logs
+    assert f"sub_hash={hash_oidc_sub(sub)}" in captured_logs
+    assert "Received sid-less back-channel logout token" in captured_logs
+
+
+@pytest.mark.asyncio
+async def test_backchannel_logout_sid_only_token_revokes_by_sid():
+    srepo = FakeSessionRepo()
+    claims = LogoutTokenClaims(
+        iss="i",
+        aud="openrag",
+        sub=None,
+        sid="sess-sid-only",
+        iat=0,
+        jti="jti-sid-only",
+        exp=1,
+    )
+    svc = _service(session_repo=srepo, client=FakeOIDCClient(logout_claims=claims))
+
+    assert await svc.handle_backchannel_logout("tok") == 3
+    assert srepo.revoked_sids == ["sess-sid-only"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sub", "sid", "jti"),
+    [
+        (None, None, "jti-missing-identifiers"),
+        ({"malformed": "subject"}, None, "jti-malformed-sub"),
+        ("valid-sub", ["malformed", "sid"], "jti-malformed-sid"),
+        ("valid-sub", "valid-sid", ["malformed", "jti"]),
+    ],
+)
+async def test_backchannel_logout_rejects_malformed_claims(sub, sid, jti):
+    claims = LogoutTokenClaims(iss="i", aud="openrag", sub=sub, sid=sid, iat=0, jti=jti, exp=1)
+    svc = _service(client=FakeOIDCClient(logout_claims=claims))
+
+    with pytest.raises(OIDCFlowError) as ei:
+        await svc.handle_backchannel_logout("tok")
+
+    assert ei.value.status_code == 400
+    assert ei.value.error_description == ei.value.message
 
 
 @pytest.mark.asyncio

@@ -149,6 +149,8 @@ class TestMimetypePicksTheType:
             ),
             ("workbook", "application/vnd.ms-excel.sheet.macroEnabled.12", DocumentType.XLSX),
             ("workbook.xlsm", None, DocumentType.XLSX),
+            ("workbook.XLS", None, DocumentType.XLS),
+            ("workbook", "application/vnd.ms-excel", DocumentType.XLS),
             ("minutes.cozy-note", "application/x-unknown", DocumentType.TEXT),
             ("report", None, DocumentType.TEXT),
         ],

@@ -825,6 +825,14 @@ reranker:
   # instead of 100-125 s in our tests.
   extraEnv: []
   replicas: 1
+  # To share a GPU with the pods that request nvidia.com/gpu, set
+  # runtimeClassName (e.g. "nvidia") and a nodeSelector for the GPU nodes, as
+  # values-linagora.yaml does. Left empty, the reranker runs on CPU unless the
+  # node's default runtime is NVIDIA's. The chart sets NVIDIA_VISIBLE_DEVICES
+  # to all and NVIDIA_DRIVER_CAPABILITIES to compute,utility, as the image
+  # does; a value in extraEnv or env.config replaces it. On a node with several
+  # GPUs, all also exposes those the scheduler gave to other pods: set
+  # NVIDIA_VISIBLE_DEVICES in extraEnv to the card to share (e.g. "0").
   runtimeClassName: ""
   # service.port is the port Infinity listens on, the Service port, and the one
   # in RERANKER_BASE_URL. It replaces servicePort.
@@ -1302,8 +1310,6 @@ env:
     # RAY_ADDRESS: 'ray://{{ include "openrag-stack.fullname" . }}-raycluster-head-svc:10001'
     RAY_POOL_SIZE: "1"
     RAY_MAX_TASKS_PER_WORKER: "50"
-    # Keep at least as large as MAX_UPLOAD_SIZE_MB × 1 MiB.
-    RAY_MAX_ADMITTED_BYTES: "1073741824"
     RAY_DASHBOARD_PORT: "8265"
     RAY_task_retry_delay_ms: "3000"
     RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
@@ -1322,6 +1328,10 @@ env:
     # only resolves within values.yaml and goes stale once overridden via
     # --set/-f) so the secret always matches the actual DB credential.
     POSTGRES_PASSWORD: "{{ .Values.postgresql.auth.password }}"
+    # For lockout revalidation, use `or-` plus 32 lowercase hex digits.
+    # Run this in a shell and set AUTH_TOKEN to its output:
+    #   printf 'or-%s\n' "$(openssl rand -hex 16)"
+    # Other valid token formats remain subject to 429 during a failed-auth lockout.
     AUTH_TOKEN: "" # API KEY for OpenRAG
     METRICS_TOKEN: "" # Bearer for Prometheus on GET /metrics; empty = 403 unless METRICS_ALLOW_UNAUTHENTICATED
     HF_TOKEN: "" # HuggingFace token

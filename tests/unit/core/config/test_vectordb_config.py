@@ -66,3 +66,37 @@ def test_vectordb_json_budget_overrides(monkeypatch, tmp_path, source) -> None:
 
     assert config.json_max_length == 32768
     assert config.json_safety_margin_bytes == 512
+
+
+def test_vectordb_insert_batch_defaults_stay_below_the_milvus_request_limit() -> None:
+    config = VectorDBConfig()
+    # Milvus's proxy refuses a request over 128 MiB by default, and a 56 MiB
+    # one held the next write for about a minute; the estimate errs high.
+    assert config.insert_batch_max_bytes == 16 * 1024 * 1024
+    assert config.insert_batch_max_rows == 10_000
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"insert_batch_max_bytes": 0},
+        {"insert_batch_max_bytes": -1},
+        {"insert_batch_max_bytes": 1.5},
+        {"insert_batch_max_rows": 0},
+        {"insert_batch_max_rows": True},
+    ],
+)
+def test_vectordb_rejects_invalid_insert_batch_limits(overrides) -> None:
+    with pytest.raises(ValidationError):
+        VectorDBConfig(**overrides)
+
+
+def test_vectordb_insert_batch_limits_can_be_overridden_from_env(monkeypatch, tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text("retriever:\n  type: single\n", encoding="utf-8")
+    monkeypatch.setenv("VDB_INSERT_BATCH_MAX_BYTES", "33554432")
+    monkeypatch.setenv("VDB_INSERT_BATCH_MAX_ROWS", "2000")
+
+    config = load_config(config_path=tmp_path).vectordb
+
+    assert config.insert_batch_max_bytes == 33_554_432
+    assert config.insert_batch_max_rows == 2_000

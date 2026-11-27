@@ -4,6 +4,7 @@ goes on from it (an agentic loop)."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,6 +22,9 @@ class RecordingQueryService:
 
     async def refresh_partition_configs(self) -> None:
         pass
+
+    def resolve_chat_request(self, _partitions):
+        return SimpleNamespace(endpoint_name="default")
 
     async def chat(self, **kwargs: Any) -> dict:
         self.calls["chat"] = kwargs

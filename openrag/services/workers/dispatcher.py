@@ -993,7 +993,21 @@ class WorkerDispatcher(IndexingDispatcher):
 
         target_catalog_metadata = dict(catalog_metadata)
         target_catalog_metadata.update(public_metadata)
-        await self._upsert_entities(entities, protected_metadata=target_catalog_metadata)
+        try:
+            await self._upsert_entities(entities, protected_metadata=target_catalog_metadata)
+        except BaseException:
+            # A large file is written in several requests: those before a failed
+            # or cancelled one carry the new metadata while the catalog keeps the
+            # old, and a metadata filter would find part of the file. Its rows go
+            # back as they were read.
+            try:
+                await self._upsert_entities(rows, protected_metadata=catalog_metadata)
+            except Exception as exc:
+                logger.bind(file_id=file_id, partition=partition).warning(
+                    "Could not restore the chunks of a failed metadata change; sending the change again completes it",
+                    error=str(exc),
+                )
+            raise
 
         await self._document_repo.update_file_metadata_in_db(file_id, partition, public_metadata)
 
@@ -1053,7 +1067,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 entity.pop("_id", None)
                 entity.update(public_metadata)
                 entity["indexed_at"] = indexed_at.isoformat()
-                # Marks this copy's chunks, so a refused catalog write removes exactly them.
+                # Marks this copy's chunks, so a copy that fails removes exactly them.
                 entity[INDEXING_TASK_ID_METADATA_KEY] = claim_token
                 entities.append(entity)
 
@@ -1072,7 +1086,17 @@ class WorkerDispatcher(IndexingDispatcher):
                     catalog_kwargs["embedder_fingerprint"] = embedder_fingerprint
             if indexation_config is not None:
                 catalog_kwargs["indexation_config"] = indexation_config
-            await self._insert_entities(entities, protected_metadata=file_metadata)
+            try:
+                # A large file is inserted in several requests; a failed or
+                # cancelled copy leaves the ones already written behind,
+                # removed here before the claim is released. A cancel lets the
+                # request in flight finish first, so none lands after this delete.
+                await self._insert_entities(entities, protected_metadata=file_metadata)
+            except BaseException:
+                await self._cleanup_submitted_vectors(
+                    claim_token, metadata={"file_id": target_file_id}, partition=target_partition
+                )
+                raise
             try:
                 await self._document_repo.add_file_to_partition(
                     file_id=target_file_id,
@@ -1091,6 +1115,8 @@ class WorkerDispatcher(IndexingDispatcher):
                     **catalog_kwargs,
                 )
             except Exception:
+                # Not on a cancellation: the catalog row may have been committed
+                # all the same, and a registered copy must keep its chunks.
                 await self._cleanup_submitted_vectors(
                     claim_token, metadata={"file_id": target_file_id}, partition=target_partition
                 )

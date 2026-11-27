@@ -92,8 +92,8 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # counts the file without consuming the slot, so the upload is counted twice
 # until its task settles and the user's next upload can be refused; a worker
 # from a v20 build of #664 alone would not take fence_holder_id.
-# v22 was assigned to #1368 as well. This generation includes bounded upload
-# admission and must not share an actor identity with that incompatible API.
+# v22 adds XLS parsing. v23 adds bounded upload admission and must use new
+# actor identities so these API processes never attach to earlier workers.
 _INDEXER_ACTOR_PROTOCOL_VERSION = "v23"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 

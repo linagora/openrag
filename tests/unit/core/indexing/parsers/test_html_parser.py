@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 import base64
+from contextlib import asynccontextmanager
 
 import pytest
 from core.indexing.parsers.html_parser import HtmlParser
 from core.models.document import Document, DocumentType
+from services.workers.stages import caption as caption_module
 from services.workers.stages.caption import caption_stage
+
+
+@pytest.fixture(autouse=True)
+async def _noop_vlm_semaphore(monkeypatch):
+    """Stub the cluster-wide VLM semaphore so caption tests don't boot Ray."""
+
+    @asynccontextmanager
+    async def _noop():
+        yield
+
+    monkeypatch.setattr(caption_module, "get_vlm_semaphore", _noop)
 
 
 def _html_with_image(payload: bytes = b"image-bytes") -> str:
@@ -89,3 +102,155 @@ async def test_html_parser_sanitizes_data_uri_links():
 
     assert processed.text_blocks[0].text == "logo"
     assert processed.images == []
+
+
+@pytest.mark.asyncio
+async def test_caption_inside_tbody_is_kept():
+    html = "<table><tbody><caption>alpha beta</caption><tr><td>cell</td></tr></tbody></table>"
+
+    processed = await HtmlParser().parse(
+        Document(
+            filename="u.html",
+            content_type=DocumentType.HTML,
+            raw_bytes=html.encode("utf-8"),
+        )
+    )
+
+    text = processed.text_blocks[0].text
+
+    assert "cell" in text
+    assert "alpha" in text and "beta" in text
+
+
+@pytest.mark.asyncio
+async def test_html_parser_preserves_plain_paragraph():
+    html = "<p>Report caption: alpha beta</p>"
+
+    processed = await HtmlParser().parse(
+        Document(
+            filename="caption.html",
+            content_type=DocumentType.HTML,
+            text=html,
+        )
+    )
+
+    text = processed.text_blocks[0].text
+
+    assert "Report caption: alpha beta" in text
+
+
+@pytest.mark.asyncio
+async def test_html_parser_preserves_valid_table_caption():
+    html = "<table><caption>Report summary</caption><tbody><tr><td>alpha</td></tr></tbody></table>"
+
+    processed = await HtmlParser().parse(
+        Document(
+            filename="caption.html",
+            content_type=DocumentType.HTML,
+            text=html,
+        )
+    )
+
+    text = processed.text_blocks[0].text
+
+    assert "Report summary" in text
+    assert "alpha" in text
+
+
+@pytest.mark.asyncio
+async def test_html_parser_preserves_escaped_angle_brackets_in_caption():
+    html = (
+        "<table>"
+        "<caption>Table containing &lt;script&gt; as text</caption>"
+        "<tbody><tr><td>unique-caption-cell</td></tr></tbody>"
+        "</table>"
+    )
+
+    processed = await HtmlParser().parse(
+        Document(
+            filename="escaped-caption.html",
+            content_type=DocumentType.HTML,
+            text=html,
+        )
+    )
+
+    text = processed.text_blocks[0].text
+
+    assert "Table containing <script> as text" in text
+    assert "unique-caption-cell" in text
+
+
+@pytest.mark.asyncio
+async def test_html_parser_preserves_literal_image_attributes_with_caption():
+    html = (
+        "<table>"
+        "<caption>Image table</caption>"
+        "<tbody><tr><td>"
+        '<img alt="été" src="https://example.com/image.png?a=1&b=2">'
+        "</td></tr></tbody>"
+        "</table>"
+    )
+
+    processed = await HtmlParser().parse(
+        Document(
+            filename="image-caption.html",
+            content_type=DocumentType.HTML,
+            text=html,
+        )
+    )
+
+    text = processed.text_blocks[0].text
+
+    assert "été" in text
+    assert "&eacute;" not in text
+    assert "a=1&amp;b=2" in text
+
+
+@pytest.mark.asyncio
+async def test_html_parser_preserves_content_around_table_with_bare_col():
+    html = (
+        "<p>T\u00e9l\u00e9chargez le rapport</p>"
+        "<table><colgroup><col></colgroup>"
+        "<tbody><caption>Table summary</caption>"
+        "<tr><td>unique-cell-value</td></tr></tbody></table>"
+        "<p>apr\u00e8s</p>"
+    )
+
+    processed = await HtmlParser().parse(
+        Document(
+            filename="col.html",
+            content_type=DocumentType.HTML,
+            raw_bytes=html.encode("utf-8"),
+        )
+    )
+
+    text = processed.text_blocks[0].text
+
+    assert "T\u00e9l\u00e9chargez le rapport" in text
+    assert "Table summary" in text
+    assert "unique-cell-value" in text
+    assert "apr\u00e8s" in text
+
+
+@pytest.mark.asyncio
+async def test_html_parser_preserves_unicode_attribute_values_with_caption():
+    html = (
+        "<table><caption>Résumé</caption><tbody>"
+        "<tr><td>"
+        '<abbr title="Société">Sté</abbr>, '
+        '<a href="/x" title="L’été">lien</a>'
+        "</td></tr></tbody></table>"
+    )
+
+    processed = await HtmlParser().parse(
+        Document(
+            filename="unicode-attributes.html",
+            content_type=DocumentType.HTML,
+            text=html,
+        )
+    )
+
+    text = processed.text_blocks[0].text
+
+    assert "Sté (Société)" in text
+    assert '[lien](/x "L’été")' in text

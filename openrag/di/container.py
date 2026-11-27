@@ -624,7 +624,7 @@ class ServiceContainer:
                         embedder=self.embedder_factory(embedder_name),
                         document_repo=self.document_repo,
                         collection=settings.vectordb.collection_name,
-                        vector_field=lambda: _vector_field_for(embedder_name),
+                        vector_field=_vector_field_for(embedder_name),
                     ),
                     self.document_repo,
                 )
@@ -830,6 +830,7 @@ class ServiceContainer:
                 conversion_service=self.conversion_service,
                 vector_store=self.vector_store,
                 collection=settings.vectordb.collection_name,
+                data_dir=settings.paths.data_dir,
                 default_top_k=mcp_cfg.default_top_k,
                 max_top_k=mcp_cfg.max_top_k,
                 similarity_threshold=mcp_cfg.similarity_threshold,

@@ -153,7 +153,8 @@ class IndexingPipeline:
     # upload, for inspecting parser output.
     save_markdown: bool = False
     # ``paths.data_dir``. The markdown copy is only written for uploads stored
-    # under it; anything else (e.g. MCP ``index_url`` temp downloads) is skipped.
+    # under it; anything else (a file stored under an earlier ``data_dir``) is
+    # skipped.
     data_dir: Path | None = None
 
     async def run(
@@ -223,6 +224,7 @@ class IndexingPipeline:
             and document.content_type
             in {
                 DocumentType.CSV,
+                DocumentType.XLS,
                 DocumentType.XLSX,
             }
         ):
@@ -896,9 +898,10 @@ async def _save_markdown(row: MutableMapping[str, Any], data_dir: Path | None) -
     """Write the parsed markdown to ``<upload>.md`` next to the stored upload.
 
     Runs after captioning, so image descriptions are already in the text. Rows
-    without a ``source_path`` have nowhere to write, and a ``source_path``
-    outside ``data_dir`` (an MCP ``index_url`` temp download) would leave the
-    copy under a random name in a node's temp dir, so both are skipped.
+    without a ``source_path`` have nowhere to write, and a copy next to a
+    ``source_path`` outside ``data_dir`` (a file stored under an earlier
+    ``data_dir``, or a URL MCP indexed before it downloaded there) would land
+    where nothing cleans up, so both are skipped.
     Rendering and writing run together off the event loop. Best effort: a
     debugging copy must never fail the file, so an error in either is only
     logged.

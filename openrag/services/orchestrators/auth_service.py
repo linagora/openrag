@@ -27,7 +27,7 @@ from urllib.parse import urlencode, urlparse
 from core.models.user import FileSlotGrant, OIDCSession, PartitionRole, User, UserPartition
 from core.utils.consts import is_reserved_partition_name
 from core.utils.exceptions import AuthError, OpenRAGError
-from core.utils.logging import get_logger, mask_email
+from core.utils.logging import get_logger, hash_oidc_sub, mask_email, safe_exception_stack
 from services.auth import (
     OIDCClient,
     StateCookiePayload,
@@ -37,7 +37,7 @@ from services.auth import (
     hash_session_token,
     issue_session_token,
 )
-from services.auth.oidc_client import _CLOCK_SKEW_LEEWAY, _LOGOUT_TOKEN_MAX_AGE_WITHOUT_EXP
+from services.auth.oidc_client import _CLOCK_SKEW_LEEWAY, _LOGOUT_TOKEN_MAX_AGE_WITHOUT_EXP, LogoutTokenClaims
 from services.auth.oidc_groups import extract_partition_roles
 
 if TYPE_CHECKING:
@@ -49,6 +49,18 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 SESSION_COOKIE_NAME = "openrag_session"
+
+
+def _safe_sqlstate(error: Exception) -> str | None:
+    """Return only a PostgreSQL SQLSTATE-shaped value from an exception."""
+    value = getattr(error, "sqlstate", None)
+    if (
+        isinstance(value, str)
+        and len(value) == 5
+        and all(char in "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" for char in value)
+    ):
+        return value
+    return None
 
 
 class OIDCFlowError(OpenRAGError):
@@ -230,8 +242,9 @@ class AuthService:
             raise OIDCFlowError("OIDC code exchange failed") from e
 
         sub = bundle.claims.get("sub")
-        if not sub:
-            raise OIDCFlowError("ID token missing 'sub' claim.")
+        if not isinstance(sub, str) or not sub.strip():
+            logger.warning("Invalid OIDC ID token: 'sub' claim must be a non-empty string")
+            raise OIDCFlowError("ID token 'sub' claim must be a non-empty string.")
 
         user = await self._resolve_user(sub, bundle.claims)
         user = await self._sync_auto_provisioned(user, sub, bundle.claims)
@@ -275,6 +288,7 @@ class AuthService:
         client = self._require_client()
         try:
             claims = await client.verify_logout_token(logout_token)
+            self._validate_logout_claims(claims)
         except ValueError as e:
             logger.warning(f"Invalid back-channel logout token: {e}")
             raise OIDCFlowError(str(e), error_description=str(e)) from e
@@ -296,9 +310,21 @@ class AuthService:
         # IdP so it doesn't retry).
         logger.warning(
             f"Received sid-less back-channel logout token — not supported; "
-            f"ignoring per implementation policy (sub={claims.sub!r})"
+            f"ignoring per implementation policy (sub_hash={hash_oidc_sub(claims.sub)})"
         )
         return 0
+
+    @staticmethod
+    def _validate_logout_claims(claims: LogoutTokenClaims) -> None:
+        """Guard claim types from the verified-token adapter before use."""
+        for claim_name in ("sub", "sid"):
+            value = getattr(claims, claim_name, None)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(f"logout_token {claim_name} claim must be a non-empty string")
+        if not claims.sub and not claims.sid:
+            raise ValueError("logout_token must contain sub or sid")
+        if not isinstance(claims.jti, str) or not claims.jti:
+            raise ValueError("logout_token missing jti claim")
 
     async def revoke_user_oidc_sessions(self, user_id: int) -> int:
         """Revoke all active OIDC sessions for a user.
@@ -413,6 +439,18 @@ class AuthService:
         count = await self._oidc_session_repo.revoke_by_user(user_id)
         logger.info("Revoked OIDC sessions by user", user_id=user_id, count=count)
         return count
+
+    @staticmethod
+    def oidc_session_needs_refresh(session: dict[str, Any]) -> bool:
+        from services.auth.refresh import session_needs_refresh
+
+        return session_needs_refresh(session)
+
+    @staticmethod
+    def oidc_session_was_refreshed_since(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+        from services.auth.refresh import session_was_refreshed_since
+
+        return session_was_refreshed_since(previous, current)
 
     async def refresh_session_if_needed(self, *, session: dict[str, Any], enc_key: str) -> dict[str, Any] | None:
         """Refresh the IdP access token when it is near expiry.
@@ -727,7 +765,7 @@ class AuthService:
             return self._refuse_managed(user)
 
         if not self._config.auto_provision_login:
-            logger.warning(f"OIDC login rejected — user not registered (sub={sub!r})")
+            logger.warning(f"OIDC login rejected — user not registered (sub_hash={hash_oidc_sub(sub)})")
             raise OIDCFlowError("User not registered", status_code=403)
 
         display_name = self._display_name_from_claims(claims, sub)
@@ -745,7 +783,12 @@ class AuthService:
             # Concurrent first-login race or DB failure. Re-read by sub first;
             # if an email collision caused the insert failure, return an
             # actionable conflict instead of an opaque 500.
-            logger.exception(f"OIDC auto-provisioning failed for sub={sub!r}: {e}")
+            logger.bind(
+                sub_hash=hash_oidc_sub(sub),
+                error_type=type(e).__name__,
+                sqlstate=_safe_sqlstate(e),
+                exception_stack=safe_exception_stack(e),
+            ).error("OIDC auto-provisioning failed")
             user = await self._user_repo.get_user_by_external_id(sub)
             if user is not None:
                 return self._refuse_managed(user)
@@ -753,9 +796,10 @@ class AuthService:
                 existing = await self._user_repo.get_user_by_email(email)
                 if existing is not None:
                     logger.error(
-                        f"OIDC auto-provisioning blocked for sub={sub!r}: an account with email "
+                        f"OIDC auto-provisioning blocked for sub_hash={hash_oidc_sub(sub)}: an account with email "
                         f"{mask_email(email)} already exists under a different identity. Set that "
-                        f"user's external_user_id to this sub to allow login."
+                        f"user's external_user_id to the exact subject from the identity provider. "
+                        f"Use sub_hash to correlate this event with the provider's subject."
                     )
                     raise OIDCFlowError(
                         "An account with this email already exists. Ask your administrator to "
@@ -764,7 +808,7 @@ class AuthService:
                     ) from e
             raise OIDCFlowError("Failed to provision user", status_code=500) from e
         else:
-            logger.info(f"OIDC user auto-provisioned (id={user.id}, sub={sub!r})")
+            logger.info(f"OIDC auto-provisioned new user — user_id={user.id}, sub_hash={hash_oidc_sub(sub)}")
         return user
 
     @staticmethod

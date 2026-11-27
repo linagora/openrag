@@ -1,0 +1,566 @@
+"""Unit tests for :class:`OdtParser` (#1287)."""
+
+from __future__ import annotations
+
+import io
+import time
+import zipfile
+from pathlib import Path
+
+import pytest
+from core.indexing.parsers.odt_parser import OdtParser
+from core.models.document import Document, DocumentType
+
+
+async def _parse(raw: bytes):
+    return await OdtParser().parse(Document(filename="x.odt", content_type=DocumentType.ODT, raw_bytes=raw))
+
+
+_CHART_OBJECT = (
+    '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+    'xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0" '
+    'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" '
+    'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:chart><chart:chart>'
+    "<chart:title><text:p>Ventes</text:p></chart:title>"
+    '<table:table table:name="local-table"><table:table-rows><table:table-row>'
+    "<table:table-cell><text:p>T1</text:p></table:table-cell><table:table-cell><text:p>10</text:p></table:table-cell>"
+    "</table:table-row></table:table-rows></table:table></chart:chart></office:chart></office:body>"
+    "</office:document-content>"
+)
+_CHART_FRAME = '<draw:frame><draw:object xlink:href="./Object 1"/></draw:frame>'
+
+
+async def _markdown(odf_package, body: str, **kwargs) -> str:
+    processed = await _parse(odf_package("odt", body, **kwargs))
+    assert len(processed.text_blocks) == 1
+    return processed.text_blocks[0].text
+
+
+@pytest.mark.asyncio
+async def test_headings_and_paragraphs(odf_package):
+    md = await _markdown(
+        odf_package,
+        '<text:h text:outline-level="1">Rapport annuel</text:h>'
+        "<text:p>Premier paragraphe.</text:p>"
+        '<text:h text:outline-level="2">Budget</text:h>'
+        "<text:p>Deux<text:s/>espaces, <text:span>un span</text:span>, et<text:tab/>une tabulation.</text:p>",
+    )
+
+    assert md == "# Rapport annuel\n\nPremier paragraphe.\n\n## Budget\n\nDeux espaces, un span, et une tabulation."
+
+
+@pytest.mark.asyncio
+async def test_repeated_spaces_and_line_breaks(odf_package):
+    md = await _markdown(odf_package, '<text:p>a<text:s text:c="3"/>b<text:line-break/>c</text:p>')
+
+    assert md == "a b c"
+
+
+@pytest.mark.asyncio
+async def test_bulleted_and_numbered_lists_follow_their_style(odf_package):
+    styles = (
+        '<text:list-style style:name="Numbered">'
+        '<text:list-level-style-number text:level="1" style:num-format="1"/>'
+        '<text:list-level-style-bullet text:level="2" text:bullet-char="-"/>'
+        "</text:list-style>"
+    )
+    md = await _markdown(
+        odf_package,
+        '<text:list text:style-name="Numbered">'
+        "<text:list-item><text:p>Un</text:p>"
+        "<text:list><text:list-item><text:p>sous-point</text:p></text:list-item></text:list>"
+        "</text:list-item>"
+        "<text:list-item><text:p>Deux</text:p></text:list-item>"
+        "</text:list>"
+        "<text:list><text:list-item><text:p>Puce</text:p></text:list-item></text:list>",
+        automatic_styles=styles,
+    )
+
+    assert md == "1. Un\n   - sous-point\n2. Deux\n\n- Puce"
+
+
+@pytest.mark.asyncio
+async def test_list_styles_are_also_read_from_styles_xml(odf_package):
+    md = await _markdown(
+        odf_package,
+        '<text:list text:style-name="Named"><text:list-item><text:p>Un</text:p></text:list-item></text:list>',
+        styles=(
+            '<text:list-style style:name="Named">'
+            '<text:list-level-style-number text:level="1" style:num-format="1"/></text:list-style>'
+        ),
+    )
+
+    assert md == "1. Un"
+
+
+@pytest.mark.asyncio
+async def test_tables_become_markdown_tables(odf_package):
+    md = await _markdown(
+        odf_package,
+        "<table:table>"
+        "<table:table-header-rows><table:table-row>"
+        "<table:table-cell><text:p>Ville</text:p></table:table-cell>"
+        "<table:table-cell><text:p>Habitants</text:p></table:table-cell>"
+        "</table:table-row></table:table-header-rows>"
+        "<table:table-row>"
+        "<table:table-cell><text:p>Paris</text:p></table:table-cell>"
+        "<table:table-cell><text:p>2 100 000</text:p></table:table-cell>"
+        "</table:table-row>"
+        "</table:table>",
+    )
+
+    assert "Ville" in md and "Habitants" in md
+    assert "| Paris | 2 100 000 |" in md
+    assert "---" in md
+
+
+@pytest.mark.asyncio
+async def test_repeated_empty_columns_and_rows_are_not_expanded(odf_package):
+    """Spreadsheet-style tables declare 1024 repeated empty columns."""
+    md = await _markdown(
+        odf_package,
+        "<table:table>"
+        "<table:table-row>"
+        "<table:table-cell><text:p>A</text:p></table:table-cell>"
+        '<table:table-cell table:number-columns-repeated="1024"/>'
+        "</table:table-row>"
+        '<table:table-row table:number-rows-repeated="1048576"><table:table-cell/></table:table-row>'
+        "</table:table>",
+    )
+
+    # The repeats are not expanded: each empty cell renders once.
+    assert md == "| A |  |\n| --- | --- |\n|  |  |"
+
+
+@pytest.mark.xfail(strict=True, reason="xberg 1.3.9 keeps a table of contents' text")
+@pytest.mark.asyncio
+async def test_notes_annotations_tracked_deletions_and_tocs_are_left_out(odf_package):
+    md = await _markdown(
+        odf_package,
+        "<text:tracked-changes><text:changed-region><text:deletion>"
+        "<text:p>texte supprimé</text:p></text:deletion></text:changed-region></text:tracked-changes>"
+        "<text:table-of-content><text:index-body><text:p>Sommaire</text:p></text:index-body></text:table-of-content>"
+        "<text:p>Corps<text:note><text:note-body><text:p>note de bas de page</text:p></text:note-body></text:note>"
+        "<office:annotation><text:p>commentaire</text:p></office:annotation> du texte.</text:p>",
+    )
+
+    assert md == "Corps du texte."
+
+
+@pytest.mark.asyncio
+async def test_sections_are_walked(odf_package):
+    md = await _markdown(odf_package, "<text:section><text:p>Dans une section</text:p></text:section>")
+
+    assert md == "Dans une section"
+
+
+@pytest.mark.asyncio
+async def test_pictures_become_refs_with_image_blocks(odf_package, encoded_image):
+    processed = await _parse(
+        odf_package(
+            "odt",
+            "<text:p>Avant "
+            '<draw:frame><draw:image xlink:href="Pictures/a.png"/></draw:frame>'
+            " après</text:p>"
+            '<text:p><draw:frame><draw:image xlink:href="Pictures/missing.png"/></draw:frame></text:p>',
+            pictures={"Pictures/a.png": encoded_image("PNG")},
+        )
+    )
+
+    # xberg puts a paragraph's pictures ahead of its text.
+    assert processed.text_blocks[0].text == "![](odt-image-0)\n\nAvant après"
+    assert len(processed.images) == 1
+    image = processed.images[0]
+    assert image.metadata["markdown_ref"] == "![](odt-image-0)"
+    assert image.mime_type == "image/png"
+    assert image.image_bytes.startswith(b"\x89PNG")
+
+
+_SVG = 'xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("labels", "words"),
+    [
+        (f"<svg:title {_SVG}>Figure [1]</svg:title>", "Figure [1]"),
+        (f"<svg:title {_SVG}>Fig [1</svg:title>", "Fig [1"),
+        (f"<svg:title {_SVG}>a [b [c]] d</svg:title>", "a [b [c]] d"),
+        (f"<svg:title {_SVG}>x ] y</svg:title>", "x ] y"),
+        (f"<svg:desc {_SVG}>desc [x</svg:desc>", "desc [x"),
+        (f"<svg:title {_SVG}>Titre</svg:title><svg:desc {_SVG}>Une description</svg:desc>", "Titre Une description"),
+    ],
+    ids=["paired", "unpaired-opening", "nested", "unpaired-closing", "description", "title-and-description"],
+)
+async def test_a_picture_s_title_and_description_stay_text_and_leave_its_ref_whole(
+    odf_package, encoded_image, labels, words
+):
+    """xberg writes the title, or else the description, as alt text: ``![Fig [1](image_0.png)``
+    was no ref. It writes them in the paragraph too, glued to the words around them."""
+    processed = await _parse(
+        odf_package(
+            "odt",
+            f'<text:p>avant <draw:frame><draw:image xlink:href="Pictures/a.png"/>{labels}</draw:frame> après</text:p>',
+            pictures={"Pictures/a.png": encoded_image("PNG")},
+        )
+    )
+
+    assert processed.text_blocks[0].text == f"![](odt-image-0)\n\navant {words} après"
+    assert len(processed.images) == 1
+
+
+@pytest.mark.asyncio
+async def test_text_full_of_picture_openings_is_read_in_linear_time(odf_package):
+    """Each "![" was matched up to the end of the text: 160,000 took 26 s."""
+    count = 160_000
+    start = time.perf_counter()
+    md = await _markdown(odf_package, f"<text:p>{'![' * count}</text:p>")
+
+    assert time.perf_counter() - start < 10
+    # xberg escapes each one as \![, which still holds a "![" to match.
+    assert md.replace("\\", "") == "![" * count
+
+
+@pytest.mark.asyncio
+async def test_a_picture_falls_back_to_its_first_decodable_alternative(odf_package, encoded_image):
+    processed = await _parse(
+        odf_package(
+            "odt",
+            "<text:p><draw:frame>"
+            '<draw:image xlink:href="Pictures/a.svm"/><draw:image xlink:href="Pictures/a.png"/>'
+            "</draw:frame></text:p>",
+            pictures={"Pictures/a.svm": b"VCLMTF not an image Pillow reads", "Pictures/a.png": encoded_image("PNG")},
+        )
+    )
+
+    assert processed.text_blocks[0].text == "![](odt-image-0)"
+    assert len(processed.images) == 1
+
+
+@pytest.mark.asyncio
+async def test_external_and_undecodable_pictures_leave_no_ref(odf_package):
+    processed = await _parse(
+        odf_package(
+            "odt",
+            '<text:p>a<draw:frame><draw:image xlink:href="https://example.com/x.png"/></draw:frame>'
+            '<draw:frame><draw:image xlink:href="Pictures/x.wmf"/></draw:frame>b</text:p>',
+            pictures={"Pictures/x.wmf": b"\xd7\xcd\xc6\x9a not really wmf"},
+        )
+    )
+
+    assert processed.text_blocks[0].text == "ab"
+    assert processed.images == []
+
+
+@pytest.mark.asyncio
+async def test_external_entities_are_not_resolved(odf_package, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP SECRET")
+    raw = odf_package(
+        "odt",
+        "<text:p>avant &xxe; après</text:p>",
+        doctype=f'<!DOCTYPE office:document-content [<!ENTITY xxe SYSTEM "file://{secret}">]>',
+    )
+
+    processed = await _parse(raw)
+
+    assert all("TOP SECRET" not in block.text for block in processed.text_blocks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(b"not a zip", id="not-a-zip"),
+        pytest.param(b"PK\x05\x06" + b"\x00" * 18, id="empty-zip"),
+    ],
+)
+async def test_unreadable_packages_index_as_nothing(raw):
+    processed = await _parse(raw)
+
+    assert processed.text_blocks == []
+    assert processed.page_count == 0
+
+
+@pytest.mark.asyncio
+async def test_malformed_content_xml_indexes_as_nothing():
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as zf:
+        zf.writestr("mimetype", "application/vnd.oasis.opendocument.text")
+        zf.writestr("content.xml", "<office:document-content><unclosed>")
+
+    processed = await _parse(out.getvalue())
+
+    assert processed.text_blocks == []
+
+
+@pytest.mark.asyncio
+async def test_empty_document_has_no_block():
+    processed = await OdtParser().parse(Document(filename="x.odt", content_type=DocumentType.ODT, raw_bytes=b""))
+
+    assert processed.text_blocks == []
+
+
+# ---------------------------------------------------------------------------
+# Declared counts must not make output out of nothing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_huge_space_count_is_bounded(odf_package):
+    md = await _markdown(odf_package, '<text:p>a<text:s text:c="999999999"/>b</text:p>')
+
+    assert len(md) <= 3
+
+
+@pytest.mark.asyncio
+async def test_space_counts_share_one_budget_across_the_document(odf_package):
+    spaces = '<text:s text:c="1000000"/>' * 50
+    md = await _markdown(odf_package, f"<text:p>a{spaces}b</text:p>")
+
+    assert len(md) <= 53
+
+
+@pytest.mark.asyncio
+async def test_repeated_cells_and_rows_with_content_are_bounded(odf_package):
+    cell = f'<table:table-cell table:number-columns-repeated="1024"><text:p>{"x" * 1000}</text:p></table:table-cell>'
+    md = await _markdown(
+        odf_package,
+        f'<table:table><table:table-row table:number-rows-repeated="1048576">{cell}</table:table-row></table:table>',
+    )
+
+    assert len(md) < 3_000_000
+
+
+@pytest.mark.asyncio
+async def test_nested_tables_are_read_once(odf_package):
+    """Walking every descendant row made each nesting level re-read the levels
+    below it: 2^depth work for a file a few kilobytes long."""
+    body = "<text:p>fond</text:p>"
+    for _ in range(40):
+        body = (
+            "<table:table><table:table-row>"
+            f"<table:table-cell>{body}</table:table-cell>"
+            "<table:table-cell><text:p>x</text:p></table:table-cell>"
+            "</table:table-row></table:table>"
+        )
+
+    md = await _markdown(odf_package, body)
+
+    assert md.count("fond") == 1
+
+
+@pytest.mark.asyncio
+async def test_padding_short_rows_to_a_wide_one_is_bounded(odf_package):
+    """One 256-column row makes every other row pad to 256 cells."""
+    wide = "<table:table-row>" + "<table:table-cell><text:p>w</text:p></table:table-cell>" * 256 + "</table:table-row>"
+    short = '<table:table-row table:number-rows-repeated="10000"><table:table-cell><text:p>x</text:p></table:table-cell></table:table-row>'
+    tables = f"<table:table>{wide}{short}</table:table>" * 50
+
+    md = await _markdown(odf_package, tables)
+
+    assert md.count("|") <= 2 * (500_000 + 50 * 256)
+
+
+@pytest.mark.asyncio
+async def test_many_notes_and_spaces_in_one_paragraph_are_taken_out_in_linear_time(odf_package):
+    """Taking them out one by one appended to the same string each time: 100,000
+    notes in one paragraph, from a file of a few kilobytes, took about 40 s."""
+    count = 100_000
+    body = "<text:p>" + "<text:note/>ab" * count + "<text:s/>c" * count + "</text:p>"
+
+    start = time.perf_counter()
+    md = await _markdown(odf_package, body)
+
+    assert time.perf_counter() - start < 10
+    assert md == "ab" * count + " c" * count
+
+
+_ONE_CELL_CHART = (
+    '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+    'xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0" '
+    'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" '
+    'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:chart><chart:chart>'
+    "<table:table><table:table-row><table:table-cell><text:p>1</text:p></table:table-cell></table:table-row>"
+    "</table:table></chart:chart></office:chart></office:body></office:document-content>"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        pytest.param(
+            "<text:list>" + "<text:list-header><text:p>h</text:p></text:list-header>" * 40_000 + "</text:list>",
+            "\n\n".join(["h"] * 40_000),
+            id="headers-in-one-list",
+        ),
+        pytest.param(
+            "<text:p>a</text:p>" + "<text:list><text:list-header/></text:list>\n    " * 80_000 + "<text:p>b</text:p>",
+            "a\n\nb",
+            id="empty-lists",
+        ),
+    ],
+)
+async def test_many_list_headers_and_empty_lists_are_taken_out_in_linear_time(odf_package, body, expected):
+    """Each list was scanned again for every header it holds, and empty lists were
+    taken out one by one: 40,000 headers in one list, from a 2.5 KB file, took 67 s,
+    and 80,000 empty lists 20 s."""
+    start = time.perf_counter()
+    md = await _markdown(odf_package, body)
+
+    assert time.perf_counter() - start < 10
+    assert md == expected
+
+
+@pytest.mark.asyncio
+async def test_many_charts_in_one_paragraph_are_taken_out_in_linear_time(odf_package):
+    """Their frames were taken out of the paragraph one by one: 80,000 took 17 s."""
+    count = 80_000
+    pictures = {"Object 1/content.xml": _ONE_CELL_CHART.encode()}
+    one_chart = (await _markdown(odf_package, f"<text:p>{_CHART_FRAME}</text:p>", pictures=pictures)).strip()
+
+    start = time.perf_counter()
+    md = await _markdown(odf_package, f"<text:p>{(_CHART_FRAME + 'abcd') * count}</text:p>", pictures=pictures)
+
+    assert time.perf_counter() - start < 10
+    assert md == "abcd" * count + f"\n\n{one_chart}" * count
+
+
+@pytest.mark.asyncio
+async def test_comments_and_footnotes_are_left_out(odf_package):
+    md = await _markdown(
+        odf_package,
+        "<text:p>Corps<text:note><text:note-body><text:p>note de bas de page</text:p></text:note-body></text:note>"
+        "<office:annotation><text:p>commentaire</text:p></office:annotation> du texte.</text:p>",
+    )
+
+    assert md == "Corps du texte."
+
+
+@pytest.mark.asyncio
+async def test_literal_footnote_like_brackets_are_kept(odf_package):
+    md = await _markdown(odf_package, '<text:p>Run grep -E "^[^#]" or match [^0-9] in the field.</text:p>')
+
+    assert md == 'Run grep -E "^[^#]" or match [^0-9] in the field.'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("large", ["T1", "Ventes"], ids=["cell", "title"])
+async def test_what_chart_copies_add_is_bounded_in_bytes(odf_package, monkeypatch, large):
+    """A chart is a few elements whatever its text: one 8 MiB cell in 40 frames of a
+    9 KiB file made a 320 MiB content.xml."""
+    import core.indexing.parsers.odf as odf
+
+    budget = 1024 * 1024
+    monkeypatch.setattr(odf, "_MAX_CHART_BYTES", budget)
+    text = "x" * (100 * 1024)
+    chart = _CHART_OBJECT.replace(large, text)
+    md = await _markdown(
+        odf_package, f"<text:p>{_CHART_FRAME * 50}</text:p>", pictures={"Object 1/content.xml": chart.encode()}
+    )
+
+    assert 0 < md.count("### Chart") < 50
+    assert md.count(text) * len(text) <= budget
+
+
+@pytest.mark.asyncio
+async def test_a_chart_keeps_its_title_and_data_table(odf_package):
+    md = await _markdown(
+        odf_package,
+        f"<text:p>{_CHART_FRAME}</text:p>",
+        pictures={"Object 1/content.xml": _CHART_OBJECT.encode()},
+    )
+
+    assert "### Chart: Ventes" in md
+    assert "| T1 | 10 |" in md
+    assert "$$" not in md
+
+
+@pytest.mark.asyncio
+async def test_list_headers_keep_their_text(odf_package):
+    md = await _markdown(
+        odf_package, "<text:list><text:list-header><text:p>En-tête</text:p></text:list-header></text:list>"
+    )
+
+    assert md == "En-tête"
+
+
+@pytest.mark.asyncio
+async def test_a_cell_indexes_what_it_shows_not_what_it_computes(odf_package):
+    md = await _markdown(
+        odf_package,
+        "<table:table><table:table-row>"
+        '<table:table-cell office:value-type="float" office:value="0"><text:p>10 gp</text:p></table:table-cell>'
+        "</table:table-row></table:table>",
+    )
+
+    assert "10 gp" in md
+
+
+@pytest.mark.asyncio
+async def test_one_highly_compressible_entry_does_not_refuse_the_document(odf_package):
+    processed = await _parse(
+        odf_package("odt", "<text:p>Corps</text:p>", pictures={"OleobjectM1": b"\x00" * 5_000_000})
+    )
+
+    assert processed.text_blocks[0].text == "Corps"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA], ids=["bzip2", "lzma"])
+async def test_an_entry_neither_stored_nor_deflated_is_left_to_xberg(odf_package, method):
+    """zipfile expands these whole, whatever size the header declares: an 884-byte
+    file whose picture claimed 1 KiB took 850 MiB to patch. xberg bounds them itself."""
+    import core.indexing.parsers.odf as odf
+
+    buf = io.BytesIO(odf_package("odt", "<text:p>Corps</text:p>"))
+    with zipfile.ZipFile(buf, "a") as zf:
+        zf.writestr("Pictures/a.bin", b"\x00" * 1000, compress_type=method)
+    raw = buf.getvalue()
+
+    assert odf._patched(raw) is raw
+    processed = await _parse(raw)
+    assert processed.text_blocks[0].text == "Corps"
+
+
+@pytest.mark.asyncio
+async def test_an_entry_declaring_less_than_it_holds_is_not_inflated_whole(odf_package, damaged_zip_entry):
+    """ZipFile.read inflates a whole entry before cutting it to the size its header
+    declares: a 408 KB file whose picture claimed 1 KiB took 846 MiB to patch."""
+    import tracemalloc
+
+    import core.indexing.parsers.odf as odf
+
+    buf = io.BytesIO(odf_package("odt", "<text:p>Corps</text:p>"))
+    with zipfile.ZipFile(buf, "a") as zf:
+        zf.writestr("Pictures/a.bin", b"\x00" * (32 * 1024 * 1024), compress_type=zipfile.ZIP_DEFLATED)
+    raw = damaged_zip_entry(buf.getvalue(), "Pictures/a.bin", "understated")
+
+    tracemalloc.start()
+    try:
+        odf._patched(raw)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 4 * 1024 * 1024
+    processed = await _parse(raw)
+    assert processed.text_blocks[0].text == "Corps"
+
+
+@pytest.mark.asyncio
+async def test_a_libreoffice_document():
+    """LibreOffice 26.8, exported from a python-docx document."""
+    raw = (Path(__file__).resolve().parents[4] / "resources" / "test_file.odt").read_bytes()
+
+    processed = await _parse(raw)
+
+    assert processed.text_blocks[0].text == (
+        "# Rapport annuel\n\nPremier paragraphe du rapport.\n\n## Plan d'action\n\n"
+        # xberg numbers a lone bullet that follows a numbered list.
+        "1. Premier point\n2. Second point\n\n1. Une puce\n\n"
+        "| Poste | Montant |\n| --- | --- |\n| Loyer | 900 |\n\n"
+        "![](odt-image-0)\n\nFin du document."
+    )
+    assert len(processed.images) == 1

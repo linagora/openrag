@@ -1142,7 +1142,10 @@ describe("ModelsPage LLM context size", () => {
   });
 });
 
-describe("ModelsPage endpoint form layout", () => {
+// These tests wait out the real discovery debounce (600 ms per URL) and then
+// longer, to show nothing else is asked: one test spends over 4 s just waiting,
+// too close to the 5 s default on CI runners.
+describe("ModelsPage endpoint form layout", { timeout: 15_000 }, () => {
   const llmEndpoint = {
     name: "chat",
     model_type: "llm",
@@ -1360,7 +1363,7 @@ describe("ModelsPage endpoint form layout", () => {
     await new Promise((r) => setTimeout(r, 900));
     expect(callsTo("http://b/v1")).toBe(1);
     expect(validateModelEndpointMock).toHaveBeenCalledTimes(3);
-  }, 10_000);
+  });
 
   async function openEditDialog(endpoint: object) {
     listModelEndpointsMock.mockResolvedValue([endpoint as never]);

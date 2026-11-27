@@ -25,7 +25,7 @@ raised). The container supplies both from settings/the catalog store.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager, nullcontext
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
@@ -123,6 +123,26 @@ class PartitionService:
         self._task_state_manager_factory = task_state_manager_factory
         self._task_cancel_timeout = task_cancel_timeout
         self._partition_locks: dict[str, asyncio.Lock] = {}
+
+    @staticmethod
+    def lookup_cached_config(
+        configs: Mapping[str, PartitionConfig],
+        partition: str,
+    ) -> PartitionConfig | None:
+        """Look up a concrete partition in the caller's captured cache view."""
+        return configs.get(partition)
+
+    @classmethod
+    def require_cached_config(
+        cls,
+        configs: Mapping[str, PartitionConfig],
+        partition: str,
+    ) -> PartitionConfig:
+        """Return the cached configuration or report an unknown partition."""
+        config = cls.lookup_cached_config(configs, partition)
+        if config is None:
+            raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
+        return config
 
     # ------------------------------------------------------------------
     # Existence guards (mirror the legacy _check_* helpers, core exceptions)
@@ -596,6 +616,12 @@ class PartitionService:
         logger.info("Partition updated.", partition=partition, fields=sorted(updates))
         return result
 
+    async def get_partition_created_at(self, partition: str):
+        row = await self._partition_repo.get_partition_row(partition)
+        if row is None:
+            raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
+        return row.get("created_at")
+
     async def get_partition_config(self, partition: str, *, strict_vector_dimension: bool = False) -> dict:
         """Return the resolved Phase 14 detail for a partition.
 
@@ -704,20 +730,16 @@ class PartitionService:
         is informational. Snapshot callers pass ``strict=True`` so an outage
         cannot be mistaken for a real ``None`` dimension and alter its hash.
         """
+        endpoint = self._config.models.embedder.get(embedder or "default") if self._config is not None else None
+        return await self.get_vector_dimension(getattr(endpoint, "vector_field", None), strict=strict)
+
+    async def get_vector_dimension(self, field: str | None, *, strict: bool = False) -> int | None:
+        """Read the dimension of a resolved vector field without resolving its endpoint again."""
         getter = getattr(self._vector_store, "vector_dimension", None)
-        if getter is None or self._config is None:
+        if getter is None or field is None:
             if strict:
                 raise ServiceUnavailableError(
                     "The live vector dimension cannot be read for this partition.",
-                    code="PARTITION_DIMENSION_UNAVAILABLE",
-                )
-            return None
-        endpoint = self._config.models.embedder.get(embedder or "default")
-        field = getattr(endpoint, "vector_field", None)
-        if field is None:
-            if strict:
-                raise ServiceUnavailableError(
-                    "The configured embedder has no vector field for this partition.",
                     code="PARTITION_DIMENSION_UNAVAILABLE",
                 )
             return None

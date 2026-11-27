@@ -385,6 +385,7 @@ class TaskInfo:
     admission_reservation_expires_at: float | None = None
     # A delete that starts after reservation must still prevent a late queue transfer.
     admission_reservation_cancelled: bool = False
+    admission_reservation_transferred: bool = False
 
 
 def _job_outcome_pending(info: TaskInfo) -> bool:
@@ -426,7 +427,9 @@ def _task_reserves_admission(info: TaskInfo) -> bool:
         info.state == _UPLOAD_RESERVED_STATE
         or (info.state in CANCELLABLE_INDEXING_STATES and not _worker_has_settled(info))
         or (info.state == "CANCELLED" and _cancelled_task_has_worker_fence(info))
-        or _is_fenced_failure(info)
+        # A lost queued task keeps its tombstone to reject late pickup but no
+        # longer occupies capacity. Refless failures may still have a worker.
+        or (_is_fenced_failure(info) and info.error != ABANDONED_QUEUED_TASK_ERROR)
         or _terminal_worker_holds_admission(info)
     )
 
@@ -1418,8 +1421,18 @@ class TaskStateManager:
         self._expire_upload_reservations_locked()
         self._settle_abandoned_admission_tasks_locked()
         previous = self.tasks.get(task_id)
-        if require_upload_reservation and previous is None:
-            return _queue_refused(QUEUE_REFUSED_UPLOAD_RESERVATION_EXPIRED)
+        if require_upload_reservation:
+            details = (previous.details or {}) if previous is not None else {}
+            if previous is None or details.get("partition") != partition or details.get("file_id") != file_id:
+                return _queue_refused(QUEUE_REFUSED_UPLOAD_RESERVATION_EXPIRED)
+            if previous.state == DocumentStatus.CANCELLED:
+                return _queue_refused(QUEUE_REFUSED_CANCELLED)
+            if getattr(previous, "admission_reservation_transferred", False):
+                if previous.state in CANCELLABLE_INDEXING_STATES:
+                    return {"accepted": True, "reason": None, "existing_task_id": None}
+                return _queue_refused(QUEUE_REFUSED_UPLOAD_RESERVATION_EXPIRED)
+            if previous.state != _UPLOAD_RESERVED_STATE:
+                return _queue_refused(QUEUE_REFUSED_UPLOAD_RESERVATION_EXPIRED)
         info = self._ensure_task(task_id)
         if info.state == DocumentStatus.CANCELLED:
             return _queue_refused(QUEUE_REFUSED_CANCELLED)
@@ -1522,6 +1535,8 @@ class TaskStateManager:
             self._set_cancelled_locked(task_id, info)
             return _queue_refused(QUEUE_REFUSED_FILE_DELETING)
         info.state = "QUEUED"
+        if has_upload_reservation:
+            info.admission_reservation_transferred = True
         self._persist_task_locked(task_id, info)
         return {"accepted": True, "reason": None, "existing_task_id": None}
 
