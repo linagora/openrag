@@ -26,6 +26,12 @@ class VectorDBConfig(ConfigMixin):
     # Match the server's common.JSONMaxLength; reserve headroom when fitting.
     json_max_length: int = Field(default=65_536, ge=3, strict=True)
     json_safety_margin_bytes: int = Field(default=1_024, gt=0, strict=True)
+    # Rows are written in requests of at most this estimated size and row count.
+    # Milvus refuses a request over its proxy.grpc.serverMaxRecvSize (128 MiB),
+    # and on 3.0.5 one of 56 MiB already held the next write for about a
+    # minute (the WAL rate limiter, streaming.walRateLimit.recoveryStorage).
+    insert_batch_max_bytes: int = Field(default=16 * 1024 * 1024, gt=0, strict=True)
+    insert_batch_max_rows: int = Field(default=10_000, gt=0, strict=True)
     schema_version: int = 3
 
     @model_validator(mode="after")

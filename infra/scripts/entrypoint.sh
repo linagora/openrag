@@ -50,14 +50,9 @@ if [ "$#" -gt 0 ]; then
   exec "$@"
 fi
 
-ENV_ARGS=()
-if [[ -n "${SHARED_ENV}" ]]; then
-  ENV_ARGS+=("--env-file=${SHARED_ENV}")
-fi
-
 if [[ "${ENABLE_RAY_SERVE}" == "true" ]]; then
   echo "🔁 Starting with Ray Serve..."
-  uv run --no-dev "${ENV_ARGS[@]}" -m api.main
+  uv run --no-dev -m api.main
 else
   echo "🚀 Starting with Uvicorn..."
   # This path always runs a SINGLE uvicorn worker. The app initializes Ray and
@@ -75,7 +70,7 @@ else
   if [[ "${UVICORN_RELOAD}" == "true" ]]; then
     RELOAD_ARGS+=("--reload")
   fi
-  # An empty value in SHARED_ENV overrides proxy-defaults.env. Keep explicit
+  # An empty value in OPENRAG_ENV_FILE overrides proxy-defaults.env. Keep explicit
   # non-empty overrides intact, but restore the safe Compose proxy default
   # when it is blank. Non-Compose runs trust loopback only by default.
   if [[ -z "${UVICORN_FORWARDED_ALLOW_IPS:-}" ]]; then
@@ -93,6 +88,6 @@ else
   # X-Forwarded-Proto is dropped. Forward the same UVICORN_FORWARDED_ALLOW_IPS
   # that api.main's __main__ block reads, so one documented variable covers both
   # entrypoints — the bare `uvicorn` CLI otherwise only reads FORWARDED_ALLOW_IPS.
-  uv run --no-dev "${ENV_ARGS[@]}" uvicorn api.main:app --host 0.0.0.0 --port "${APP_iPORT:-8080}" "${RELOAD_ARGS[@]}" --workers 1 \
+  uv run --no-dev uvicorn api.main:app --host 0.0.0.0 --port "${APP_iPORT:-8080}" "${RELOAD_ARGS[@]}" --workers 1 \
     --proxy-headers --forwarded-allow-ips "${UVICORN_FORWARDED_ALLOW_IPS:-127.0.0.1}"
 fi

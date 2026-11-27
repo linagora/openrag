@@ -83,6 +83,7 @@ class ResolvedRetrievalPlan:
     groups: tuple[ResolvedRetrievalGroup, ...]
     public_configuration: dict[str, object]
     configuration_fingerprint: str
+    vector_fields: dict[str, str | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -686,11 +687,16 @@ class RetrievalService:
                     return name
         return "default"
 
+    def _searcher_for_embedder(self, embedder: str) -> RetrievalSearcher:
+        return self._searcher_factory(embedder) if self._searcher_factory is not None else self._searcher
+
     async def _pipeline_from_settings(
         self,
         partition: str,
         embedder: str,
         settings: _PipelineSettings,
+        *,
+        searcher: RetrievalSearcher | None = None,
     ) -> tuple[RetrieverPipeline, int | None, dict[str, str | None] | None, dict[str, object] | None]:
         """The pipeline *settings* describe, searching *embedder*'s vectors.
 
@@ -698,7 +704,8 @@ class RetrievalService:
         grouped by, even when a config refresh lands while an earlier group
         resolves its prompt. *partition* only names the group in the logs.
         """
-        searcher = self._searcher_factory(embedder) if self._searcher_factory is not None else self._searcher
+        if searcher is None:
+            searcher = self._searcher_for_embedder(embedder)
 
         llm = self._legacy_llm
         if settings.expansion_llm is not None and self._llm_factory is not None:
@@ -840,14 +847,23 @@ class RetrievalService:
         contextualizer_prompt: object | None = None,
         build_execution: bool = True,
         strict_prompt_resolution: bool = False,
+        partition_configs: dict[str, PartitionConfig] | None = None,
     ) -> ResolvedRetrievalPlan:
         """Resolve executable pipelines and their public identity once."""
-        await self.refresh_partition_configs()
+        if partition_configs is None:
+            await self.refresh_partition_configs()
+            partition_configs = self._partition_configs().copy()
+        configs = partition_configs
         requested = list(partitions)
-        # Prompt resolution can yield while another request updates the cache.
-        # Describe the same partition settings used to group the pipelines.
-        configs = self._partition_configs().copy()
         selected = list(configs) if "all" in requested and configs else list(dict.fromkeys(requested))
+        # Capture endpoint identity and routing before prompt lookups can yield.
+        public = self._public_retrieval_configuration(requested, configs)
+        endpoints = getattr(getattr(self._config, "models", None), "embedder", {}) or {}
+        vector_fields = {
+            name: getattr(endpoints.get(configs[name].embedder), "vector_field", None)
+            for name in selected
+            if name in configs
+        }
         prompt_identities: dict[str, dict[str, str | None] | None] = {}
         reranker_identities: dict[str, dict[str, object]] = {}
         groups: list[ResolvedRetrievalGroup] = []
@@ -897,14 +913,15 @@ class RetrievalService:
                 disable_reranker=disable_reranker,
                 disable_expansion=disable_expansion,
             )
-            for names, embedder, settings in partition_groups:
+            searchers = [self._searcher_for_embedder(embedder) for _, embedder, _ in partition_groups]
+            for (names, embedder, settings), searcher in zip(partition_groups, searchers, strict=True):
                 # Every partition of a group shares the pipeline, prompt and reranker it was grouped by.
                 (
                     pipeline,
                     default_top_k,
                     prompt_identity,
                     reranker_identity,
-                ) = await self._pipeline_from_settings(names[0], embedder, settings)
+                ) = await self._pipeline_from_settings(names[0], embedder, settings, searcher=searcher)
                 groups.append(ResolvedRetrievalGroup(tuple(names), pipeline, default_top_k))
                 for partition_name in names:
                     prompt_identities[partition_name] = prompt_identity
@@ -919,7 +936,6 @@ class RetrievalService:
                     )
                 ]
 
-        public = self._public_retrieval_configuration(requested, configs)
         for public_partition in public["partitions"]:
             public_retrieval = public_partition["retrieval"]
             partition_name = public_partition["name"]
@@ -944,6 +960,7 @@ class RetrievalService:
             groups=tuple(groups),
             public_configuration=public,
             configuration_fingerprint=canonical_fingerprint(public),
+            vector_fields=vector_fields,
         )
 
     async def _pipeline_groups_for_partitions(
@@ -954,6 +971,7 @@ class RetrievalService:
         similarity_threshold: float | None = None,
         disable_reranker: bool = False,
         disable_expansion: bool = False,
+        partition_configs: dict[str, PartitionConfig] | None = None,
     ) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
         """The partitions grouped by the pipeline that retrieves them, each with that pipeline.
 
@@ -965,8 +983,10 @@ class RetrievalService:
         so every hydrated partition is in scope. With a single group it is kept,
         so the search stays unscoped, as in :meth:`_search_groups`.
         """
-        await self.refresh_partition_configs()
-        configs = self._partition_configs()
+        if partition_configs is None:
+            await self.refresh_partition_configs()
+            partition_configs = self._partition_configs()
+        configs = partition_configs
         if not partitions or not configs:
             # Nothing to expand (no partitions exist yet) — keep the single
             # legacy pipeline; there is no per-partition config to honour.
@@ -990,10 +1010,11 @@ class RetrievalService:
             disable_reranker=disable_reranker,
             disable_expansion=disable_expansion,
         )
-        for names, embedder, settings in partition_groups:
+        searchers = [self._searcher_for_embedder(embedder) for _, embedder, _ in partition_groups]
+        for (names, embedder, settings), searcher in zip(partition_groups, searchers, strict=True):
             # Every partition of a group shares the pipeline it was grouped by.
             pipeline, default_top_k, _prompt_identity, _reranker_identity = await self._pipeline_from_settings(
-                names[0], embedder, settings
+                names[0], embedder, settings, searcher=searcher
             )
             groups.append((names, pipeline, default_top_k))
         if len(groups) == 1:
@@ -1549,6 +1570,7 @@ class RetrievalService:
         disable_reranker: bool = False,
         disable_expansion: bool = False,
         resolved_plan: ResolvedRetrievalPlan | None = None,
+        partition_configs: dict[str, PartitionConfig] | None = None,
     ) -> list[Chunk]:
         """Every sub-query in parallel, fused with RRF."""
         if resolved_plan is None:
@@ -1558,6 +1580,7 @@ class RetrievalService:
                 similarity_threshold=similarity_threshold,
                 disable_reranker=disable_reranker,
                 disable_expansion=disable_expansion,
+                partition_configs=partition_configs,
             )
         else:
             groups = [(list(group.partitions), group.pipeline, group.default_top_k) for group in resolved_plan.groups]

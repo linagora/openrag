@@ -4345,3 +4345,62 @@ async def test_prepare_completions_selects_sources_by_relevance_and_shows_them_b
     assert [doc.metadata["_id"] for doc in docs] == ["mid", "best"]
     assert _in_reading_order(payload["prompt"], ["mid", "best"])
     assert "text of loose" not in payload["prompt"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entry_point", "trace_enabled"),
+    [("chat", False), ("chat", True), ("chat_stream", False), ("chat_stream", True), ("complete", False)],
+)
+async def test_chat_retrieval_keeps_the_partition_settings_from_request_start(entry_point, trace_enabled):
+    from test_retrieval_service import _grouping_svc
+    from test_retrieval_service import _partition as retrieval_partition
+
+    retrieval, searchers = _grouping_svc(
+        [retrieval_partition(name="support", embedder="embed-a", retrieval=RetrievalPipelineConfig(top_n=1))],
+        {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"},
+    )
+    built_top_ns = []
+    build_pipeline = retrieval._pipeline_from_settings
+
+    async def record_pipeline_top_n(*args, **kwargs):
+        result = await build_pipeline(*args, **kwargs)
+        built_top_ns.append(result[0].reranker_top_k)
+        return result
+
+    retrieval._pipeline_from_settings = record_pipeline_top_n
+    query_json = json.dumps({"query_list": [{"query": "project schedule"}]})
+
+    class RefreshingLLM(FakeLLM):
+        async def chat(self, messages, **kwargs):
+            if kwargs.get("response_format"):
+                retrieval._config.partitions["support"] = retrieval_partition(
+                    name="support", embedder="embed-b", retrieval=RetrievalPipelineConfig(top_n=3)
+                )
+            return await super().chat(messages, **kwargs)
+
+    service = _svc(llm=RefreshingLLM(chat_responses=[query_json]), retrieval=retrieval, mode="ChatBotRag")
+    service._config.partitions = retrieval._config.partitions
+    args = {"partitions": ["support"], "prepare_sources": lambda *_: []}
+
+    async def request():
+        if entry_point == "complete":
+            await service.complete(payload={"prompt": "What is the project schedule?"}, **args)
+        else:
+            payload = {
+                "messages": [{"role": "user", "content": "What is the project schedule?"}],
+                "metadata": {"include_retrieval_trace": trace_enabled},
+            }
+            if entry_point == "chat":
+                await service.chat(payload=payload, model_name="openrag-support", **args)
+            else:
+                async for _ in service.chat_stream(payload=payload, model_name="openrag-support", **args):
+                    pass
+
+    await request()
+    assert searchers["embed-a"].search_calls
+    assert "embed-b" not in searchers
+
+    await request()
+    assert searchers["embed-b"].search_calls
+    assert built_top_ns == [1, 3]

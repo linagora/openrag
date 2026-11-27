@@ -108,7 +108,7 @@ i.e. root on the host — so treat Alloy as a trusted component. It needs, in
 
 `LOKI_URL` and the other `LOKI_*` variables are read by Compose
 interpolation, so they must live in `infra/compose/.env` (or the file passed
-to `--env-file`), not only in a file pointed at by `SHARED_ENV`.
+to `--env-file`).
 
 The pipeline (`infra/compose/alloy/config.alloy`) keeps the `openrag` and
 `openrag-cpu` containers, sets the labels `app=openrag`, `service`,
