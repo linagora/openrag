@@ -200,6 +200,14 @@ def _acknowledgement_language(messages: list[dict], latest_message: str) -> str:
     return detect_language(latest_message) or "en"
 
 
+class ResolvedChatRequest(NamedTuple):
+    """The model client and partition settings selected for one API request."""
+
+    llm: LLM
+    endpoint_name: str | None
+    configs: dict[str, PartitionConfig]
+
+
 class _PrepareChatResult(NamedTuple):
     """Prepared chat data passed from orchestration to the response methods."""
 
@@ -403,7 +411,7 @@ class QueryService:
             )
         return included
 
-    def _resolve_llm(self, partition: list[str] | None, configs: dict[str, PartitionConfig] | None = None) -> LLM:
+    def resolve_chat_request(self, partition: list[str] | None) -> ResolvedChatRequest:
         """Effective LLM for this request — query generation and answering.
 
         Resolution order:
@@ -440,8 +448,7 @@ class QueryService:
         The resolved endpoint name is always logged (at debug), including for
         the default, so "which model answered?" is answerable from the logs.
         """
-        if configs is None:
-            configs = self._config.partitions
+        configs = self._partition_configs_for_request(partition)
         chat_llm = self._agreed_partition_chat_llm(partition, configs)
         if chat_llm is not None:
             try:
@@ -457,8 +464,9 @@ class QueryService:
                 logger.bind(chat_llm=chat_llm, partitions=partition).debug(
                     "Answering with the partition's chat_llm endpoint"
                 )
-                return llm
-        return self._default_llm(partition)
+                return ResolvedChatRequest(llm, chat_llm, configs)
+        llm, endpoint_name = self._default_llm(partition)
+        return ResolvedChatRequest(llm, endpoint_name, configs)
 
     def _agreed_partition_chat_llm(
         self, partition: list[str] | None, configs: dict[str, PartitionConfig]
@@ -477,7 +485,7 @@ class QueryService:
             return None
         return resolve_partition_chat_llm(partition, configs)
 
-    def _default_llm(self, partition: list[str] | None) -> LLM:
+    def _default_llm(self, partition: list[str] | None) -> tuple[LLM, str | None]:
         """The catalog default LLM endpoint (``is_default=True``), resolved fresh.
 
         Bypassing this and returning the static ``self._llm`` was the bug
@@ -500,9 +508,9 @@ class QueryService:
                 logger.bind(chat_llm=self._default_llm_name(), partitions=partition).debug(
                     "Answering with the default chat_llm endpoint"
                 )
-                return llm
+                return llm, "default"
         logger.bind(partitions=partition).debug("Answering with the static default LLM (no catalog default endpoint)")
-        return self._llm
+        return self._llm, None
 
     def _default_llm_name(self) -> str:
         """Real endpoint name behind the catalog ``"default"`` alias, for logging.
@@ -1435,6 +1443,7 @@ class QueryService:
         disable_reranker: bool = False,
         disable_expansion: bool = False,
         request_id: str | None = None,
+        resolved_request: ResolvedChatRequest | None = None,
     ) -> dict[str, object]:
         """Run contextualization and retrieval diagnostics without answer generation."""
         if query_mode not in {"contextualized", "original", "compare"}:
@@ -1461,13 +1470,13 @@ class QueryService:
             diagnostics=self._retrieval_diagnostics_context(metadata),
         )
         started = time.perf_counter()
-        configs = self._partition_configs_for_request(partitions)
+        resolved = resolved_request if resolved_request is not None else self.resolve_chat_request(partitions)
         result = await self._prepare_chat(
             partitions,
             {"messages": messages, "metadata": metadata},
-            self._resolve_llm(partitions, configs),
+            resolved.llm,
             trace=trace,
-            configs=configs,
+            configs=resolved.configs,
         )
         trace.timings["total"] = time.perf_counter() - started
         return trace.finish(configuration_fingerprint=result.configuration_fingerprint)
@@ -1481,6 +1490,7 @@ class QueryService:
         model_name: str,
         request_id: str | None = None,
         max_prompt_tokens: int | None = None,
+        resolved_request: ResolvedChatRequest | None = None,
     ) -> dict:
         """Non-streaming chat completion → finalized OpenAI dict.
 
@@ -1505,8 +1515,8 @@ class QueryService:
             else None
         )
         configuration_fingerprint = "unavailable"
-        configs = self._partition_configs_for_request(partitions)
-        llm = self._resolve_llm(partitions, configs)
+        resolved = resolved_request if resolved_request is not None else self.resolve_chat_request(partitions)
+        llm = resolved.llm
         citation_protocol_active = False
         retry_empty_response = True
         if partitions is None and not metadata.get("websearch", False):
@@ -1515,7 +1525,7 @@ class QueryService:
             self._record_contextualization_not_run(trace, original_query=original_query)
         else:
             result = await self._prepare_chat(
-                partitions, payload, llm, trace=trace, max_prompt_tokens=max_prompt_tokens, configs=configs
+                partitions, payload, llm, trace=trace, max_prompt_tokens=max_prompt_tokens, configs=resolved.configs
             )
             payload = result.payload
             docs = result.docs
@@ -1613,6 +1623,7 @@ class QueryService:
         model_name: str,
         request_id: str | None = None,
         max_prompt_tokens: int | None = None,
+        resolved_request: ResolvedChatRequest | None = None,
     ) -> AsyncIterator[str]:
         """Streaming chat completion → SSE strings with filtered sources (*max_prompt_tokens*: see ``chat``)."""
         request_started = time.perf_counter()
@@ -1630,8 +1641,8 @@ class QueryService:
             else None
         )
         configuration_fingerprint = "unavailable"
-        configs = self._partition_configs_for_request(partitions)
-        llm = self._resolve_llm(partitions, configs)
+        resolved = resolved_request if resolved_request is not None else self.resolve_chat_request(partitions)
+        llm = resolved.llm
         citation_protocol_active = False
         retry_empty_response = True
         if partitions is None and not metadata.get("websearch", False):
@@ -1640,7 +1651,7 @@ class QueryService:
             self._record_contextualization_not_run(trace, original_query=original_query)
         else:
             result = await self._prepare_chat(
-                partitions, payload, llm, trace=trace, max_prompt_tokens=max_prompt_tokens, configs=configs
+                partitions, payload, llm, trace=trace, max_prompt_tokens=max_prompt_tokens, configs=resolved.configs
             )
             payload = result.payload
             docs = result.docs
@@ -1709,18 +1720,19 @@ class QueryService:
         payload: dict,
         prepare_sources: PrepareSources,
         max_prompt_tokens: int | None = None,
+        resolved_request: ResolvedChatRequest | None = None,
     ) -> dict:
         """Non-streaming text completion → finalized OpenAI dict (*max_prompt_tokens*: see ``chat``)."""
         metadata = payload.get("metadata") or {}
         include_all_retrieved = metadata.get("include_all_retrieved_sources") is True
-        configs = self._partition_configs_for_request(partitions)
-        llm = self._resolve_llm(partitions, configs)
+        resolved = resolved_request if resolved_request is not None else self.resolve_chat_request(partitions)
+        llm = resolved.llm
         citation_protocol_active = partitions is not None
         if partitions is None:
             docs, retrieved_docs = [], []
         else:
             payload, docs, retrieved_docs = await self._prepare_completions(
-                partitions, payload, llm, max_prompt_tokens, configs=configs
+                partitions, payload, llm, max_prompt_tokens=max_prompt_tokens, configs=resolved.configs
             )
         sources = prepare_sources(docs, [])
         all_sources = prepare_sources(retrieved_docs, []) if include_all_retrieved else None

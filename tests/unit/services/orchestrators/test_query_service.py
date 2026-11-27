@@ -335,7 +335,7 @@ def test_resolve_llm_uses_partition_preset():
     factory = RecordingFactory({"mistral": preset_llm})
     svc = _svc(llm_factory=factory)
     svc._config.partitions = {"p": _partition(chat_llm="mistral")}
-    assert svc._resolve_llm(["p"]) is preset_llm
+    assert svc.resolve_chat_request(["p"]).llm is preset_llm
     assert factory.calls == ["mistral"]
 
 
@@ -348,10 +348,10 @@ def test_resolve_llm_default_paths_use_the_catalog_default_endpoint():
     factory = RecordingFactory({"default": catalog_default, "mistral": FakeLLM()})
     svc = _svc(llm=static_llm, llm_factory=factory)
     svc._config.partitions = {"p": _partition(chat_llm=None), "q": _partition(chat_llm="mistral")}
-    assert svc._resolve_llm(None) is catalog_default  # direct/web-only mode
-    assert svc._resolve_llm(["all"]) is catalog_default  # cross-partition sentinel
-    assert svc._resolve_llm(["p"]) is catalog_default  # partition without a preset
-    assert svc._resolve_llm(["missing"]) is catalog_default  # unknown partition
+    assert svc.resolve_chat_request(None).llm is catalog_default  # direct/web-only mode
+    assert svc.resolve_chat_request(["all"]).llm is catalog_default  # cross-partition sentinel
+    assert svc.resolve_chat_request(["p"]).llm is catalog_default  # partition without a preset
+    assert svc.resolve_chat_request(["missing"]).llm is catalog_default  # unknown partition
     assert factory.calls == ["default", "default", "default", "default"]
 
 
@@ -361,13 +361,13 @@ def test_resolve_llm_falls_back_to_static_llm_without_factory_or_catalog_default
     static_llm = FakeLLM()
     no_factory = _svc(llm=static_llm)
     no_factory._config.partitions = {"q": _partition(chat_llm="mistral")}
-    assert no_factory._resolve_llm(["q"]) is static_llm
-    assert no_factory._resolve_llm(None) is static_llm
+    assert no_factory.resolve_chat_request(["q"]).llm is static_llm
+    assert no_factory.resolve_chat_request(None).llm is static_llm
 
     empty_catalog = RecordingFactory()  # raises KeyError for "default"
     svc = _svc(llm=static_llm, llm_factory=empty_catalog)
     svc._config.partitions = {"p": _partition(chat_llm=None)}
-    assert svc._resolve_llm(["p"]) is static_llm
+    assert svc.resolve_chat_request(["p"]).llm is static_llm
     assert empty_catalog.calls == ["default"]
 
 
@@ -381,8 +381,8 @@ def test_resolve_llm_multi_partition_uses_preset_only_when_unanimous():
         "c": _partition(chat_llm=None),  # unset → doesn't veto
         "d": _partition(chat_llm="llama"),
     }
-    assert svc._resolve_llm(["a", "b", "c"]) is preset_llm  # unanimous among setters
-    assert svc._resolve_llm(["a", "d"]) is catalog_default  # conflicting presets → catalog default
+    assert svc.resolve_chat_request(["a", "b", "c"]).llm is preset_llm  # unanimous among setters
+    assert svc.resolve_chat_request(["a", "d"]).llm is catalog_default  # conflicting presets → catalog default
 
 
 def test_default_llm_name_recovers_the_is_default_endpoint_name():
@@ -410,7 +410,7 @@ def test_resolve_llm_unknown_preset_falls_through_to_catalog_default():
     factory = RecordingFactory({"default": catalog_default})  # "deleted" raises KeyError
     svc = _svc(llm=static_llm, llm_factory=factory)
     svc._config.partitions = {"p": _partition(chat_llm="deleted")}
-    assert svc._resolve_llm(["p"]) is catalog_default
+    assert svc.resolve_chat_request(["p"]).llm is catalog_default
     assert factory.calls == ["deleted", "default"]
 
 

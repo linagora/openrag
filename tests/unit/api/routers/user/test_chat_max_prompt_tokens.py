@@ -6,17 +6,21 @@ and report a prompt that doesn't fit in it as a 413.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from api.dependencies.auth import current_user, current_user_or_admin_partitions_list
 from api.error_handlers import register_error_handlers
 from api.routers.user import chat
-from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY, ModelEndpointConfig
+from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY, ModelEndpointConfig
 from core.config.root import Settings
+from core.models.preset import PartitionConfig
 from core.utils.exceptions import ContextWindowExceededError
 from di.providers import get_config, get_partition_service, get_query_service
 from fastapi import FastAPI
+from services.orchestrators.query_service import QueryService
 
 WINDOW = 16384
 
@@ -34,6 +38,9 @@ class RecordingQueryService:
 
     async def refresh_partition_configs(self) -> None:
         self.calls["refresh_partition_configs"] = {}
+
+    def resolve_chat_request(self, _partitions):
+        return SimpleNamespace(endpoint_name="default")
 
     async def chat(self, **kwargs: Any) -> dict:
         self.calls["chat"] = kwargs
@@ -53,6 +60,9 @@ class OverWindowQueryService:
 
     async def refresh_partition_configs(self) -> None:
         pass
+
+    def resolve_chat_request(self, _partitions):
+        return SimpleNamespace(endpoint_name="default")
 
     async def chat(self, **kwargs: Any) -> dict:
         raise ContextWindowExceededError(9000, 8000)
@@ -76,12 +86,17 @@ def service() -> RecordingQueryService:
 
 
 @pytest.fixture
-def make_client(async_client_factory, monkeypatch):
-    monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
-    settings = Settings()
+def settings():
+    settings = Settings(rag={"mode": "SimpleRag"})
     settings.models.llm["default"] = ModelEndpointConfig(
         endpoint="http://llm:8000/v1", extra={LLM_CONTEXT_SIZE_KEY: WINDOW}
     )
+    return settings
+
+
+@pytest.fixture
+def make_client(async_client_factory, monkeypatch, settings):
+    monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
 
     def _make(service):
         app = FastAPI()
@@ -128,6 +143,84 @@ async def test_completions_pass_the_window_minus_the_output_budget(client, servi
     assert response.status_code == 200
     assert service.calls["complete"]["max_prompt_tokens"] == WINDOW - 2048
     assert list(service.calls) == ["refresh_partition_configs", "complete"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry_point", ["chat", "chat_stream", "complete"])
+async def test_budget_and_generation_use_the_same_model_after_cache_refresh(
+    make_client, settings, monkeypatch, entry_point
+):
+    defaults = {"before": 73, "after": 119}
+    for name, window in [("before", 4096), ("after", 8192)]:
+        settings.models.llm[name] = ModelEndpointConfig(
+            endpoint=f"http://{name}:8000/v1",
+            extra={LLM_CONTEXT_SIZE_KEY: window, LLM_OUTPUT_TOKENS_KEY: defaults[name]},
+        )
+    before = PartitionConfig(name="p", indexation={}, retrieval={}, chat_llm="before")
+    after = before.model_copy(update={"chat_llm": "after"})
+    settings.partitions["p"] = before
+    calls = []
+
+    def make_llm(name):
+        def record(kwargs):
+            calls.append((name, kwargs["max_tokens"]))
+
+        async def answer(_messages, **kwargs):
+            record(kwargs)
+            return {"choices": [{"message": {"content": "Answer"}}]}
+
+        async def stream(_messages, **kwargs):
+            record(kwargs)
+            yield 'data: {"choices":[{"delta":{"content":"Answer"},"finish_reason":"stop"}]}\n\n'
+            yield "data: [DONE]\n\n"
+
+        async def complete(_prompt, **kwargs):
+            record(kwargs)
+            return {"choices": [{"text": "Answer"}]}
+
+        return SimpleNamespace(chat=answer, stream_chat=stream, generate=complete)
+
+    llms = {name: make_llm(name) for name in defaults}
+    service = QueryService(
+        retrieval_service=SimpleNamespace(
+            refresh_partition_configs=AsyncMock(), retrieve_multi=AsyncMock(return_value=[])
+        ),
+        llm=llms["before"],
+        config=settings,
+        web_search_service=SimpleNamespace(max_tokens=1000),
+        workspace_service=None,
+        prompt_service=SimpleNamespace(resolve_prompt=AsyncMock(return_value="Answer using {context}")),
+        llm_factory=llms.__getitem__,
+    )
+    prepare_method = "_prepare_completions" if entry_point == "complete" else "_prepare_chat"
+    prepare = getattr(service, prepare_method)
+    prompt_budgets = []
+
+    async def record_prompt_budget(*args, **kwargs):
+        prompt_budgets.append(kwargs["max_prompt_tokens"])
+        return await prepare(*args, **kwargs)
+
+    monkeypatch.setattr(service, prepare_method, record_prompt_budget)
+
+    def count_and_refresh(text):
+        settings.partitions["p"] = after
+        return len(text.split())
+
+    monkeypatch.setattr(chat, "get_num_tokens", lambda: count_and_refresh)
+    if entry_point == "complete":
+        path, body = "/v1/completions", {"prompt": "What is the plan?"}
+    else:
+        path = "/v1/chat/completions"
+        body = {"messages": [{"role": "user", "content": "What is the plan?"}], "stream": entry_point == "chat_stream"}
+
+    async with make_client(service) as client:
+        for _ in range(2):
+            response = await client.post(path, json={**body, "model": "openrag-p"})
+            assert response.status_code == 200
+            assert "Answer" in response.text
+
+    assert calls == [("before", 73), ("after", 119)]
+    assert prompt_budgets == [4096 - 73, 8192 - 119]
 
 
 @pytest.mark.asyncio
