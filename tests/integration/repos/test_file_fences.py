@@ -118,6 +118,20 @@ async def test_an_expired_fence_is_taken(store):
     assert fence.holder_id == "task-b"
 
 
+@pytest.mark.parametrize("status", [DocumentStatus.QUEUED, DocumentStatus.SERIALIZING])
+async def test_expired_queue_fence_stays_held_until_job_finishes(store, status):
+    holder = uuid.uuid4().hex
+    await store.job_repo.upsert_job(
+        IndexationJob(id=holder, status=status, partition=PARTITION, file_id=FILE_ID, lane="cpu")
+    )
+    await _acquire(store, holder, ttl=0)
+
+    assert (await _acquire(store, "other", kind=FileFenceKind.METADATA)).holder_id == holder
+
+    await store.pool.execute("UPDATE jobs SET status = 'CANCELLED' WHERE id = $1", holder)
+    assert (await _acquire(store, "other", kind=FileFenceKind.METADATA)).holder_id == "other"
+
+
 @pytest.mark.parametrize("status", [DocumentStatus.COMPLETED, DocumentStatus.FAILED, DocumentStatus.CANCELLED])
 async def test_an_index_fence_whose_job_is_over_is_taken(store, status):
     holder = await _job(store, status)
