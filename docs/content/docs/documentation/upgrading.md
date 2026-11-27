@@ -15,6 +15,15 @@ split `$DC` into `docker compose`, so the commands below fail.
 
 ## OpenRAG 2.3.6
 
+During a failed-auth IP lockout, a recently validated `AUTH_TOKEN` can be
+revalidated only when it uses the generated format: `or-` plus 32 lowercase
+hex digits. A hand-chosen token outside that format still works normally, but
+gets `429` during lockout. New Compose environments get the generated format
+from `scripts/gen_env.py`; if you need admin calls to keep working through a
+shared-IP lockout with an existing deployment, run
+`printf 'or-%s\n' "$(openssl rand -hex 16)"` in a shell, save its output as
+`AUTH_TOKEN`, and update its clients.
+
 The Compose stack now declares its bridge subnet so it can reserve the bundled
 proxy addresses. When upgrading an existing stack, schedule a service
 interruption and recreate the project network from `infra/compose/`:
@@ -135,6 +144,60 @@ running, upgrade, and resume uploads once every old replica has stopped. A user
 who did go over their quota can upload again once their file count is below the
 limit: they delete enough files to get below it, or an administrator raises the
 quota above their current count.
+
+## UNRELEASED: credential checks and embedder sync
+
+Compose now checks service credentials before PostgreSQL, MinIO, Milvus initialization,
+and bundled Grafana start. The first startup may need to download the `python:3.12-slim`
+image. Empty required credentials always stop the dependent service; policy violations
+also stop it unless `ALLOW_INSECURE_SECRETS=true`. In OIDC mode, confirm
+`OIDC_TOKEN_ENCRYPTION_KEY` is a valid Fernet key before restarting.
+**Breaking change:** Compose now uses `OPENRAG_ENV_FILE` to select the API and
+preflight environment file. Compose ignores `SHARED_ENV`, even when it is exported
+in the shell.
+
+Check the environment file your API actually uses for an existing `AUTH_TOKEN`.
+If that file intentionally leaves it unset, as some SSO installations do, skip
+`gen_env.py` during this upgrade. Add
+`OPENRAG_PREFLIGHT_UID` and `OPENRAG_PREFLIGHT_GID` by hand using the file owner's
+IDs.
+The generator adds every missing template setting, including a new `AUTH_TOKEN`
+when it is absent. On startup that token replaces the stored admin token.
+
+If that file already sets `AUTH_TOKEN`, run the generator as its owner. The
+command `python3 scripts/gen_env.py` updates `infra/compose/.env` by default.
+For a custom file, pass its absolute path with `--output`, for example
+`python3 scripts/gen_env.py --output /srv/openrag/prod.env`. The script
+preserves the token in the selected file, fills in missing template settings,
+and migrates supported legacy `SHARED_ENV` paths. If it cannot resolve the old
+path, configure the custom file as described below and remove `SHARED_ENV`.
+Restore your previous `SHARED_ENV` setting if you roll back to 2.3.5 Compose.
+
+Keep the environment file private. For any custom file, set `OPENRAG_ENV_FILE`
+in that file to its own absolute path and pass the same path to Compose with
+`--env-file` on every command. This makes Compose interpolation, the API, and
+the preflights use the same settings.
+The offline `gen_env.py --check` requires literal secret values. It reports
+Compose references such as `VLM_API_KEY=${API_KEY}` because it cannot validate
+the resolved value.
+
+Before this change, `MODEL_ENDPOINT_SYNC_ON_BOOT=true` could change an env-managed embedder
+URL while indexed files still depended on its vectors. Startup now holds
+changes to the embedder URL, model, and provider when indexed files depend on the
+saved configuration, and logs the affected fields. The indexed-data guard also detects vectors still
+recorded on files after a cancelled swap, even when their partition now points to a
+different embedder. Compare the environment with the saved endpoint in the admin API,
+or apply the change there with `acknowledge_indexed_data=true`.
+
+If the warning mentions a running embedder swap, let it finish or cancel it first.
+The admin API refuses vector-configuration edits during a swap, even with
+acknowledgement. Restart after the swap to retry boot sync; the indexed-data check
+still applies. While a change is held, startup can rotate the API key only when the
+saved URL and provider still match.
+
+Existing embedder records with an explicit null `max_model_len` keep their
+previous truncation behavior. To inherit the deployment limit, remove that
+override through an acknowledged endpoint edit when indexed files depend on it.
 
 ## OpenRAG 2.3.5 on a shared Ray cluster: stop indexing first
 
@@ -1156,11 +1219,19 @@ $DC stop "$SVC"
 
 #### 5. Run the Milvus migration
 
+The 2.3.0 image cannot run a command through its entrypoint, so the commands
+below bypass it and run as the image's app user (`--user`) rather than as root,
+with the entrypoint's `umask 002`: run as root, or with the default umask, `uv`
+leaves files in the `openrag_venv` volume that another image's user cannot
+replace, and the next start with that image fails with `Permission denied` while
+syncing it.
+
 A dry run first, which changes nothing and lists the pending migrations:
 
 ```bash
-$DC run --no-deps --rm --entrypoint "" "$SVC" \
-  uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
+APP_UID=$($DC run --no-deps --rm -T --entrypoint printenv "$SVC" APP_UID)
+$DC run --no-deps --rm --entrypoint sh --user "$APP_UID:0" "$SVC" -c \
+  'umask 002 && exec uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run'
 ```
 
 The dry run prints the collection's current version:
@@ -1193,8 +1264,8 @@ Check that the plan routes every partition to an embedder field, and review any
 lose their vector. Then apply it:
 
 ```bash
-$DC run --no-deps --rm --entrypoint "" "$SVC" \
-  uv run --no-dev python services/persistence/migrations/milvus/migrate.py
+$DC run --no-deps --rm --entrypoint sh --user "$APP_UID:0" "$SVC" -c \
+  'umask 002 && exec uv run --no-dev python services/persistence/migrations/milvus/migrate.py'
 ```
 
 A failed run can be run again: until its last step drops the old `vector` field,

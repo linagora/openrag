@@ -197,7 +197,7 @@ def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     opts = options_calls[0]
     # A protocol-specific name prevents a rolling deployment from attaching to
     # a detached actor that still runs the previous claim implementation.
-    assert opts["name"] == "IndexerPoolDispatcher-v21"
+    assert opts["name"] == "IndexerPoolDispatcher-v22"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
@@ -238,9 +238,9 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
     assert {c["name"] for c in calls} == {
-        "IndexerWorker-v21-0",
-        "IndexerWorker-v21-1",
-        "IndexerWorker-v21-2",
+        "IndexerWorker-v22-0",
+        "IndexerWorker-v22-1",
+        "IndexerWorker-v22-2",
     }
     for c in calls:
         assert c["lifetime"] == "detached"
@@ -498,6 +498,11 @@ def test_embedder_factory_backfills_max_model_len_from_settings() -> None:
                 model_name="embed-model",
                 extra={"implementation": "backfill-probe-embedder", "max_model_len": 4096},
             ),
+            "saved-null": ModelEndpointConfig(
+                endpoint="http://embed.example/v1",
+                model_name="embed-model",
+                extra={"implementation": "backfill-probe-embedder", "max_model_len": None},
+            ),
         }
         cfg = SimpleNamespace(
             models=SimpleNamespace(embedder=registry),
@@ -509,6 +514,7 @@ def test_embedder_factory_backfills_max_model_len_from_settings() -> None:
         assert backfilled.kwargs["max_model_len"] == 2047
         assert backfilled.kwargs["embed_concurrency"] == 4
         assert factory("explicit").kwargs["max_model_len"] == 4096  # per-endpoint extra wins
+        assert factory("saved-null").kwargs["max_model_len"] is None
     finally:
         embedder_registry._registry.pop("backfill-probe-embedder", None)
 
@@ -1364,7 +1370,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
     await pool.submit(task_id="accepted-before-drain")
 
     assert await pool.begin_drain() == {
-        "protocol_version": "v21",
+        "protocol_version": "v22",
         "accepting_tasks": False,
         "inflight_jobs": 1,
         "worker_names": ["test-worker-0"],
@@ -1397,7 +1403,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
 
     await _settle_pool_release_tasks(pool, worker.futures[0])
     assert await pool.status() == {
-        "protocol_version": "v21",
+        "protocol_version": "v22",
         "accepting_tasks": False,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1432,7 +1438,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
         await pool.submit(task_id="rejected-while-draining")
 
     assert await pool.abort_drain() == {
-        "protocol_version": "v21",
+        "protocol_version": "v22",
         "accepting_tasks": True,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1447,7 +1453,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
 async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 
-    assert await pool.protocol_version() == "v21"
+    assert await pool.protocol_version() == "v22"
 
 
 @pytest.mark.asyncio

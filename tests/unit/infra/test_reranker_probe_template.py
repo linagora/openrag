@@ -499,5 +499,6 @@ def test_extra_args_and_env_reach_the_reranker(tmp_path: Path) -> None:
     )
 
     assert container["args"] == ["v2", "--model-id", DEFAULT_MODEL, "--port", "7997", "--batch-size", "16"]
-    assert container["env"] == [{"name": "INFINITY_MODEL_WARMUP", "value": "false"}]
+    # After the NVIDIA variables the chart sets (test_reranker_gpu_template.py).
+    assert container["env"][-1] == {"name": "INFINITY_MODEL_WARMUP", "value": "false"}
     assert container["envFrom"] == [{"configMapRef": {"name": "openrag-env"}}]

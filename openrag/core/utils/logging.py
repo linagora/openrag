@@ -1,9 +1,11 @@
+import hashlib
 import inspect
 import ipaddress
 import json
 import logging
 import sys
 import traceback
+from pathlib import Path
 
 from core.config import load_config
 from loguru import logger
@@ -27,6 +29,23 @@ def mask_email(email: str | None) -> str:
     local, _, domain = email.partition("@")
     masked_local = f"{local[0]}***" if local else "***"
     return f"{masked_local}@{domain}"
+
+
+def hash_oidc_sub(sub: str) -> str:
+    """Return a stable SHA-256 pseudonym for an OIDC subject."""
+    return hashlib.sha256(sub.encode("utf-8")).hexdigest()
+
+
+def safe_exception_stack(exc: BaseException) -> list[str]:
+    """Summarize traceback frames without exception text, source lines, or locals.
+
+    Loguru's rendered exception includes the exception message, while diagnostic
+    mode can include local values. This summary keeps only a basename, function,
+    and line number for each frame.
+    """
+    return [
+        f"{Path(frame.filename).name}:{frame.name}:{frame.lineno}" for frame in traceback.extract_tb(exc.__traceback__)
+    ]
 
 
 def truncate_client_addr(client_addr: object) -> str:

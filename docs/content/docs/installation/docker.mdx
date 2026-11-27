@@ -37,7 +37,6 @@ endpoint from an external Prometheus.
 Start OpenRAG with the monitoring overlay:
 
 ```bash
-export SHARED_ENV="$PWD/.env"
 docker compose --env-file .env \
   -f docker-compose.yaml \
   -f monitoring.docker-compose.yaml \

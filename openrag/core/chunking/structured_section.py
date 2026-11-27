@@ -58,7 +58,7 @@ from core.chunking.recursive import (
 from core.chunking.registry import chunking_registry
 from core.models.chunk import Chunk, ChunkType
 from core.models.document import ProcessedDocument
-from core.utils.consts import XLSX_TEXT_CONTENT_KINDS
+from core.utils.consts import WORKBOOK_TABULAR_FORMATS, XLSX_TEXT_CONTENT_KINDS
 from core.utils.text import sanitize_text
 
 # Markdown ATX heading: ``## Title``. Level = number of ``#``.
@@ -314,7 +314,7 @@ class StructuredSectionChunker(BaseChunker):
                 )
             ]
         elif (
-            metadata.get("tabular_format") == "xlsx"
+            metadata.get("tabular_format") in WORKBOOK_TABULAR_FORMATS
             and metadata.get("xlsx_content_kind") not in XLSX_TEXT_CONTENT_KINDS
         ):
             units = [self._atomic_unit(MDElement(type="table", content=content, metadata=metadata), [], 1)]
@@ -342,7 +342,7 @@ class StructuredSectionChunker(BaseChunker):
         # formula/format groups, a detached worksheet context, table columns on
         # a worksheet-note chunk).
         xlsx_table = (
-            metadata.get("tabular_format") == "xlsx"
+            metadata.get("tabular_format") in WORKBOOK_TABULAR_FORMATS
             and metadata.get("xlsx_content_kind") not in XLSX_TEXT_CONTENT_KINDS
         )
         chunks: list[Chunk] = []

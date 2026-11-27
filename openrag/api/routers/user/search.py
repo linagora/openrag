@@ -19,7 +19,7 @@ from api.dependencies.auth import (
 )
 from api.dependencies.files import validate_file_id
 from api.dependencies.retrieval_diagnostics import get_retrieval_diagnostics_guard
-from api.routers.user.chat import check_tokens_limit
+from api.routers.user.chat import _token_budget, check_tokens_limit
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAIMessage
 from api.schemas.user.retrieval_diagnostics import (
     RetrievalDiagnosticRequest,
@@ -258,6 +258,9 @@ async def retrieval_diagnostics(
 ):
     await diagnostics_guard.authorize(partition_viewer)
     await service.refresh_partition_configs()
+    partitions = [partition]
+    resolved = service.resolve_chat_request(partitions)
+    budget = _token_budget(config, resolved.endpoint_name)
     token_request = OpenAIChatCompletionRequest(
         messages=[OpenAIMessage(**message.model_dump()) for message in payload.messages],
         max_tokens=config.rag.max_contextualized_query_len,
@@ -265,12 +268,11 @@ async def retrieval_diagnostics(
     check_tokens_limit(
         token_request,
         logger.bind(endpoint="/search/partition/{partition}/diagnostics"),
-        config,
-        partitions=[partition],
+        budget,
     )
     request_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID")
     trace = await service.diagnose_retrieval(
-        partitions=[partition],
+        partitions=partitions,
         messages=[message.model_dump() for message in payload.messages],
         query_mode=payload.query_mode,
         top_k=payload.top_k,
@@ -278,6 +280,7 @@ async def retrieval_diagnostics(
         disable_reranker=payload.disable_reranker,
         disable_expansion=payload.disable_expansion,
         request_id=request_id,
+        resolved_request=resolved,
     )
     return RetrievalDiagnosticResponse(
         partition=partition,

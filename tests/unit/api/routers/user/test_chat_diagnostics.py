@@ -5,6 +5,7 @@ import pytest
 from api.dependencies.retrieval_diagnostics import RetrievalDiagnosticsGuard
 from api.routers.user.chat import openai_chat_completion, openai_completion
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest
+from core.config.root import Settings
 from fastapi import HTTPException
 
 
@@ -13,14 +14,15 @@ async def test_chat_router_forwards_http_request_id(monkeypatch):
     captured = {}
 
     class _Service:
+        def resolve_chat_request(self, _partitions):
+            return SimpleNamespace(endpoint_name="default")
+
         async def chat(self, **kwargs):
             captured.update(kwargs)
             return {"choices": [{"message": {"content": "answer"}}]}
 
     monkeypatch.setattr(chat_router, "is_direct_llm_model", lambda *_args: True)
-    monkeypatch.setattr(chat_router, "_apply_default_max_tokens", lambda *_args: None)
-    monkeypatch.setattr(chat_router, "check_tokens_limit", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(chat_router, "_max_prompt_tokens", lambda *_args: None)
+    monkeypatch.setattr(chat_router, "get_num_tokens", lambda: lambda text: len(text.split()))
     request = OpenAIChatCompletionRequest(
         model="direct-model",
         messages=[{"role": "user", "content": "question"}],
@@ -34,7 +36,7 @@ async def test_chat_router_forwards_http_request_id(monkeypatch):
         user_partitions=[],
         service=_Service(),
         partition_service=None,
-        config=SimpleNamespace(llm=SimpleNamespace(model="direct-model")),
+        config=Settings(),
         diagnostics_guard=RetrievalDiagnosticsGuard("2/minute"),
     )
 

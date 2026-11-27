@@ -21,12 +21,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from core.config.model_endpoints import embedder_fingerprint
+from core.models.preset import PartitionConfig
 from core.utils.consts import is_reserved_partition_name, strip_protected_metadata
 from core.utils.exceptions import (
     AuthError,
     ConfigError,
     DocumentNotFoundError,
-    PartitionNotFoundError,
     ValidationError,
     indexing_worker_may_be_running,
     mark_indexing_worker_may_be_running,
@@ -34,6 +34,7 @@ from core.utils.exceptions import (
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
+from services.orchestrators.partition_service import PartitionService
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -41,7 +42,6 @@ if TYPE_CHECKING:
     from core.indexing.dispatcher import IndexingDispatcher
     from core.ports.document_repo import DocumentRepository
     from core.ports.workspace_repo import WorkspaceRepository
-    from services.orchestrators.partition_service import PartitionService
     from services.orchestrators.preset_service import PresetService
 
 logger = get_logger()
@@ -161,7 +161,7 @@ class IndexingService:
         metadata.update(extract_temporal_fields(metadata, temporal_fields=TEMPORAL_FIELDS))
         return metadata
 
-    def _partition_configs(self) -> dict[str, Any]:
+    def _partition_configs(self) -> dict[str, PartitionConfig]:
         if self._config is None:
             return {}
         return getattr(self._config, "partitions", {}) or {}
@@ -230,8 +230,9 @@ class IndexingService:
         if pin is not None:
             await pin(partition)
 
-    def _resolve_indexation_dispatch_config(self, partition: str) -> tuple[dict | None, str | None]:
-        partitions = self._partition_configs()
+    def _resolve_indexation_dispatch_config(
+        self, partitions: dict[str, PartitionConfig], partition: str
+    ) -> tuple[dict | None, str | None]:
         if not partitions:
             # Legacy passthrough: the worker indexes with its static config and
             # the default embedder. A running service never has an empty cache
@@ -239,9 +240,7 @@ class IndexingService:
             # it); only unit tests that build the service without partitions,
             # or a partition table emptied by hand in the database, land here.
             return None, None
-        if partition not in partitions:
-            raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
-        partition_cfg = partitions[partition]
+        partition_cfg = PartitionService.require_cached_config(partitions, partition)
         return partition_cfg.indexation.model_dump(mode="json"), partition_cfg.embedder
 
     async def _ensure_partition_exists(self, partition: str, user: dict | None) -> None:
@@ -254,9 +253,10 @@ class IndexingService:
         there is no preset registry to resolve against (legacy passthrough) or
         no partition service wired.
         """
-        if self._partition_service is None or not self._partition_configs():
+        configs = self._partition_configs()
+        if self._partition_service is None or not configs:
             return
-        if partition in self._partition_configs():
+        if PartitionService.lookup_cached_config(configs, partition) is not None:
             return
         if await self._partition_service.partition_exists(partition):
             # Row exists but the in-memory cache is stale — refresh it.
@@ -347,8 +347,9 @@ class IndexingService:
                 await self._ensure_partition_exists(partition, user)
                 await self._refresh_preset_config_if_stale()
                 await self._pin_partition_embedder(partition)
-                require_existing_partition = bool(self._partition_configs()) or partition_existed_at_admission
-                indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
+                configs = self._partition_configs()
+                require_existing_partition = bool(configs) or partition_existed_at_admission
+                indexation_config, embedder_name = self._resolve_indexation_dispatch_config(configs, partition)
                 legacy_actor_preserves_partition_guard = require_existing_partition and indexation_config is not None
                 try:
                     dispatched_task_id = await self._dispatcher.dispatch_indexing(
@@ -486,7 +487,7 @@ class IndexingService:
         """
         if self._config is None or self._embedder_factory is None:
             return {}
-        partition_cfg = self._partition_configs().get(partition)
+        partition_cfg = PartitionService.lookup_cached_config(self._partition_configs(), partition)
         endpoint = self._config.models.embedder.get(partition_cfg.embedder) if partition_cfg else None
         if endpoint is None or not endpoint.vector_field:
             raise ConfigError(

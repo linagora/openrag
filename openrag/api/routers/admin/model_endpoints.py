@@ -94,9 +94,8 @@ def _refresh_llm_token_cache(background_tasks: BackgroundTasks, model_type: str)
 def _with_llm_token_budgets(endpoint: dict, config) -> dict:
     """*endpoint* plus what its blank token budgets resolve to (LLM endpoints only).
 
-    The same order ``get_max_model_tokens`` applies when a request is answered:
-    the admin-set value (already in ``extra``), else the ``max_model_len`` the
-    endpoint reported, else the global ``llm_context`` fallback.
+    Chat uses the admin-set value in ``extra`` first, followed by a positive
+    ``max_model_len`` from the endpoint and then the global ``llm_context`` fallback.
     """
     if endpoint.get("model_type") != "llm":
         return endpoint
