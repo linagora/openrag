@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, TypeVar
 
 from core.indexing.file_fences import DEFAULT_WAIT_TIMEOUT_SECONDS, FileFences
+from core.models.catalog import FileFenceKind
 from core.models.workspace import WorkspaceScope
 from core.utils.exceptions import AmbiguousWorkspaceError
 from core.utils.logging import get_logger
@@ -346,7 +347,9 @@ class WorkspaceService:
             if give_back is not None:
                 await give_back()
             raise
-        return await self._file_fences.hold(partition=partition, file_id=file_id, holder_id=holder_id, work=work)
+        return await self._file_fences.hold(
+            partition=partition, file_id=file_id, holder_id=holder_id, holder_kind=FileFenceKind.DELETE, work=work
+        )
 
     async def _delete_owned_file(
         self, file_id: str, partition: str, owned: WorkspaceRepository, *, cleanup_started: bool = False

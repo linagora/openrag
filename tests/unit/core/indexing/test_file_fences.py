@@ -88,6 +88,17 @@ class _Fences(FileFenceRepository):
 # ── Without fences ───────────────────────────────────────────────────
 
 
+def test_fences_start_their_metric_series_only_when_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    started: list[bool] = []
+    monkeypatch.setattr(module, "start_file_fence_series", lambda: started.append(True))
+
+    FileFences(None)
+    assert started == []
+
+    FileFences(_Fences())
+    assert started == [True]
+
+
 @pytest.mark.asyncio
 async def test_without_a_repository_every_rule_is_a_no_op() -> None:
     fences = FileFences(None)
@@ -96,7 +107,12 @@ async def test_without_a_repository_every_rule_is_a_no_op() -> None:
     await fences.acquire_for_delete(partition=PARTITION, file_id=FILE_ID, holder_id="d")
     await fences.acquire_for_metadata(partition=PARTITION, file_id=FILE_ID, holder_id="m")
     await fences.check_free(partition=PARTITION, file_id=FILE_ID)
-    assert await fences.run_holding(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=_returns(7)) == 7
+    assert (
+        await fences.run_holding(
+            partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=_returns(7)
+        )
+        == 7
+    )
     assert not fences.enabled
 
 
@@ -244,7 +260,10 @@ async def test_run_holding_renews_while_the_work_runs(monkeypatch: pytest.Monkey
         return "done"
 
     result = await asyncio.wait_for(
-        FileFences(repo).run_holding(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=work), timeout=5
+        FileFences(repo).run_holding(
+            partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work
+        ),
+        timeout=5,
     )
 
     assert result == "done"
@@ -265,7 +284,10 @@ async def test_run_holding_stops_the_work_once_the_fence_is_lost(monkeypatch: py
 
     with pytest.raises(FileFenceLostError):
         await asyncio.wait_for(
-            FileFences(repo).run_holding(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=work), timeout=5
+            FileFences(repo).run_holding(
+                partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work
+            ),
+            timeout=5,
         )
 
     assert stopped.is_set()
@@ -291,7 +313,10 @@ async def _run_until_stopped(repo: _Fences) -> tuple[float, asyncio.Event]:
     # A 503, not a lost fence: nothing else touched the file.
     with pytest.raises(FileFenceUnavailableError) as caught:
         await asyncio.wait_for(
-            FileFences(repo).run_holding(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=work), timeout=5
+            FileFences(repo).run_holding(
+                partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work
+            ),
+            timeout=5,
         )
     assert caught.value.status_code == 503
     return asyncio.get_running_loop().time() - started, stopped
@@ -375,7 +400,9 @@ async def test_a_successful_renewal_moves_the_deadline(monkeypatch: pytest.Monke
         await asyncio.sleep(ttl * 2)
         return "done"
 
-    result = await FileFences(repo).run_holding(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=work)
+    result = await FileFences(repo).run_holding(
+        partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work
+    )
 
     assert result == "done"
 
@@ -394,7 +421,9 @@ async def test_work_that_ends_in_the_round_its_fence_is_lost_reports_its_own_out
         await asyncio.sleep(0)
         return "committed"
 
-    result = await FileFences(repo).run_holding(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=work)
+    result = await FileFences(repo).run_holding(
+        partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work
+    )
 
     assert result == "committed"
     assert repo.renew_results == []
@@ -406,14 +435,18 @@ async def test_run_holding_passes_the_works_failure_through() -> None:
         raise ValueError("milvus down")
 
     with pytest.raises(ValueError, match="milvus down"):
-        await FileFences(_Fences()).run_holding(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=work)
+        await FileFences(_Fences()).run_holding(
+            partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work
+        )
 
 
 # ── hold: release unless the work was stopped ───────────────────────
 
 
 async def _hold(repo: _Fences, work):
-    return await FileFences(repo).hold(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=work)
+    return await FileFences(repo).hold(
+        partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work
+    )
 
 
 @pytest.mark.asyncio
@@ -501,7 +534,9 @@ async def _cancel_held_work(fences: FileFences) -> None:
         started.set()
         await asyncio.Event().wait()
 
-    holding = asyncio.ensure_future(fences.hold(partition=PARTITION, file_id=FILE_ID, holder_id="m", work=work))
+    holding = asyncio.ensure_future(
+        fences.hold(partition=PARTITION, file_id=FILE_ID, holder_id="m", holder_kind=FileFenceKind.METADATA, work=work)
+    )
     await asyncio.wait_for(started.wait(), timeout=5)
     holding.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -546,7 +581,9 @@ async def test_a_delete_still_waiting_at_the_timeout_names_the_holder() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_delete_that_must_not_take_over_indexing_is_refused_instead() -> None:
+async def test_a_delete_that_must_not_take_over_indexing_is_refused_instead(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: list[dict] = []
+    monkeypatch.setattr(module, "record_file_fence_conflict", lambda **labels: recorded.append(labels))
     repo = _Fences()
     repo.hold(FileFenceKind.INDEX, "task-1")
 
@@ -559,3 +596,49 @@ async def test_a_delete_that_must_not_take_over_indexing_is_refused_instead() ->
     assert repo.fences[(PARTITION, FILE_ID)].holder_id == "task-1"
     # Nor through a job that already reads as finished: its worker may still write.
     assert repo.took_over_finished_task is False
+    assert recorded == [{"file_operation": "delete", "holder_kind": "index"}]
+
+
+# ── Metrics ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_is_counted_by_operation_and_holder(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: list[dict] = []
+    monkeypatch.setattr(module, "record_file_fence_conflict", lambda **labels: recorded.append(labels))
+    repo = _Fences()
+    repo.hold(FileFenceKind.DELETE, "d")
+    fences = FileFences(repo)
+
+    with pytest.raises(ConflictError):
+        await fences.acquire_for_indexing(partition=PARTITION, file_id=FILE_ID, holder_id="copy:1", operation="copy")
+    with pytest.raises(ConflictError):
+        await fences.acquire_for_metadata(partition=PARTITION, file_id=FILE_ID, holder_id="m")
+
+    assert recorded == [
+        {"file_operation": "copy", "holder_kind": "delete"},
+        {"file_operation": "metadata", "holder_kind": "delete"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_renewal_is_counted_by_holder_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(module, "FILE_FENCE_RENEW_INTERVAL_SECONDS", 0)
+    recorded: list[dict] = []
+    monkeypatch.setattr(module, "record_file_fence_renewal_failure", lambda **labels: recorded.append(labels))
+    repo = _Fences()
+    repo.renew_results = [RuntimeError("pg down"), False]
+
+    with pytest.raises(FileFenceLostError):
+        await asyncio.wait_for(
+            FileFences(repo).run_holding(
+                partition=PARTITION,
+                file_id=FILE_ID,
+                holder_id="d",
+                holder_kind=FileFenceKind.DELETE,
+                work=lambda: asyncio.Event().wait(),
+            ),
+            timeout=5,
+        )
+
+    assert recorded == [{"holder_kind": "delete"}]

@@ -71,6 +71,8 @@ def test_documented_kind_and_labels_match_the_spec(spec: specs.MetricSpec) -> No
         ("operation", specs.INFERENCE_OPERATION_VALUES),
         ("outcome", specs.INFERENCE_OUTCOME_VALUES),
         ("kind", specs.TOKEN_KIND_VALUES),
+        ("file_operation", specs.FILE_OPERATION_VALUES),
+        ("holder_kind", specs.FILE_FENCE_HOLDER_KIND_VALUES),
     ],
 )
 def test_documented_label_values_match_the_spec(label: str, values: tuple[str, ...]) -> None:

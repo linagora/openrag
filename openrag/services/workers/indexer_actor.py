@@ -11,11 +11,13 @@ from core.models.catalog import (
     FILE_FENCE_RENEW_INTERVAL_SECONDS,
     FILE_FENCE_TTL_SECONDS,
     DocumentStatus,
+    FileFenceKind,
     IndexationJob,
     normalize_degraded_stages,
 )
 from core.models.document import Document, DocumentType
 from core.models.stage_progress import StageProgressWorkerSnapshot, StageTaskPhase
+from core.observability.file_fence_metrics import record_file_fence_renewal_failure
 from core.observability.ray_metrics import initialize_stage_writer_counters
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import NoIndexableContentError
@@ -126,6 +128,7 @@ class IndexerWorker:
                     partition=partition, file_id=file_id, holder_id=holder_id, ttl_seconds=FILE_FENCE_TTL_SECONDS
                 )
             except Exception as exc:  # noqa: BLE001 - the next round retries, and the lease outlasts three misses
+                record_file_fence_renewal_failure(holder_kind=FileFenceKind.INDEX.value)
                 logger.bind(file_id=file_id, partition=partition).warning(
                     "Failed to renew the file fence; retrying.", error=str(exc)
                 )
