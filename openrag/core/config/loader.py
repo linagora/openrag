@@ -73,6 +73,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("POSTGRES_USER", "rdb.user", str),
     ("POSTGRES_PASSWORD", "rdb.password", str),
     ("DEFAULT_FILE_QUOTA", "rdb.default_file_quota", int),
+    ("INDEXING_MAX_UNFINISHED_JOBS_PER_USER", "rdb.indexing_max_unfinished_jobs_per_user", int),
     ("POSTGRES_DATABASE", "rdb.database", str),
     ("POSTGRES_AUTO_CREATE_DB", "rdb.auto_create_database", bool),
     ("POSTGRES_RUN_MIGRATIONS", "rdb.run_migrations", bool),

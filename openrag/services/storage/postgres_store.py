@@ -95,7 +95,9 @@ class PostgresStore(CatalogStore):
         self._oidc_session_repo = PgOIDCSessionRepository(pool_getter)
         self._workspace_repo = PgWorkspaceRepository(pool_getter)
 
-        self._job_repo = PgJobRepository(pool_getter)
+        self._job_repo = PgJobRepository(
+            pool_getter, max_unfinished_per_user=config.indexing_max_unfinished_jobs_per_user
+        )
         self._file_fence_repo = PgFileFenceRepository(pool_getter)
 
         # Stubs — every method raises StubRepositoryError until the matching

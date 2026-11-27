@@ -45,6 +45,18 @@ class JobRepository(ABC):
     """Durable records for indexing tasks."""
 
     @abstractmethod
+    async def enqueue(
+        self,
+        job: IndexationJob,
+        *,
+        default_quota: int,
+        max_unfinished_per_user: int | None = None,
+        replace: bool = False,
+        callback_token: str | None = None,
+    ) -> IndexationJob:
+        """Create a job and reserve its quota and fence atomically."""
+
+    @abstractmethod
     async def upsert_job(self, job: IndexationJob) -> IndexationJob:
         """Create the record, or advance it. Terminal states never regress."""
 

@@ -49,6 +49,10 @@ def app() -> FastAPI:
     async def _raise_quota() -> None:
         raise QuotaExceededError("too many files")
 
+    @app.get("/raise/queue_limit")
+    async def _raise_queue_limit() -> None:
+        raise OpenRAGError("Queue limit reached", code="INDEXING_QUEUE_LIMIT_REACHED", status_code=429, retry_after=60)
+
     @app.get("/raise/validation")
     async def _raise_validation() -> None:
         raise ValidationError("bad input")
@@ -431,3 +435,10 @@ def test_openrag_error_log_level(exc: OpenRAGError, status: int, level: str) -> 
         logger.remove(handler_id)
     assert response.status_code == status
     assert captured == [(level, status)]
+
+
+def test_queue_limit_includes_retry_after(app: FastAPI) -> None:
+    response = TestClient(app).get("/raise/queue_limit")
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
