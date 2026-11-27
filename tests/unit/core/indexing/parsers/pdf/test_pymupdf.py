@@ -26,8 +26,10 @@ from core.indexing.parsers.pdf.pymupdf import (
     _is_allocation_failure,
     _pages_with_fallback,
 )
+from core.indexing.pdf_integrity import CORRUPT_PDF_MESSAGE
 from core.models.document import Document, DocumentType, ImageBlock
 from core.utils import process_limits
+from core.utils.exceptions import InvalidDocumentError
 
 _TO_MARKDOWN = "core.indexing.parsers.pdf.pymupdf.pymupdf4llm.to_markdown"
 
@@ -224,7 +226,7 @@ class TestParsesRunInChildProcesses:
             filename="report.pdf", content_type=DocumentType.PDF, raw_bytes=b"not a pdf", source_path=str(path)
         )
 
-        with pytest.raises(pymupdf.FileDataError):
+        with pytest.raises(InvalidDocumentError):
             await PyMuPDFParser().parse(document)
 
     @pytest.mark.asyncio
@@ -676,10 +678,17 @@ class TestFailuresTheParentCanActOn:
 
     @pytest.mark.asyncio
     async def test_an_ordinary_error_crosses_unchanged(self):
-        with pytest.raises(pymupdf.FileDataError):
+        """A PDF MuPDF cannot open fails in the child as ``InvalidDocumentError``,
+        and reaches the parent as raised: the code read once, not prefixed again
+        when it was unpickled."""
+        with pytest.raises(InvalidDocumentError) as raised:
             await PyMuPDFParser().parse(
                 Document(filename="x.pdf", content_type=DocumentType.PDF, raw_bytes=b"%PDF-1.7\n" + b"\x00" * 512)
             )
+
+        assert raised.value.code == "INVALID_PDF"
+        assert raised.value.message == CORRUPT_PDF_MESSAGE
+        assert str(raised.value) == f"INVALID_PDF: {CORRUPT_PDF_MESSAGE}"
 
     @pytest.mark.parametrize("message", [_MUPDF_CALLOC_FAILURE, _MUPDF_FREETYPE_FAILURE], ids=["allocator", "FreeType"])
     def test_an_allocation_failure_is_not_retried_on_a_cleaned_copy(self, message):

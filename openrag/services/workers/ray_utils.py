@@ -29,7 +29,7 @@ import functools
 import inspect
 import random
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypeVar
 
 import ray
 from core.utils.error_summary import elide_middle, failure_reason_from_exception
@@ -39,6 +39,8 @@ from ray.exceptions import ActorUnavailableError, RayActorError, RayTaskError, T
 
 logger = get_logger()
 
+E = TypeVar("E", bound=BaseException)
+
 # Each actor hop appends its cause to the message, so the cap applies per hop.
 _REMOTE_CAUSE_MAX_LENGTH = 300
 
@@ -47,6 +49,7 @@ __all__ = [
     "call_ray_actor_method_with_timeout",
     "caused_by",
     "call_ray_actor_with_timeout",
+    "find_cause",
     "retry_idempotent_ray_actor_method",
     "retry_with_backoff",
     "with_retry",
@@ -263,14 +266,16 @@ def with_timeout(
 # ---------------------------------------------------------------------------
 
 
-def caused_by(exc: BaseException | None, types: type[BaseException] | tuple[type[BaseException], ...]) -> bool:
-    """True when *exc*, or anything it was raised from, is one of *types*.
+def find_cause(exc: BaseException | None, types: type[E] | tuple[type[E], ...]) -> E | None:
+    """The first of *exc* and what it was raised from that is one of *types*, else ``None``.
 
     Ray does not hand a worker's exception back unchanged: a child failure
     arrives as ``RayTaskError(Original)``, and :func:`call_ray_actor_with_timeout`
     then re-raises that as ``RuntimeError`` with the Ray error as ``__cause__``.
     A plain ``isinstance`` therefore misses the original type across an actor
-    boundary — which is exactly where a caller needs to recognise it.
+    boundary — which is exactly where a caller needs to recognise it. What is
+    found there is that ``RayTaskError(Original)``: an instance of the original
+    type whose attributes are the original's.
 
     Walks ``__cause__`` with a seen-set, because an explicitly chained cycle
     would otherwise spin forever.
@@ -279,10 +284,15 @@ def caused_by(exc: BaseException | None, types: type[BaseException] | tuple[type
     current = exc
     while current is not None and id(current) not in seen:
         if isinstance(current, types):
-            return True
+            return current
         seen.add(id(current))
         current = current.__cause__
-    return False
+    return None
+
+
+def caused_by(exc: BaseException | None, types: type[BaseException] | tuple[type[BaseException], ...]) -> bool:
+    """True when *exc*, or anything it was raised from, is one of *types* (see :func:`find_cause`)."""
+    return find_cause(exc, types) is not None
 
 
 async def retry_with_backoff(

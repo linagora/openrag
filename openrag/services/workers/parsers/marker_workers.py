@@ -4,13 +4,14 @@ import os
 import re
 import threading
 import time
+from pathlib import Path
 
-import pypdfium2
 import ray
 import torch
 from core.config import load_config
 from core.indexing.parsers.document_parser import BasePooledParser
 from core.indexing.parsers.progress import report_parser_substage
+from core.indexing.pdf_integrity import pdfium_page_count
 from core.models.document import (
     Document,
     DocumentType,
@@ -19,12 +20,13 @@ from core.models.document import (
     TextBlock,
 )
 from core.utils.child_process import kill_process_group, tie_to_parent
+from core.utils.exceptions import InvalidDocumentError
 from core.utils.logging import get_logger
 from core.utils.process_limits import apply_parse_memory_limit
 from marker.converters.pdf import PdfConverter
 from ray.exceptions import TaskCancelledError
 
-from ..ray_utils import call_ray_actor_with_timeout, caused_by, retry_with_backoff
+from ..ray_utils import call_ray_actor_with_timeout, caused_by, find_cause, retry_with_backoff
 
 logger = get_logger()
 
@@ -413,11 +415,10 @@ class MarkerPool:
 
     @staticmethod
     def _get_page_count(file_path: str) -> int:
-        pdf = pypdfium2.PdfDocument(file_path)
-        try:
-            return len(pdf)
-        finally:
-            pdf.close()
+        """Raises ``InvalidDocumentError`` for a file pdfium cannot open, which
+        Marker could not parse either: before a slot is taken and outside the
+        retries, since the same bytes fail the same way every time."""
+        return pdfium_page_count(file_path)
 
     @staticmethod
     def _create_chunks(page_count: int, chunk_size: int) -> list[tuple[list[int], str]]:
@@ -457,7 +458,7 @@ class MarkerPool:
         return await call_ray_actor_with_timeout(
             actor.process_pdf.remote(file_path, page_range=page_range, slot=slot),
             timeout=self.config.loader.marker_timeout,
-            task_description=f"MarkerPool PDF {label} ({file_path})",
+            task_description=f"MarkerPool PDF {label} ({Path(file_path).name})",
         )
 
     async def _recycle_and_release(self, worker, label: str):
@@ -561,7 +562,7 @@ class MarkerPool:
                 attempt,
                 max_retries=self.config.loader.marker_max_task_retry,
                 base_delay=self.config.loader.marker_retry_base_delay,
-                task_description=f"MarkerPool PDF {label} ({file_path})",
+                task_description=f"MarkerPool PDF {label} ({Path(file_path).name})",
                 # A chunk over the ceiling is over it again every time, so retrying
                 # costs ~4x the parse plus backoff and ends with the same error.
                 no_retry=(MemoryError,),
@@ -578,7 +579,8 @@ class MarkerPool:
     async def process_pdf(self, file_path: str):
         chunk_size = self.config.loader.marker_chunk_size
 
-        total_pages = self._get_page_count(file_path)
+        # Off the loop, which every other chunk's bookkeeping runs on.
+        total_pages = await asyncio.to_thread(self._get_page_count, file_path)
         capped = _MAX_PDF_PAGES > 0 and total_pages > _MAX_PDF_PAGES
         if capped:
             self.logger.warning(
@@ -726,9 +728,16 @@ class MarkerLoader(BasePooledParser):
             return await call_ray_actor_with_timeout(
                 pool.process_pdf.remote(file_path),
                 timeout=self.config.loader.marker_timeout,
-                task_description=f"MarkerLoader PDF loading ({file_path})",
+                # The name, not the path: this ends up in the task's error.
+                task_description=f"MarkerLoader PDF loading ({Path(file_path).name})",
             )
         except Exception as exc:
+            # The pool found the file unreadable. Raise that error itself, not
+            # the Ray wrapper around it: a RuntimeError a client cannot tell from
+            # an outage, which re-sending the same bytes would never get past.
+            invalid = find_cause(exc, InvalidDocumentError)
+            if invalid is not None:
+                raise InvalidDocumentError(invalid.message, code=invalid.code) from exc
             # The Ray wrapper's message names the remote cause, but only as
             # "MemoryError" at the end of a chain of task names. Name the memory
             # failure up front, and the setting that decides it, so an admin
@@ -751,10 +760,14 @@ class MarkerLoader(BasePooledParser):
         try:
             markdown, images = await self._convert_pdf(file_path)
             if not markdown:
-                raise RuntimeError(f"Conversion failed for {file_path}")
+                raise RuntimeError("Marker returned no Markdown for this PDF.")
             duration = time.time() - start
             logger.info(f"Processed {file_path} in {duration:.2f}s")
             return markdown, images or {}
+        except InvalidDocumentError:
+            # The file's outcome, not an error of the parser: the task's failure
+            # report logs it, without a traceback.
+            raise
         except Exception:
             logger.exception("Error in MarkerLoader.parse", path=file_path)
             raise

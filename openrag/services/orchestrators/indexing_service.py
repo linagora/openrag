@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from core.config.model_endpoints import embedder_fingerprint
+from core.indexing.pdf_integrity import check_pdf_opens
 from core.utils.consts import is_reserved_partition_name, strip_protected_metadata
 from core.utils.exceptions import (
     AuthError,
@@ -325,7 +326,15 @@ class IndexingService:
         *task_id* is the id of the file-slot reservation the caller took at
         admission, when it took one (#664); the task runs under it so the
         worker consumes that slot. Otherwise the dispatcher picks an id.
+
+        Raises ``InvalidDocumentError`` (422) for a PDF that no PDF loader can
+        open, before anything is queued.
         """
+        if Path(file_path).suffix.lower() == ".pdf":
+            # The upload is saved under the suffix it is parsed as. A PDF no
+            # loader can open is refused now, with a 422, rather than queued to
+            # fail once a worker reaches it; the caller deletes the file.
+            await asyncio.to_thread(check_pdf_opens, file_path)
         if self._deduplication_enabled() and content_sha256 is None:
             content_sha256 = await asyncio.to_thread(_sha256_file, file_path)
         if not self._deduplication_enabled():

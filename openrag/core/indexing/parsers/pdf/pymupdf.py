@@ -57,6 +57,7 @@ from core.utils.logging import get_logger
 from core.utils.process_limits import apply_parse_memory_limit
 
 from ....models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
+from ...pdf_integrity import open_mupdf_document
 from ..document_parser import DocumentParser
 from ..progress import report_parser_substage
 from ..registry import parser_registry
@@ -628,10 +629,13 @@ def _get_pool() -> _ParsePool:
 
 
 def _open_pdf(source: bytes | str) -> pymupdf.Document:
-    """Open *source*: the PDF's bytes, or the path of a file holding them."""
-    if isinstance(source, str):
-        return pymupdf.open(source, filetype="pdf")
-    return pymupdf.open(stream=source, filetype="pdf")
+    """Open *source*: the PDF's bytes, or the path of a file holding them.
+
+    ``InvalidDocumentError`` when MuPDF cannot open it even after repairing it,
+    or it needs a password: it survives pickling, so a pool child sends it back
+    as it is, and MuPDF's own error (which names the path) never reaches the task.
+    """
+    return open_mupdf_document(source)
 
 
 def _extract_text(source: bytes | str, filename: str) -> tuple[list[str], list[ImageBlock]]:

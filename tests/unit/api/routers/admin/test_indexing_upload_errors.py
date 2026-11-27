@@ -19,6 +19,7 @@ from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_run
 from di.providers import get_auth_service, get_config, get_indexing_service, get_job_service
 from fastapi import FastAPI, UploadFile
 from services.orchestrators.auth_service import AuthService
+from services.orchestrators.indexing_service import IndexingService
 
 
 class _FakeIndexingService:
@@ -97,9 +98,11 @@ def _build_app(
     deduplication_enabled=True,
     user=None,
     job_service=None,
+    filename="big.bin",
+    max_upload_bytes=8,
 ) -> FastAPI:
-    # Cap at ~8 bytes so a small upload trips the limit.
-    monkeypatch.setattr("api.dependencies.files._max_upload_size_bytes", lambda: 8)
+    # Cap at ~8 bytes by default so a small upload trips the limit.
+    monkeypatch.setattr("api.dependencies.files._max_upload_size_bytes", lambda: max_upload_bytes)
 
     app = FastAPI()
     register_error_handlers(app)
@@ -112,7 +115,7 @@ def _build_app(
     )
 
     app.dependency_overrides[validate_file_id] = lambda: "f1"
-    app.dependency_overrides[validate_file_format] = lambda: UploadFile(file=io.BytesIO(content), filename="big.bin")
+    app.dependency_overrides[validate_file_format] = lambda: UploadFile(file=io.BytesIO(content), filename=filename)
     app.dependency_overrides[validate_metadata] = _empty_metadata
     app.dependency_overrides[require_partition_editor] = lambda: user or {"id": 1, "is_admin": True}
     app.dependency_overrides[get_job_service] = lambda: job_service or _FakeJobService()
@@ -121,6 +124,50 @@ def _build_app(
     app.dependency_overrides[get_config] = lambda: cfg
     app.dependency_overrides[get_indexing_service] = lambda: service or _FakeIndexingService()
     return app
+
+
+class _CatalogOf:
+    def __init__(self, *, exists: bool) -> None:
+        self._exists = exists
+
+    async def file_exists_in_partition(self, file_id: str, partition: str) -> bool:
+        return self._exists
+
+
+class _RecordingDispatcher:
+    def __init__(self) -> None:
+        self.dispatched: list[dict] = []
+
+    async def dispatch_indexing(self, **kwargs):
+        self.dispatched.append(kwargs)
+        return "unexpected-task"
+
+
+@pytest.mark.parametrize(("method", "exists"), [("post", False), ("put", True)], ids=["upload", "replace"])
+@pytest.mark.asyncio
+async def test_an_unreadable_pdf_is_refused_with_422_and_nothing_is_queued(
+    tmp_path, monkeypatch, pdf_samples, method, exists
+):
+    """A truncated PDF used to be queued, then fail in the parser (#1490)."""
+    dispatcher = _RecordingDispatcher()
+    service = IndexingService(document_repo=_CatalogOf(exists=exists), workspace_repo=None, dispatcher=dispatcher)
+    app = _build_app(
+        tmp_path,
+        monkeypatch,
+        content=pdf_samples.truncated,
+        service=service,
+        filename="report.pdf",
+        max_upload_bytes=0,
+    )
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.request(method, "/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "[INVALID_PDF]: The PDF could not be opened: the file is corrupt or truncated."
+    assert dispatcher.dispatched == []
+    assert list((tmp_path / "data").iterdir()) == []
 
 
 @pytest.mark.asyncio
