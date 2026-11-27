@@ -11,6 +11,8 @@ catching kwarg drift on the new module.
 
 import ast
 import importlib
+import os
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -78,6 +80,34 @@ def test_entrypoint_uvicorn_cli_passes_forwarded_allow_ips():
         "entrypoint.sh must source the trusted-proxy list from UVICORN_FORWARDED_ALLOW_IPS, "
         "the same variable api.main and the docs use."
     )
+
+
+def test_entrypoint_empty_allowlist_uses_compose_proxy_default(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\nprintf '%s' \"$UVICORN_FORWARDED_ALLOW_IPS\"\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "OPENRAG_ENV_FILE": "",
+        "UVICORN_FORWARDED_ALLOW_IPS": "",
+        "OPENRAG_ADMIN_UI_PROXY_IP": "192.0.2.10",
+    }
+
+    result = subprocess.run(
+        ["bash", str(_ENTRYPOINT_PATH)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.endswith("127.0.0.1,192.0.2.10")
 
 
 def test_phase14_admin_routers_are_mounted():

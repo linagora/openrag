@@ -32,14 +32,14 @@ python3 scripts/gen_env.py --check   # verify nothing is left unset
 | `AUTH_TOKEN` | Yes, unless using SSO | Bootstraps the admin user and guards the API. Minimum 12 characters. Leaving it unset enables the no-auth development mode only when `ALLOW_NO_AUTH=true`. |
 | `POSTGRES_PASSWORD` | Yes | Minimum 12 characters. Compose fails closed without it; the chart reads it from `postgresql.auth.password`. |
 | `CHAINLIT_AUTH_SECRET` | When the chat interface is enabled | Signs the chat session cookie. Minimum 12 characters; generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Rotating it invalidates live sessions. In the Helm chart the chat interface is off by default (`env.WITH_CHAINLIT_UI`). |
-| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Compose only | Shared by the MinIO service and Milvus — both sides must match. `MINIO_SECRET_KEY` has a 12-character minimum. Kubernetes deployments use external object storage instead. |
+| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Compose only | Shared by the MinIO service and Milvus — both sides must match. `MINIO_SECRET_KEY` has a 12-character minimum. The Helm chart uses separate values for bundled MinIO (`minioCredentials.*`) or external S3 (`milvus.externalS3.*`). |
 | `GRAFANA_ADMIN_PASSWORD` | When bundled Grafana is enabled | Minimum 12 characters. |
-| `OIDC_CLIENT_SECRET`, `OIDC_TOKEN_ENCRYPTION_KEY` | SSO only | Formats are set by your identity provider and by Fernet respectively, so no length floor is applied. See the [OIDC guide](/openrag/documentation/oidc/). |
+| `OIDC_CLIENT_SECRET`, `OIDC_TOKEN_ENCRYPTION_KEY` | SSO only | The identity provider sets the client-secret format. `OIDC_TOKEN_ENCRYPTION_KEY` must be a valid Fernet key; it has no generic 12-character minimum. See the [OIDC guide](/openrag/documentation/oidc/). |
 | `HF_TOKEN` | When pulling gated model weights | |
 | `API_KEY`, `VLM_API_KEY`, `EMBEDDER_API_KEY`, `RERANKER_API_KEY`, `TRANSCRIBER_API_KEY`, `WEBSEARCH_API_TOKEN` | Per integration | Set by the provider, so no length floor. Use the literal `EMPTY` for a local OpenAI-compatible server that requires no credential — that is the documented sentinel and is always accepted. |
 
 `UVICORN_FORWARDED_ALLOW_IPS` is not a secret but belongs in the same conversation: it
-must name your proxy's subnet for session cookies and per-IP rate limits to behave
+must list your trusted proxies for session cookies and per-IP rate limits to behave
 correctly behind a reverse proxy. See [FastAPI & Access Control](#fastapi--access-control).
 
 ## What will be refused
@@ -47,14 +47,14 @@ correctly behind a reverse proxy. See [FastAPI & Access Control](#fastapi--acces
 Any value this project publishes, matched case-insensitively — including the
 `__GENERATE_ME__` marker itself — and any value shorter than 12 characters for the
 variables marked with a minimum above. The canonical list lives in
-`openrag/core/config/secrets_guard.py`; the chart carries the same list and a unit test
+`openrag/core/secret_policy.py`; the chart carries the same list and a unit test
 fails the build if the two disagree.
 
 The startup error names the variables at fault and never prints their values.
 
 ## Overriding the check
 
-`ALLOW_INSECURE_SECRETS=true` downgrades the refusal to a warning logged on every boot.
+`ALLOW_INSECURE_SECRETS=true` downgrades secret-policy refusals to warnings during API startup and the Compose service preflights. Required credentials still need a value. The standalone `--check` continues to report policy violations as errors.
 It is an opt-out, never an opt-in: an unset value means the check is enforced. Use it for
 disposable development and CI stacks — the bundled API test stack sets it — and not in a
 deployment that holds real data.
@@ -69,9 +69,10 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `IMAGE_CAPTIONING` | `bool` | `true` | If `true`, an LLM is used to describe images and convert them into text using a [specific prompt](https://github.com/linagora/openrag/blob/main/openrag/prompts/templates/image_captioning_tmpl.txt). The image in files are replaced by their descriptions |
-| `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing (after image captioning) is saved next to the uploaded file as `<file>.md`. Useful for debugging and verifying the correctness of the generated markdown. Page changes are marked with `<!-- page N -->`, and images left without a description show their alt text (or `[Image]`). Only files stored under `DATA_DIR` get a copy, so URLs indexed through MCP are skipped. The copy is kept whatever `SAVE_UPLOADED_FILES` says, and nothing deletes it afterwards (deleting the file or its partition doesn't either), so turn the flag off once you're done. |
+| `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing (after image captioning) is saved next to the uploaded file as `<file>.md`. Useful for debugging and verifying the correctness of the generated markdown. Page changes are marked with `<!-- page N -->`, and images left without a description show their alt text (or `[Image]`). Only files stored under `DATA_DIR` get a copy. The copy is kept whatever `SAVE_UPLOADED_FILES` says, and nothing deletes it afterwards (deleting the file or its partition doesn't either), so turn the flag off once you're done. |
 |`SAVE_UPLOADED_FILES`|`bool`|`true`| When `true`, uploaded files are stored on disk. You must enable this option if you want Chainlit to show sources while chatting.|
 | `CONTENT_DEDUPLICATION_ENABLED` | `bool` | `true` | Rejects a file when identical content already exists in the same partition. Set it to `false` when a test intentionally indexes duplicates. |
+| `FILE_FENCES` | `str` | `ray` | Where the per-file fences live: `ray` or `postgres`. With `postgres`, an upload or replace of a file that is being indexed or deleted is refused with `409`; a delete of a file being indexed stops the indexing and wins, and a delete of a file already being deleted waits for it (up to 60 s, then `409`); an indexing task whose file was deleted meanwhile cannot write it back. Set the same value on every API replica: a replica on `ray` doesn't take the fences, so a file it deletes can be written back by a task the others started. Not yet meant for production. |
 | `PDFLOADER` | `str` | `PyMuPDFLoader` | PDF parsing engine. `PyMuPDFLoader` (default) is a lightweight, fast, CPU-friendly backend for searchable PDFs. Switch to `MarkerLoader` for OCR / scanned documents, complex layouts and embedded images (heavier; GPU-friendly). Other options: `DoclingLoader`, `DotsOCRLoader`.|
 | `PARSE_TIMEOUT` | `int` | `3600` | Outer wall-clock bound (in seconds) for a single file's parse stage, whichever loader runs it. Marker and Docling self-limit via their own timeouts, but `PyMuPDFLoader` has none — this bound stops a wedged parse from stalling indexing: the file fails and is reported instead. |
 | `INDEXING_CALLBACK_ALLOW_PRIVATE_URLS` | `bool` | `false` | Development-only escape hatch for the upload `callback_url`. By default, literal localhost, private, link-local, and reserved addresses are refused. DNS hostnames are not resolved by this check. Set it to `true` only in a dev stack whose callback target is a local instance (e.g. `http://cozy.localhost:8080`). Non-`http(s)` schemes stay rejected either way. |
@@ -85,10 +86,11 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `XLSX_BATCH_SIZE` | `int` | `10000` | Positive number of data rows per parser batch for `.xlsx` and `.xlsm` workbooks. The rendered batch byte limit can flush a batch earlier. This is independent of the chunk token budget. |
+| `XLSX_CHARTS` | `str` | `full` | Charts in workbooks: `full` indexes every chart with its data, including data plotted from hidden worksheets; `without_hidden_data` indexes every chart but leaves out values, labels, names, titles and text boxes read from hidden worksheets, rows or columns; `off` reads no chart (worksheet text boxes are still indexed). |
 
 Set archive, worksheet, cell, and batch byte limits through `loader.xlsx_limits` in YAML; there are no individual environment-variable overrides for these limits. Unknown limit names, non-integer values, and non-positive values are rejected. Rows waiting for their table's turn in the single worksheet pass use memory first, then a temporary file in the standard `TMPDIR`; a read-only or full `TMPDIR` only makes large worksheets fall back to slower per-table reads, never changes what is indexed. Header selection is automatic per table; the former `XLSX_HEADER_ROW` and per-sheet header settings are no longer supported.
 
-See the [XLSX ingestion guide](/openrag/documentation/xlsx_ingestion/) for table detection, formula handling, hidden content, and default safety limits.
+See the [XLSX ingestion guide](/openrag/documentation/xlsx_ingestion/) for table detection, charts, formula handling, hidden content, and default safety limits.
 
 #### PDF Loader
 ##### PyMuPDF Loader Configuration
@@ -270,7 +272,7 @@ Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured
 |----------|------|---------|--------------|
 | `EMBEDDER_MODEL_NAME` | `str` | Qwen/Qwen3-Embedding-0.6B | HuggingFace Embedding model served by VLLM .i.e `Qwen/Qwen3-Embedding-0.6B` or `jinaai/jina-embeddings-v3`. **Upgrading from 2.2.x under Docker Compose:** the default was `jinaai/jina-embeddings-v3`. If your `.env` does not set this variable, set it to the model your data was indexed with **before** upgrading, since changing the model needs a reindex. Without it the vLLM container serves Qwen while the saved endpoint still asks for jina: every embedding call fails and `/ready` reports `checks.embedder: unavailable`. `MODEL_ENDPOINT_SYNC_ON_BOOT=true` does not get around this: the sync refuses to move an endpoint that holds indexed files to another model and logs a warning. The legacy `EMBEDDING_MODEL`, when set, takes precedence over this variable. The Helm chart has defaulted to Qwen since before 2.2.x; there the embedder's model is `vllm.embedderModelName` together with the embedder entry of `vllm.servingEngineSpec.modelSpec`, which an override must restate in full.|
 | `EMBEDDER_BASE_URL` | `str` | http://vllm:8000/v1 | Base URL of the embedder (OpenAI-style).|
-| `EMBEDDER_PROVIDER` | `str` | vllm | Client for the embedder: `vllm` for any OpenAI-compatible server with a `GET /models` route, `ollama`, or `tei` for Hugging Face text-embeddings-inference, which has none (its readiness probe then checks `/health` rather than the model name). It sets the env-seeded endpoint's vendor (`extra.implementation`). With `MODEL_ENDPOINT_SYNC_ON_BOOT=true`, a set value also replaces the vendor chosen in the admin UI on every boot; unset, that choice is kept. |
+| `EMBEDDER_PROVIDER` | `str` | vllm | Client for the embedder: `vllm` for any OpenAI-compatible server with a `GET /models` route, `ollama`, or `tei` for Hugging Face text-embeddings-inference, which has none (its readiness probe then checks `/health` rather than the model name). It sets the env-seeded endpoint's vendor (`extra.implementation`). With `MODEL_ENDPOINT_SYNC_ON_BOOT=true`, a set value can update an env-managed vendor, subject to the indexed-data and swap checks. When unset, the saved vendor is kept. |
 | `EMBEDDER_API_KEY`  | `str` | EMPTY | API key for authenticating embedder calls.|
 | `EMBEDDER_EXTRA_ARGS` | `str` | (empty) | Extra `vllm serve` flags appended to the **bundled** vLLM embedder's command (`vllm-gpu` / `vllm-cpu` in `infra/compose/docker-compose.yaml`). They come after the built-in flags, so repeating one overrides it, e.g. `--gpu_memory_utilization 0.1`. |
 | `MAX_MODEL_LEN` | `int` | 2047 | Maximum context length (in tokens) supported by the embedding model. Chunks exceeding this limit are truncated (`truncate_prompt_tokens` = this value − 1). Keep it below the model's real context boundary. |
@@ -286,7 +288,7 @@ Model endpoints (embedder, LLM, VLM, reranker) are stored in a **database-backed
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `MODEL_ENDPOINT_SYNC_ON_BOOT` | `bool` | `false` | When `true`, the endpoint each type was auto-seeded with is re-synced from the environment on **every** boot — its `endpoint`, `model_name` and `api_key` are refreshed from the `*_BASE_URL` / `*_MODEL` / `*_API_KEY` values, and `batch_size` / `timeout` follow only when their own env var is set. This lets operators manage that endpoint via env vars + a pod rollout (e.g. a Helm values change), including **changing the model** and **rotating the API key**. Any endpoint created by hand is left untouched. Keep it `false` (the default) to preserve the "database wins after first boot" behavior. An embedder that already holds indexed files does not change model through the sync: the model change is refused and logged as a warning on every boot while env and the database disagree (`EMBEDDER_EDIT_AFFECTS_INDEXED_DATA`, as in the admin API), the row keeps its model, and its URL, API key and env-set tunables are still synced. A URL change alone syncs; if the new server serves another model, `/ready` reports `checks.embedder: unavailable`, except for a `tei` embedder, whose probe checks only `/health` and cannot see the model. To change the model of indexed data, use the admin API with `acknowledge_indexed_data=true`. While an embedder swap re-embeds a partition into that embedder, neither its URL nor its model is synced (`EMBEDDER_SWAP_IN_PROGRESS`, logged as a warning) and the rest of the row still is; restart once the swap ends to sync them. |
+| `MODEL_ENDPOINT_SYNC_ON_BOOT` | `bool` | `false` | Set to `true` to refresh env-managed endpoints on boot. Endpoints created by hand keep their saved settings. For an embedder with indexed files, OpenRAG holds changes to the URL, model or provider that could affect those files and logs a warning. A running swap also holds vector configuration changes. Safe tunables can still sync. OpenRAG rotates a supplied API key only for the same saved URL and provider when vector changes are held. To change an embedder that has indexed files, use the admin API with `acknowledge_indexed_data=true`. Restarting after a swap retries the sync. |
 | `READINESS_REQUIRE_EMBEDDER` | `bool` | `false` | When `true`, `/ready` returns 503 while the default embedder is `unavailable` or `unresolvable` (not on a probe timeout, nor when model discovery itself fails). Off by default because every replica shares the embedder: under Kubernetes its outage, or a restart while the model loads, takes every replica out of the Service at once, admin API and admin UI included. `checks.embedder` in the `/ready` body reports the embedder either way. Before enabling it, check that `/ready` reports `checks.embedder: ok` on your deployment: the probe looks the configured model name up in the endpoint's `GET /models` list, so an embedder that works can still read `unavailable`, for example behind a gateway that lists the model under another name, or on another endpoint that has no `/models` route. A text-embeddings-inference (TEI) embedder has no such route: set `EMBEDDER_PROVIDER=tei` (or the `tei` vendor in the admin UI) and its `/health` is probed instead, without checking the model name. On Ollama, recognized by its `GET /api/version`, an untagged name also matches its `:latest` tag, as Ollama resolves it. |
 
 :::note[How the synced endpoint is identified]
@@ -294,7 +296,7 @@ The seeder stamps the endpoint it creates as env-managed (a `managed_by` marker 
 
 The endpoint's **name never changes** — partitions (`chat_llm`) and presets store endpoint names by value and nothing cascades a rename, so a renamed row would leave those references dangling. After a model change the endpoint keeps its original name while serving the new model.
 
-Sync only writes what the environment actually owns: `endpoint`, `model_name` and `api_key` always, and `batch_size`/`timeout` only when their env var (`EMBEDDER_BATCH_SIZE`, `EMBEDDER_TIMEOUT`, `VLM_TIMEOUT`, `RERANKER_TIMEOUT`) is set, as is the embedder's vendor (`EMBEDDER_PROVIDER`) — otherwise a value you tuned in the admin UI would be replaced by the config default. The API key is likewise only overwritten when env supplies a real one, so an unset `*_API_KEY` (or its `EMPTY` placeholder) will not wipe a key you set by hand.
+Sync writes environment-owned endpoint and model values when the safety checks allow them. For embedders with indexed files or an active swap, it holds vector-affecting changes. Safe tunables can still sync. It updates `batch_size` and `timeout` only when their environment variables are set, and the embedder vendor only when `EMBEDDER_PROVIDER` is set. An unset API key or an `EMPTY` value leaves the saved key in place. If an embedder change is held, startup can rotate a supplied key only when the saved URL and provider still match.
 
 An endpoint created by hand is never modified or deleted. An endpoint seeded before the marker existed is adopted on the first sync **only if it still matches the environment exactly** — if you have edited it, it is left alone rather than silently taken over.
 :::
@@ -318,6 +320,8 @@ The vector database stores embeddings and is configured using the following envi
 | `VDB_TIMEOUT` | float | 120.0 | Per-request timeout (seconds) applied to the Milvus sync and async clients |
 | `VDB_JSON_MAX_LENGTH` | int | 65536 | Maximum JSON metadata size in bytes per row. Must match the Milvus server's `common.JSONMaxLength` |
 | `VDB_JSON_SAFETY_MARGIN_BYTES` | int | 1024 | Bytes reserved below the limit when shortening oversized rows. Must be positive and leave at least two bytes |
+| `VDB_INSERT_BATCH_MAX_BYTES` | int | 16777216 | Estimated size in bytes above which a file's chunks are written to Milvus in several requests. Milvus refuses a request over its proxy's `proxy.grpc.serverMaxRecvSize` (128 MiB by default), and on Milvus 3.0.5 a request of 56 MiB already made the next write wait about a minute (WAL rate limit) |
+| `VDB_INSERT_BATCH_MAX_ROWS` | int | 10000 | Most chunks written to Milvus in one request |
 
 These variables can be overridden when using an external vector database service.
 
@@ -373,6 +377,11 @@ For an opt-in named-volume profile, copy the values from `infra/compose/.env.nam
 | `ETCD_VOLUME` | `etcd` | Milvus etcd named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
 | `MINIO_VOLUME` | `minio` | Milvus object storage named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
 | `MILVUS_VOLUME` | `milvus` | Milvus named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
+| `OPENRAG_ENV_FILE` | `.env` | Absolute Compose environment file path. The default resolves to `infra/compose/.env`. For a custom `gen_env.py -o` output, use the same absolute path for `OPENRAG_ENV_FILE` and Docker Compose's `--env-file`; Compose interpolation (including database and storage credentials) and service `env_file` must read the same file. |
+| `OPENRAG_PREFLIGHT_UID` | `1000` | User ID used by Compose secret preflights to read the private shared env file. `gen_env.py` writes the file owner's ID; set it manually only when needed. |
+| `OPENRAG_PREFLIGHT_GID` | `1000` | Group ID paired with `OPENRAG_PREFLIGHT_UID`; `gen_env.py` writes the file owner's group ID. |
+
+The generator writes the file owner's IDs into the private `.env` file (`0600`). When a credential fails policy, the preflight uses the file to look up `ALLOW_INSECURE_SECRETS` if Compose did not supply an explicit value. If the preflight cannot read the file and no explicit override was supplied, it rejects the credential.
 
 ## Chat Pipeline
 ### LLM & VLM Configuration
@@ -465,7 +474,7 @@ The retriever fetches relevant documents from the vector database based on query
 |----------|------|---------|-------------|
 | `RETRIEVER_TYPE` | str | single | Retrieval strategy to use. Options: `single`, `multiQuery`, `hyde` |
 | `RETRIEVER_TOP_K` | int | 50 | Number of documents to retrieve before reranking.|
-| `SIMILARITY_THRESHOLD` | float | 0.6 | Minimum similarity score (0.0-1.0) for document retrieval. Documents below this threshold are filtered out |
+| `SIMILARITY_THRESHOLD` | float | 0.2 | Minimum similarity score (0.0-1.0) applied to the dense (semantic) search only, before it is merged with the keyword (BM25) results. Its scale depends on the embedding model; with the default embedder relevant passages score about 0.2-0.7. Read only when no partition is loaded. Chat uses the `similarity_threshold` of the partition's retrieval preset, `GET /search` its own `similarity_threshold` parameter (default 0.2), and the MCP search tool `OPENRAG_MCP_SIMILARITY_THRESHOLD` |
 | `WITH_SURROUNDING_CHUNKS` | `bool` | false | When enabled, retrieves adjacent chunks (preceding and following) for each matched document to provide additional context.|
 | `INCLUDE_RELATED` | `bool` | true | Expand results with chunks from files sharing the matched file's `relationship_id` (see [Linked files](/openrag/documentation/linked_files/)). |
 | `INCLUDE_ANCESTORS` | `bool` | true | Expand results with chunks from ancestor files in the parent/child file hierarchy (see [Linked files](/openrag/documentation/linked_files/)). |
@@ -720,7 +729,7 @@ The following environment variables configure the FastAPI server and control acc
 | `METRICS_ALLOW_UNAUTHENTICATED` | `boolean` | `false` | Serve `GET /metrics` to anyone who can reach the API port when `METRICS_TOKEN` is unset. Only for deployments that block `/metrics` at the edge and scrape from inside the network; a configured token always wins. |
 | `ASSISTANT_NAME` | `string` | empty | Name used in the assistant's greeting. Leave unset for a neutral introduction; set it for a white-label deployment. |
 | `CORS_EXTRA_ORIGINS` | `string` | _(unset)_ | Semicolon-separated list of additional origins allowed by CORS (e.g. `https://app.example.com;https://other.example.com`). Extends the default list without replacing it. |
-| `UVICORN_FORWARDED_ALLOW_IPS` | `string` | `127.0.0.1` | Comma-separated CIDRs/IPs (or `*`) whose `X-Forwarded-*` headers uvicorn trusts. **Required when OpenRAG runs behind a reverse proxy that lives outside loopback** (typical docker-compose / k8s — including the bundled admin-ui proxy). Otherwise `X-Forwarded-Proto` is dropped and OIDC cookies ship with `Secure=False` even over HTTPS, and `X-Forwarded-For` is dropped so per-user rate limits collapse onto the proxy's single IP. **Set this to your proxy's subnet, not `*`** — see the proxy-trust caution under [Rate Limiting](#rate-limiting) for why `*` can be spoofed. |
+| `UVICORN_FORWARDED_ALLOW_IPS` | `string` | Loopback and the exact admin UI proxy address in Compose. Loopback elsewhere. | Comma-separated addresses allowed to supply `X-Forwarded-*` headers. Set this explicitly for Helm and other additional reverse proxies. See [Rate Limiting](#rate-limiting). |
 | `MAX_UPLOAD_SIZE_MB` | `int` | `1024` | Maximum accepted upload size, in MB. `0` or a negative value means unlimited. |
 | `MAX_PARTITIONS_PER_USER` | `int` | `100` | Maximum number of partitions a non-admin user may own. `-1` disables the cap (unlimited). Admin users always bypass it. |
 | `APP_UID` | `int` | `1000` | UID the API container drops to before running the app. Override when your host user is not UID 1000 and bind-mounted folders (`data/`, `logs/`) would otherwise not be writable by the container user. |
@@ -745,25 +754,29 @@ Limit values use the `<count>/<period>` format from the [`limits`](https://limit
 | `RATE_LIMIT_AUTH` | `str` | `60/minute` | Limit for `/auth/*` (login/callback/logout). Keyed on client IP because callers are unauthenticated there — keep it high enough that a shared corporate/NAT egress IP does not throttle a legitimate login rush. |
 | `RATE_LIMIT_CHAT` | `str` | `120/minute` | Limit for `/v1/*` (chat completions, tools). |
 | `RETRIEVAL_DIAGNOSTICS_RATE_LIMIT` | `str` | `120/minute` | Separate per-administrator limit for retrieval traces, original-query comparisons, and retrieval snapshots. This limit applies even though administrators bypass the general tiers. It is enforced per API process, so the deployment-wide capacity scales with the number of replicas. |
-| `RATE_LIMIT_AUTH_FAILURE` | `str` | `RATE_LIMIT_AUTH`, else `20/minute` | Separate, stricter budget for **failed** authentication attempts, keyed by client IP (brute-force protection). Falls back to `RATE_LIMIT_AUTH` when unset, then to `20/minute`. Disabled together with `RATE_LIMIT_ENABLED=false`. |
+| `RATE_LIMIT_AUTH_FAILURE` | `str` | `RATE_LIMIT_AUTH`, else `20/minute` | Separate, stricter budget for **failed** authentication attempts, keyed by client IP. After exhaustion, a recently validated generated-format token (`or-` plus 32 lowercase hex digits), including an `AUTH_TOKEN` generated by `scripts/gen_env.py`, may still be revalidated while its cache entry remains. To generate one by hand, run `printf 'or-%s\n' "$(openssl rand -hex 16)"` in a shell and save its output as `AUTH_TOKEN`. Hand-chosen tokens outside this format and seed-user values remain subject to `429` during lockout. A recently validated OIDC session may also be revalidated while its session entry remains cached. A known-refused session is skipped while its refusal entry remains, so it does not block a cached Bearer; an unchecked session is not looked up during lockout, and the request receives `429` even if it also carries a distinct cached Bearer token. Each process keeps up to 1,024 recently validated credential entries and up to 1,024 rejected session entries in separate caches. Entries expire two failure windows after they were last recorded or renewed, and may be evicted sooner if their cache fills. Falls back to `RATE_LIMIT_AUTH` when unset, then to `20/minute`. Disabled together with `RATE_LIMIT_ENABLED=false`. |
 | `RATE_LIMIT_EXEMPT_PATHS` | `str` | `/chainlit/,/assets/` | Comma-separated path prefixes the limiter skips, matched with `startswith`. These are auth-bypassed (Chainlit does its own header auth), so requests there carry no user and can only be keyed by IP. Chainlit's Socket.IO transport also issues one HTTP request per packet when it long-polls. Keep the trailing slash so a sibling like `/chainlithack` stays rate-limited rather than being swept into the `/chainlit` exemption. Set-but-empty (`RATE_LIMIT_EXEMPT_PATHS=`) removes all exemptions; `/auth/*` is never exempt. |
 
 :::caution[Behind a reverse proxy, trust the right client IP]
-The `/auth/*` limits and the failed-login budget (`RATE_LIMIT_AUTH_FAILURE`) are keyed **by client IP** — that is how brute-force protection tells attackers apart. Behind a proxy, uvicorn only sees the real client IP if it trusts the proxy's `X-Forwarded-For`, so `UVICORN_FORWARDED_ALLOW_IPS` must name the proxy. Get this wrong in either direction and the per-IP limits stop working:
+The `/auth/*` limits and failed-login budget use the client IP. If the API cannot
+trust a proxy's forwarding headers, requests share the proxy's IP, failure
+budget, and recent-credential cache. During lockout, a previously validated
+generated-format token or OIDC session that remains in that cache may still be
+revalidated for requests seen under the same client identity. Hand-chosen token
+values that do not match the generated format remain throttled. This applies to
+Helm's default loopback trust setting and traffic through an untrusted proxy
+such as NPM. The OIDC cookie's `Secure` flag reads `X-Forwarded-Proto` directly
+(or `PREFERRED_URL_SCHEME`); this check is independent of Uvicorn's
+forwarded-IP trust list.
 
-- **Too narrow** (default `127.0.0.1`, proxy outside loopback): every request keys on the proxy's single address, so one shared bucket throttles the whole deployment at once — one client's failed logins can lock out everyone.
-- **Too wide** (`*`): uvicorn trusts `X-Forwarded-For` from *any* peer. If the API port is reachable directly (the bundled compose publishes `APP_PORT` on `0.0.0.0`), an attacker sends a forged, rotating `X-Forwarded-For` and gets a fresh bucket per request — the brute-force limiter is fully bypassed.
+- **Compose** trusts loopback and the exact admin UI proxy address by default. The admin UI proxy appends its peer address to `X-Forwarded-For`, allowing Uvicorn to select the actual client address. Do not add NPM’s address while it accepts client-supplied `X-Real-IP` from private networks.
+- **Helm** leaves trust at loopback until an administrator sets `env.config.UVICORN_FORWARDED_ALLOW_IPS` in the chart values. Use your proxy's stable addresses and update the allowlist if the addresses change.
 
-**Recommended:** set `UVICORN_FORWARDED_ALLOW_IPS` to the proxy's subnet (e.g. your compose/k8s network CIDR), **not** `*`. Reserve `*` for deployments where nothing untrusted can reach `APP_PORT` — keep the API on the internal network and expose only the admin-ui proxy (you don't need to publish `APP_PORT` at all).
+Keep the allowlist limited to proxies you control. A wildcard or a shared container or pod subnet gives unrelated clients the ability to supply forwarding headers. Configure the edge proxy to supply the actual client address and only accept forwarded addresses from trusted upstreams.
 
-**Defense in depth (proxy config):** trusting `X-Forwarded-For` only helps if the header can't be forged *through* the proxy. The bundled nginx **appends** to the header (`proxy_add_x_forwarded_for`), and uvicorn reads the left-most value — which a client can inject. For a hard guarantee, have the edge proxy **overwrite** it with the real peer instead of appending:
+Compose uses a fixed bridge subnet so it can reserve the admin UI address. For an overlapping network or another stack on the same host, set `OPENRAG_COMPOSE_SUBNET`, `OPENRAG_COMPOSE_DYNAMIC_RANGE`, and `OPENRAG_ADMIN_UI_PROXY_IP` in the Compose environment. If you use the TLS overlay, also set `OPENRAG_NPM_PROXY_IP`. Keep the proxy addresses distinct, inside the subnet, and outside the dynamic range.
 
-```nginx
-# openrag-admin.conf — edge proxy: replace any client-supplied X-Forwarded-For
-proxy_set_header X-Forwarded-For $remote_addr;
-```
-
-If nginx itself sits behind another load balancer, use the [real-ip module](https://nginx.org/en/docs/http/ngx_http_realip_module.html) (`set_real_ip_from <lb-subnet>; real_ip_header X-Forwarded-For;`) so the true client is resolved only from that trusted upstream.
+Keep loopback and the exact admin UI proxy address in explicit Compose allowlists. Do not use a broad range such as `172.16.0.0/12` with the TLS overlay because it includes NPM’s address. Add other proxy addresses only after hardening and verifying their forwarded-IP handling. When the Compose subnet changes, recreate the project network before starting the updated stack.
 :::
 
 ### Admin UI
@@ -811,6 +824,8 @@ flowchart TD
 
 OpenRAG ships a standalone [Model Context Protocol](https://modelcontextprotocol.io/) server (`openrag/api/mcp/server.py`) that exposes retrieval to MCP clients. It runs as its own process (not part of the default compose stack). These variables configure the FastMCP transport binding and the search-tool defaults/bounds applied before a request reaches the retrieval service.
 
+The `index_url` tool stores what it downloads in `DATA_DIR`, as an upload is stored, and it is kept or deleted by the same `SAVE_UPLOADED_FILES` rule. Run the MCP server with the same `DATA_DIR` and data volume as the API.
+
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `OPENRAG_MCP_SERVER_NAME` | `str` | `OpenRAG MCP` | Display name advertised by the MCP server. |
@@ -819,7 +834,7 @@ OpenRAG ships a standalone [Model Context Protocol](https://modelcontextprotocol
 | `OPENRAG_MCP_PATH` | `str` | `/mcp` | HTTP path the MCP endpoint is served under. |
 | `OPENRAG_MCP_DEFAULT_TOP_K` | `int` | `5` | Number of chunks the search tool returns when the caller doesn't specify `top_k`. |
 | `OPENRAG_MCP_MAX_TOP_K` | `int` | `50` | Upper bound clamped on a caller-supplied `top_k`. |
-| `OPENRAG_MCP_SIMILARITY_THRESHOLD` | `float` | `0.8` | Minimum similarity score for a chunk to be returned by the search tool. |
+| `OPENRAG_MCP_SIMILARITY_THRESHOLD` | `float` | `0.2` | Minimum similarity score applied to the dense (semantic) side of the search only, before the merge with keyword (BM25) results. Its scale depends on the embedder. |
 | `OPENRAG_MCP_DOWNLOAD_TIMEOUT` | `float` | `30.0` | Timeout (seconds) for the server-side `index_url` fetch (SSRF/DoS hardening). |
 | `OPENRAG_MCP_MAX_DOWNLOAD_BYTES` | `int` | `104857600` | Maximum bytes downloaded by an `index_url` fetch. Default is 100 MiB. |
 

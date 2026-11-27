@@ -11,14 +11,12 @@ from services.orchestrators.retrieval_snapshot_service import RetrievalSnapshotS
 
 
 class _Partitions:
-    async def get_partition_config(self, partition, *, strict_vector_dimension=False):
-        self.strict_vector_dimension = strict_vector_dimension
-        return {
-            "partition": partition,
-            "created_at": "2026-09-16T12:00:00+00:00",
-            "document_count": 2,
-            "dimension": 768,
-        }
+    async def get_partition_created_at(self, partition):
+        return "2026-09-16T12:00:00+00:00"
+
+    async def get_vector_dimension(self, field, *, strict=False):
+        self.dimension_request = (field, strict)
+        return 768
 
 
 class _Documents:
@@ -95,6 +93,14 @@ class _Retrieval:
                 }
             ],
         }
+
+    async def resolve_retrieval_plan(self, partitions, **_kwargs):
+        public = await self.resolved_public_retrieval_configuration(partitions)
+        return SimpleNamespace(
+            public_configuration=public,
+            configuration_fingerprint=canonical_fingerprint(public),
+            vector_fields={partitions[0]: "vector_embed"},
+        )
 
     async def resolved_public_retrieval_configuration(self, partitions):
         public = self.public_retrieval_configuration(partitions)
@@ -184,6 +190,7 @@ async def test_snapshot_consumes_the_resolved_plan_configuration_and_fingerprint
             self.resolved_plan = SimpleNamespace(
                 public_configuration=public,
                 configuration_fingerprint=canonical_fingerprint(public),
+                vector_fields={partitions[0]: "vector_embed"},
             )
             return self.resolved_plan
 
@@ -273,7 +280,11 @@ async def test_snapshot_refreshes_partition_config_once_before_returning_not_loa
         async def resolve_retrieval_plan(self, partitions, **kwargs):
             assert kwargs == {"build_execution": False, "strict_prompt_resolution": True}
             public = await super().resolved_public_retrieval_configuration(partitions)
-            return SimpleNamespace(public_configuration=public, configuration_fingerprint="plan-fingerprint")
+            return SimpleNamespace(
+                public_configuration=public,
+                configuration_fingerprint="plan-fingerprint",
+                vector_fields={partitions[0]: "vector_embed"},
+            )
 
     partitions = ReloadablePartitions()
     service = RetrievalSnapshotService(
@@ -285,7 +296,7 @@ async def test_snapshot_refreshes_partition_config_once_before_returning_not_loa
     await service.snapshot("legal-rag-bench")
 
     assert partitions.reload_calls == 1
-    assert partitions.strict_vector_dimension is True
+    assert partitions.dimension_request == ("vector_embed", True)
 
 
 @pytest.mark.asyncio
@@ -324,7 +335,7 @@ async def test_snapshot_preserves_not_found_when_partition_is_not_loaded():
         def __init__(self):
             self.reload_calls = 0
 
-        async def get_partition_config(self, partition, *, strict_vector_dimension=False):
+        async def get_partition_created_at(self, partition):
             raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
 
         async def load_partitions(self):
@@ -427,3 +438,34 @@ async def test_snapshot_normalizes_blank_commit_metadata(monkeypatch):
     snapshot = await service.snapshot("legal-rag-bench")
 
     assert snapshot["configuration"]["openrag"]["commit"] is None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_reads_dimension_for_the_resolved_embedder():
+    from test_retrieval_service import _grouping_svc, _partition, _RefreshingPromptService
+
+    partition_name = "legal-rag-bench"
+    retrieval, _ = _grouping_svc(
+        [_partition(name=partition_name, embedder="embed-a")],
+        {"embed-a": "vector_a", "embed-b": "vector_b"},
+        prompt_service=_RefreshingPromptService("contextualizer"),
+    )
+    retrieval._config.models.embedder["embed-b"].model_name = "new-1024-model"
+
+    async def refresh():
+        retrieval._config.partitions[partition_name] = _partition(name=partition_name, embedder="embed-b")
+
+    retrieval.refresh_partition_configs = refresh
+
+    class Partitions(_Partitions):
+        async def get_vector_dimension(self, field, *, strict=False):
+            assert strict
+            return {"vector_a": 768, "vector_b": 1024}[field]
+
+    snapshot_service = RetrievalSnapshotService(
+        partition_service=Partitions(),
+        document_repo=_Documents(),
+        retrieval_service=retrieval,
+    )
+    snapshot = await snapshot_service.snapshot(partition_name)
+    assert snapshot["configuration"]["embedder"] == {"name": "embed-b", "model": "new-1024-model", "dimensions": 1024}

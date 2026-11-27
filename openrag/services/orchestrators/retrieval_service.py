@@ -31,7 +31,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from core.models.preset import resolve_partition_chat_llm
+from core.models.preset import PartitionConfig, resolve_partition_chat_llm
 from core.models.retrieval_trace import TraceRemovalReason
 from core.prompts import load_template_by_key
 from core.retrieval.pipeline import RetrieverPipeline, _rerank_chunks, _safe_trace, _with_removal_reasons
@@ -51,8 +51,9 @@ from core.retrieval.trace import (
     merge_query_traces,
 )
 from core.utils.consts import MAX_RERANK_CANDIDATES
-from core.utils.exceptions import PartitionNotFoundError, ServiceUnavailableError
+from core.utils.exceptions import ServiceUnavailableError
 from core.utils.logging import get_logger
+from services.orchestrators.partition_service import PartitionService
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -82,6 +83,7 @@ class ResolvedRetrievalPlan:
     groups: tuple[ResolvedRetrievalGroup, ...]
     public_configuration: dict[str, object]
     configuration_fingerprint: str
+    vector_fields: dict[str, str | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,7 +269,7 @@ class RetrievalService:
         content, _identity = await self._resolve_query_prompt(prompt_type, name, disk_key)
         return content
 
-    def _partition_configs(self) -> dict[str, Any]:
+    def _partition_configs(self) -> dict[str, PartitionConfig]:
         return getattr(self._config, "partitions", {}) or {}
 
     async def refresh_partition_configs(self) -> None:
@@ -279,11 +281,11 @@ class RetrievalService:
         """Return whether this process has resolved retrieval settings for a partition."""
         return partition in self._partition_configs()
 
-    def _effective_contextualizer_name(self, partitions: Sequence[str]) -> str:
+    def _effective_contextualizer_name(self, partitions: Sequence[str], configs: dict[str, PartitionConfig]) -> str:
         """Mirror QueryService's partition LLM resolution for public metadata."""
         if self._llm_factory is None:
             return "default"
-        name = resolve_partition_chat_llm(list(partitions), self._partition_configs())
+        name = resolve_partition_chat_llm(list(partitions), configs)
         registered = getattr(getattr(self._config, "models", None), "llm", {}) or {}
         return name if name is not None and name in registered else "default"
 
@@ -308,12 +310,16 @@ class RetrievalService:
 
     def public_retrieval_configuration(self, partitions: Sequence[str]) -> dict[str, object]:
         """Build the stable public retrieval-setting subset used for fingerprints."""
-        configured_partitions = self._partition_configs()
+        return self._public_retrieval_configuration(partitions, self._partition_configs())
+
+    def _public_retrieval_configuration(
+        self, partitions: Sequence[str], configured_partitions: dict[str, PartitionConfig]
+    ) -> dict[str, object]:
         public_partitions: list[dict[str, object]] = []
         selected_partitions = (
             list(configured_partitions) if "all" in partitions and configured_partitions else partitions
         )
-        contextualizer_name = self._effective_contextualizer_name(partitions)
+        contextualizer_name = self._effective_contextualizer_name(partitions, configured_partitions)
         llm_registry = getattr(getattr(self._config, "models", None), "llm", {}) or {}
         contextualizer_endpoint = (
             {
@@ -324,7 +330,7 @@ class RetrievalService:
             else self._public_endpoint(self._config, "llm", contextualizer_name)
         )
         for partition_name in sorted(set(selected_partitions)):
-            partition = configured_partitions.get(partition_name)
+            partition = PartitionService.lookup_cached_config(configured_partitions, partition_name)
             retrieval = partition.retrieval if partition is not None else self._config.retriever
             embedder_name = partition.embedder if partition is not None else "default"
             query_expansion_llm = None
@@ -446,7 +452,7 @@ class RetrievalService:
             public_partitions = []
             for partition_name in sorted(set(selected_partitions)):
                 embedder_name, endpoint, vector_field, _group_key = self._partition_search_identity(
-                    partition_name, configured_partitions, endpoints
+                    PartitionService.lookup_cached_config(configured_partitions, partition_name), endpoints
                 )
                 public_partitions.append(
                     {
@@ -491,32 +497,31 @@ class RetrievalService:
 
     @staticmethod
     def _partition_search_identity(
-        partition_name: str,
-        configured_partitions: Mapping[str, Any],
+        partition: PartitionConfig | None,
         endpoints: Mapping[str, Any],
     ) -> tuple[str, Any | None, str | None, str]:
         """Resolve a partition to the embedder and vector field used by search."""
-        partition = configured_partitions.get(partition_name)
         embedder_name = partition.embedder if partition is not None else "default"
         endpoint = endpoints.get(embedder_name)
         vector_field = getattr(endpoint, "vector_field", None) if endpoint is not None else None
         group_key = vector_field or embedder_name
         return embedder_name, endpoint, vector_field, group_key
 
-    def _contextualizer_prompt_name(self, partitions: Sequence[str]) -> str | None:
+    def _contextualizer_prompt_name(self, partitions: Sequence[str], configs: dict[str, PartitionConfig]) -> str | None:
         selected = list(dict.fromkeys(partitions))
         if len(selected) != 1 or "all" in selected:
             return None
-        partition = self._partition_configs().get(selected[0])
+        partition = PartitionService.lookup_cached_config(configs, selected[0])
         return getattr(getattr(partition, "retrieval", None), "query_contextualizer_prompt_name", None)
 
     async def _contextualizer_prompt_identity(
         self,
         partitions: Sequence[str],
+        configs: dict[str, PartitionConfig],
         *,
         strict: bool = False,
     ) -> dict[str, str | None]:
-        prompt_name = self._contextualizer_prompt_name(partitions)
+        prompt_name = self._contextualizer_prompt_name(partitions, configs)
         resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
         if resolve_with_identity is not None:
             resolved = await resolve_with_identity(
@@ -610,12 +615,6 @@ class RetrievalService:
         )
         return plan.configuration_fingerprint
 
-    def _require_partition_config(self, partition: str):
-        partitions = self._partition_configs()
-        if partition not in partitions:
-            raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
-        return partitions[partition]
-
     def _legacy_retriever_value(self, name: str, default: Any) -> Any:
         return getattr(self._config.retriever, name, default)
 
@@ -688,24 +687,28 @@ class RetrievalService:
                     return name
         return "default"
 
+    def _searcher_for_embedder(self, embedder: str) -> RetrievalSearcher:
+        return self._searcher_factory(embedder) if self._searcher_factory is not None else self._searcher
+
+    def _expansion_llm_for_settings(self, settings: _PipelineSettings) -> LLM | None:
+        if settings.expansion_llm is not None and self._llm_factory is not None:
+            return self._llm_factory(settings.expansion_llm)
+        return self._legacy_llm
+
     async def _pipeline_from_settings(
         self,
         partition: str,
-        embedder: str,
         settings: _PipelineSettings,
+        *,
+        searcher: RetrievalSearcher,
+        llm: LLM | None,
     ) -> tuple[RetrieverPipeline, int | None, dict[str, str | None] | None, dict[str, object] | None]:
-        """The pipeline *settings* describe, searching *embedder*'s vectors.
+        """Build the pipeline described by *settings* with its resolved clients.
 
         It reads no partition config, so a group's pipeline is the one it was
         grouped by, even when a config refresh lands while an earlier group
         resolves its prompt. *partition* only names the group in the logs.
         """
-        searcher = self._searcher_factory(embedder) if self._searcher_factory is not None else self._searcher
-
-        llm = self._legacy_llm
-        if settings.expansion_llm is not None and self._llm_factory is not None:
-            llm = self._llm_factory(settings.expansion_llm)
-
         # Only the expansion strategies need a prompt; type="single" (the common
         # case) resolves nothing, so the DB is never touched on that path.
         template = None
@@ -815,9 +818,10 @@ class RetrievalService:
     ) -> tuple[RetrieverPipeline, int | None]:
         # Callers only ever pass a concrete partition name. With no per-partition
         # configs at all, fall back to the legacy pipeline.
-        if not self._partition_configs():
+        configs = self._partition_configs()
+        if not configs:
             return self._pipeline, None
-        partition_cfg = self._require_partition_config(partition)
+        partition_cfg = PartitionService.require_cached_config(configs, partition)
         settings = self._pipeline_settings(
             partition_cfg,
             top_k=top_k,
@@ -826,7 +830,10 @@ class RetrievalService:
             disable_expansion=disable_expansion,
         )
         pipeline, default_top_k, _prompt_identity, _reranker_identity = await self._pipeline_from_settings(
-            partition, partition_cfg.embedder, settings
+            partition,
+            settings,
+            searcher=self._searcher_for_embedder(partition_cfg.embedder),
+            llm=self._expansion_llm_for_settings(settings),
         )
         return pipeline, default_top_k
 
@@ -841,19 +848,30 @@ class RetrievalService:
         contextualizer_prompt: object | None = None,
         build_execution: bool = True,
         strict_prompt_resolution: bool = False,
+        partition_configs: dict[str, PartitionConfig] | None = None,
     ) -> ResolvedRetrievalPlan:
         """Resolve executable pipelines and their public identity once."""
-        await self.refresh_partition_configs()
+        if partition_configs is None:
+            await self.refresh_partition_configs()
+            partition_configs = self._partition_configs().copy()
+        configs = partition_configs
         requested = list(partitions)
-        configs = self._partition_configs()
         selected = list(configs) if "all" in requested and configs else list(dict.fromkeys(requested))
+        # Capture endpoint identity and routing before prompt lookups can yield.
+        public = self._public_retrieval_configuration(requested, configs)
+        endpoints = getattr(getattr(self._config, "models", None), "embedder", {}) or {}
+        vector_fields = {
+            name: getattr(endpoints.get(configs[name].embedder), "vector_field", None)
+            for name in selected
+            if name in configs
+        }
         prompt_identities: dict[str, dict[str, str | None] | None] = {}
         reranker_identities: dict[str, dict[str, object]] = {}
         groups: list[ResolvedRetrievalGroup] = []
 
         if not build_execution:
             for partition_name in selected:
-                partition = configs.get(partition_name)
+                partition = PartitionService.lookup_cached_config(configs, partition_name)
                 retrieval = partition.retrieval if partition is not None else self._config.retriever
                 prompt_identities[partition_name] = (
                     await self._query_expansion_prompt_identity(retrieval, strict=strict_prompt_resolution)
@@ -890,19 +908,24 @@ class RetrievalService:
         else:
             partition_groups = self._partitions_by_pipeline(
                 selected,
+                configs,
                 top_k=top_k,
                 similarity_threshold=similarity_threshold,
                 disable_reranker=disable_reranker,
                 disable_expansion=disable_expansion,
             )
-            for names, embedder, settings in partition_groups:
+            clients = [
+                (self._searcher_for_embedder(embedder), self._expansion_llm_for_settings(settings))
+                for _, embedder, settings in partition_groups
+            ]
+            for (names, _, settings), (searcher, llm) in zip(partition_groups, clients, strict=True):
                 # Every partition of a group shares the pipeline, prompt and reranker it was grouped by.
                 (
                     pipeline,
                     default_top_k,
                     prompt_identity,
                     reranker_identity,
-                ) = await self._pipeline_from_settings(names[0], embedder, settings)
+                ) = await self._pipeline_from_settings(names[0], settings, searcher=searcher, llm=llm)
                 groups.append(ResolvedRetrievalGroup(tuple(names), pipeline, default_top_k))
                 for partition_name in names:
                     prompt_identities[partition_name] = prompt_identity
@@ -917,7 +940,6 @@ class RetrievalService:
                     )
                 ]
 
-        public = self.public_retrieval_configuration(requested)
         for public_partition in public["partitions"]:
             public_retrieval = public_partition["retrieval"]
             partition_name = public_partition["name"]
@@ -936,12 +958,13 @@ class RetrievalService:
         public["contextualizer_prompt"] = (
             self._public_prompt_identity(contextualizer_prompt)
             if contextualizer_prompt is not None
-            else await self._contextualizer_prompt_identity(requested, strict=strict_prompt_resolution)
+            else await self._contextualizer_prompt_identity(requested, configs, strict=strict_prompt_resolution)
         )
         return ResolvedRetrievalPlan(
             groups=tuple(groups),
             public_configuration=public,
             configuration_fingerprint=canonical_fingerprint(public),
+            vector_fields=vector_fields,
         )
 
     async def _pipeline_groups_for_partitions(
@@ -952,6 +975,7 @@ class RetrievalService:
         similarity_threshold: float | None = None,
         disable_reranker: bool = False,
         disable_expansion: bool = False,
+        partition_configs: dict[str, PartitionConfig] | None = None,
     ) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
         """The partitions grouped by the pipeline that retrieves them, each with that pipeline.
 
@@ -963,8 +987,10 @@ class RetrievalService:
         so every hydrated partition is in scope. With a single group it is kept,
         so the search stays unscoped, as in :meth:`_search_groups`.
         """
-        await self.refresh_partition_configs()
-        configs = self._partition_configs()
+        if partition_configs is None:
+            await self.refresh_partition_configs()
+            partition_configs = self._partition_configs()
+        configs = partition_configs
         if not partitions or not configs:
             # Nothing to expand (no partitions exist yet) — keep the single
             # legacy pipeline; there is no per-partition config to honour.
@@ -982,15 +1008,20 @@ class RetrievalService:
         groups: list[tuple[list[str], RetrieverPipeline, int | None]] = []
         partition_groups = self._partitions_by_pipeline(
             list(configs) if "all" in partitions else partitions,
+            configs,
             top_k=top_k,
             similarity_threshold=similarity_threshold,
             disable_reranker=disable_reranker,
             disable_expansion=disable_expansion,
         )
-        for names, embedder, settings in partition_groups:
+        clients = [
+            (self._searcher_for_embedder(embedder), self._expansion_llm_for_settings(settings))
+            for _, embedder, settings in partition_groups
+        ]
+        for (names, _, settings), (searcher, llm) in zip(partition_groups, clients, strict=True):
             # Every partition of a group shares the pipeline it was grouped by.
             pipeline, default_top_k, _prompt_identity, _reranker_identity = await self._pipeline_from_settings(
-                names[0], embedder, settings
+                names[0], settings, searcher=searcher, llm=llm
             )
             groups.append((names, pipeline, default_top_k))
         if len(groups) == 1:
@@ -1002,6 +1033,7 @@ class RetrievalService:
     def _partitions_by_pipeline(
         self,
         partitions: Sequence[str],
+        configs: dict[str, PartitionConfig],
         *,
         top_k: int | None,
         similarity_threshold: float | None,
@@ -1019,14 +1051,11 @@ class RetrievalService:
         them all: one query embedding, one search over all of them, one rerank
         pass, and their chunks compete on score rather than being fused by rank.
         """
-        configs = self._partition_configs()
         endpoints = getattr(self._config.models, "embedder", None) or {}
         grouped: dict[tuple[str, _PipelineSettings], tuple[str, list[str]]] = {}
         for partition in partitions:
-            partition_cfg = self._require_partition_config(partition)
-            embedder, _endpoint, _vector_field, search_key = self._partition_search_identity(
-                partition, configs, endpoints
-            )
+            partition_cfg = PartitionService.require_cached_config(configs, partition)
+            embedder, _endpoint, _vector_field, search_key = self._partition_search_identity(partition_cfg, endpoints)
             settings = self._pipeline_settings(
                 partition_cfg,
                 top_k=top_k,
@@ -1055,7 +1084,7 @@ class RetrievalService:
         groups: dict[str, tuple[str, list[str]]] = {}
         for partition in expanded:
             embedder, _endpoint, _vector_field, group_key = self._partition_search_identity(
-                partition, configs, endpoints
+                PartitionService.lookup_cached_config(configs, partition), endpoints
             )
             groups.setdefault(group_key, (embedder, []))[1].append(partition)
         if len(groups) == 1:
@@ -1068,7 +1097,7 @@ class RetrievalService:
         """The retrieval preset of a search scoped to exactly one configured partition, else ``None``."""
         if len(partitions) != 1:
             return None
-        partition_cfg = self._partition_configs().get(partitions[0])
+        partition_cfg = PartitionService.lookup_cached_config(self._partition_configs(), partitions[0])
         return partition_cfg.retrieval if partition_cfg is not None else None
 
     def _search_reranker(self, partitions: list[str]) -> tuple[Reranker, dict[str, object]]:
@@ -1548,6 +1577,7 @@ class RetrievalService:
         disable_reranker: bool = False,
         disable_expansion: bool = False,
         resolved_plan: ResolvedRetrievalPlan | None = None,
+        partition_configs: dict[str, PartitionConfig] | None = None,
     ) -> list[Chunk]:
         """Every sub-query in parallel, fused with RRF."""
         if resolved_plan is None:
@@ -1557,6 +1587,7 @@ class RetrievalService:
                 similarity_threshold=similarity_threshold,
                 disable_reranker=disable_reranker,
                 disable_expansion=disable_expansion,
+                partition_configs=partition_configs,
             )
         else:
             groups = [(list(group.partitions), group.pipeline, group.default_top_k) for group in resolved_plan.groups]

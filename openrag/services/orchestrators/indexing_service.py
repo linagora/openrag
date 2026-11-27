@@ -21,11 +21,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from core.config.model_endpoints import embedder_fingerprint
+from core.models.preset import PartitionConfig
 from core.utils.consts import is_reserved_partition_name, strip_protected_metadata
-from core.utils.exceptions import AuthError, ConfigError, PartitionNotFoundError, ValidationError
+from core.utils.exceptions import (
+    AuthError,
+    ConfigError,
+    DocumentNotFoundError,
+    ValidationError,
+    indexing_worker_may_be_running,
+    mark_indexing_worker_may_be_running,
+)
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
+from services.orchestrators.partition_service import PartitionService
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -33,7 +42,6 @@ if TYPE_CHECKING:
     from core.indexing.dispatcher import IndexingDispatcher
     from core.ports.document_repo import DocumentRepository
     from core.ports.workspace_repo import WorkspaceRepository
-    from services.orchestrators.partition_service import PartitionService
     from services.orchestrators.preset_service import PresetService
 
 logger = get_logger()
@@ -153,7 +161,7 @@ class IndexingService:
         metadata.update(extract_temporal_fields(metadata, temporal_fields=TEMPORAL_FIELDS))
         return metadata
 
-    def _partition_configs(self) -> dict[str, Any]:
+    def _partition_configs(self) -> dict[str, PartitionConfig]:
         if self._config is None:
             return {}
         return getattr(self._config, "partitions", {}) or {}
@@ -222,8 +230,9 @@ class IndexingService:
         if pin is not None:
             await pin(partition)
 
-    def _resolve_indexation_dispatch_config(self, partition: str) -> tuple[dict | None, str | None]:
-        partitions = self._partition_configs()
+    def _resolve_indexation_dispatch_config(
+        self, partitions: dict[str, PartitionConfig], partition: str
+    ) -> tuple[dict | None, str | None]:
         if not partitions:
             # Legacy passthrough: the worker indexes with its static config and
             # the default embedder. A running service never has an empty cache
@@ -231,9 +240,7 @@ class IndexingService:
             # it); only unit tests that build the service without partitions,
             # or a partition table emptied by hand in the database, land here.
             return None, None
-        if partition not in partitions:
-            raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
-        partition_cfg = partitions[partition]
+        partition_cfg = PartitionService.require_cached_config(partitions, partition)
         return partition_cfg.indexation.model_dump(mode="json"), partition_cfg.embedder
 
     async def _ensure_partition_exists(self, partition: str, user: dict | None) -> None:
@@ -246,9 +253,10 @@ class IndexingService:
         there is no preset registry to resolve against (legacy passthrough) or
         no partition service wired.
         """
-        if self._partition_service is None or not self._partition_configs():
+        configs = self._partition_configs()
+        if self._partition_service is None or not configs:
             return
-        if partition in self._partition_configs():
+        if PartitionService.lookup_cached_config(configs, partition) is not None:
             return
         if await self._partition_service.partition_exists(partition):
             # Row exists but the in-memory cache is stale — refresh it.
@@ -306,12 +314,17 @@ class IndexingService:
         content_sha256: str | None = None,
         callback_url: str | None = None,
         callback_token: str | None = None,
+        task_id: str | None = None,
     ) -> str:
         """Assemble metadata and queue an (re)indexing job; return its task id.
 
         Workspace association happens inside the worker's ``add_file``
         after a successful index — the router only pre-validates the ids.
         *callback_url*/*callback_token* are forwarded to the worker as-is.
+
+        *task_id* is the id of the file-slot reservation the caller took at
+        admission, when it took one (#664); the task runs under it so the
+        worker consumes that slot. Otherwise the dispatcher picks an id.
         """
         if self._deduplication_enabled() and content_sha256 is None:
             content_sha256 = await asyncio.to_thread(_sha256_file, file_path)
@@ -326,28 +339,47 @@ class IndexingService:
             original_filename=original_filename,
             content_sha256=content_sha256,
         )
-        async with self._partition_admission(partition) as partition_existed_at_admission:
-            await self._ensure_no_embedder_swap(partition)
-            await self._ensure_partition_exists(partition, user)
-            await self._refresh_preset_config_if_stale()
-            await self._pin_partition_embedder(partition)
-            require_existing_partition = bool(self._partition_configs()) or partition_existed_at_admission
-            indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
-            legacy_actor_preserves_partition_guard = require_existing_partition and indexation_config is not None
-            return await self._dispatcher.dispatch_indexing(
-                path=file_path,
-                metadata=full_metadata,
-                partition=partition,
-                user=user,
-                workspace_ids=workspace_ids,
-                replace=replace,
-                indexation_config=indexation_config,
-                embedder_name=embedder_name,
-                callback_url=callback_url,
-                callback_token=callback_token,
-                require_existing_partition=require_existing_partition,
-                allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
-            )
+        dispatched_task_id: str | None = None
+        worker_may_run = False
+        try:
+            async with self._partition_admission(partition) as partition_existed_at_admission:
+                await self._ensure_no_embedder_swap(partition)
+                await self._ensure_partition_exists(partition, user)
+                await self._refresh_preset_config_if_stale()
+                await self._pin_partition_embedder(partition)
+                configs = self._partition_configs()
+                require_existing_partition = bool(configs) or partition_existed_at_admission
+                indexation_config, embedder_name = self._resolve_indexation_dispatch_config(configs, partition)
+                legacy_actor_preserves_partition_guard = require_existing_partition and indexation_config is not None
+                try:
+                    dispatched_task_id = await self._dispatcher.dispatch_indexing(
+                        path=file_path,
+                        metadata=full_metadata,
+                        partition=partition,
+                        user=user,
+                        workspace_ids=workspace_ids,
+                        replace=replace,
+                        indexation_config=indexation_config,
+                        embedder_name=embedder_name,
+                        callback_url=callback_url,
+                        callback_token=callback_token,
+                        require_existing_partition=require_existing_partition,
+                        allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
+                        task_id=task_id,
+                    )
+                except BaseException as exc:
+                    worker_may_run = indexing_worker_may_be_running(exc)
+                    raise
+                worker_may_run = True
+        except BaseException as exc:
+            # Leaving admission (e.g. the advisory unlock) can fail after the
+            # task was queued, or replace a dispatch error that said its worker
+            # may still run: either way the caller must keep the upload and its
+            # quota slot (#664).
+            if worker_may_run:
+                mark_indexing_worker_may_be_running(exc)
+            raise
+        return dispatched_task_id
 
     async def delete_file(self, file_id: str, partition: str) -> None:
         _refuse_reserved_partition(partition)
@@ -396,9 +428,18 @@ class IndexingService:
         target_partition: str,
         metadata: dict,
         user: dict | None,
+        quota_reservation_id: str | None = None,
     ) -> None:
+        """Copy a file into another partition.
+
+        *quota_reservation_id* names the file slot the caller reserved for the
+        copy (#664); the catalog insert consumes it.
+        """
         _refuse_reserved_partition(source_partition)
         _refuse_reserved_partition(target_partition)
+        # Refuse a missing source before creating or pinning the destination.
+        if not await self._document_repo.file_exists_in_partition(file_id=source_file_id, partition=source_partition):
+            raise DocumentNotFoundError(f"File '{source_file_id}' not found in partition '{source_partition}'.")
         # Same guard as update_metadata (#713): the copy carries caller-supplied
         # metadata onto the new rows, so a spoofed ``source`` would land there too.
         metadata, dropped = strip_protected_metadata(metadata)
@@ -425,7 +466,14 @@ class IndexingService:
                 await self._pin_partition_embedder(target_partition)
                 destination = self._copy_destination(target_partition)
                 await copying.enter_async_context(self._copy_in_flight(target_partition))
-            await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user, **destination)
+            await self._dispatcher.copy_file(
+                source_file_id,
+                metadata,
+                source_partition,
+                user,
+                quota_reservation_id=quota_reservation_id,
+                **destination,
+            )
 
     def _copy_in_flight(self, partition: str) -> AbstractAsyncContextManager[None]:
         copy_in_flight = getattr(self._partition_service, "copy_in_flight", None)
@@ -439,7 +487,7 @@ class IndexingService:
         """
         if self._config is None or self._embedder_factory is None:
             return {}
-        partition_cfg = self._partition_configs().get(partition)
+        partition_cfg = PartitionService.lookup_cached_config(self._partition_configs(), partition)
         endpoint = self._config.models.embedder.get(partition_cfg.embedder) if partition_cfg else None
         if endpoint is None or not endpoint.vector_field:
             raise ConfigError(

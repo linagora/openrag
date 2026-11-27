@@ -65,6 +65,8 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("VDB_TIMEOUT", "vectordb.timeout", float),
     ("VDB_JSON_MAX_LENGTH", "vectordb.json_max_length", int),
     ("VDB_JSON_SAFETY_MARGIN_BYTES", "vectordb.json_safety_margin_bytes", int),
+    ("VDB_INSERT_BATCH_MAX_BYTES", "vectordb.insert_batch_max_bytes", int),
+    ("VDB_INSERT_BATCH_MAX_ROWS", "vectordb.insert_batch_max_rows", int),
     # RDB (Postgres)
     ("POSTGRES_HOST", "rdb.host", str),
     ("POSTGRES_PORT", "rdb.port", int),
@@ -112,9 +114,11 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("SAVE_MARKDOWN", "loader.save_markdown", bool),
     ("SAVE_UPLOADED_FILES", "loader.save_uploaded_files", bool),
     ("CONTENT_DEDUPLICATION_ENABLED", "loader.content_deduplication_enabled", bool),
+    ("FILE_FENCES", "loader.file_fences", str),
     ("CSV_BATCH_SIZE", "loader.csv_batch_size", int),
     ("CSV_DELIMITER", "loader.csv_delimiter", str),
     ("XLSX_BATCH_SIZE", "loader.xlsx_batch_size", int),
+    ("XLSX_CHARTS", "loader.xlsx_charts", str),
     # Indexing callback
     ("INDEXING_CALLBACK_ALLOW_PRIVATE_URLS", "indexing_callback.allow_private_urls", bool),
     ("PDFLOADER", "loader.file_loaders.pdf", str),

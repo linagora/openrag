@@ -13,7 +13,7 @@ divergence as a pending schema change.
 
 from datetime import datetime
 
-from core.models.catalog import DocumentStatus
+from core.models.catalog import DocumentStatus, FileFenceKind
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -284,6 +284,11 @@ files = Table(
         unique=True,
         postgresql_where=text("content_sha256 IS NOT NULL"),
     ),
+    Index(
+        "ix_files_embedder_vector_field",
+        text("(indexation_config->>'embedder_vector_field')"),
+        postgresql_where=text("indexation_config->>'embedder_vector_field' IS NOT NULL"),
+    ),
 )
 
 
@@ -310,6 +315,39 @@ file_content_claims = Table(
         server_default=text("now() + interval '24 hours'"),
         nullable=False,
     ),
+)
+
+
+_FILE_FENCE_KIND_CHECK = "holder_kind IN ({})".format(",".join(f"'{kind.value}'" for kind in FileFenceKind))
+
+
+# One row per file an operation is changing right now (#1430): indexing (a new
+# file or a replace) or a delete; metadata updates and copies don't take one
+# yet. The primary key is what makes it exclusive. ``holder_id`` is the fencing token:
+# the indexing task id, or a fresh id for a request. A row rather than an
+# advisory lock, because the process that takes an indexing fence (the API at
+# admission) is not the one that releases it (whatever settles the task).
+#
+# ``expires_at`` is the last resort for a holder that died; an indexing fence
+# whose ``jobs`` row is terminal is free before that. The catalog write checks
+# the fence in its own transaction (``PgDocumentRepository``), so an operation
+# that lost it never makes a file visible. Deleting the partition drops its
+# fences, as it does its content claims.
+file_fences = Table(
+    "file_fences",
+    metadata,
+    Column(
+        "partition_name",
+        String,
+        ForeignKey("partitions.partition", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("file_id", String, primary_key=True),
+    Column("holder_kind", String, nullable=False),
+    Column("holder_id", String, nullable=False),
+    Column("acquired_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(_FILE_FENCE_KIND_CHECK, name="ck_file_fences_holder_kind"),
 )
 
 
@@ -530,6 +568,29 @@ Index(
     "ix_users_lower_display_name_pattern",
     func.lower(users.c.display_name).label("display_name_lower"),
     postgresql_ops={"display_name_lower": "text_pattern_ops"},
+)
+
+
+# One row per file slot a quota-capped upload holds before its file exists
+# (#664). Admission bumps ``users.file_count`` and inserts the row in one
+# transaction; the catalog insert deletes it instead of bumping the count, and
+# every path that gives the slot back deletes it and decrements the count in one
+# statement. So ``file_count`` is always the uploader's files plus their rows
+# here, and a release that finds no row is a no-op rather than a double count.
+#
+# ``id`` is the indexing task id for an upload, and a fresh id for a copy.
+# Deleting the user deletes their reservations, as it does their counter.
+file_quota_reservations = Table(
+    "file_quota_reservations",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    # ``clock_timestamp()``, not ``now()``: the reservation is inserted after the
+    # quota UPDATE, which can wait on the user's row lock, and ``now()`` is the
+    # transaction start, so a long wait would stamp a row already past the
+    # sweep's grace window.
+    Column("created_at", DateTime(timezone=True), server_default=text("clock_timestamp()"), nullable=False),
+    Index("ix_file_quota_reservations_user_id", "user_id"),
 )
 
 

@@ -58,7 +58,7 @@ async def test_mixed_workspace_preserves_partition_files_and_shared_uploads(post
 
     assert result == {"orphaned_files_deleted": 1, "orphaned_files_failed": [], "kept_files": 0}
     assert await store.workspace_repo.get_workspace("p", "ws1") is None
-    assert await store.workspace_repo.list_workspace_files("p", "ws1") == []
+    assert await store.workspace_repo.list_workspace_files("p", "ws1") is None
     assert await store.document_repo.file_exists_in_partition("independent", "p")
     assert await store.document_repo.file_exists_in_partition("shared", "p")
     assert not await store.document_repo.file_exists_in_partition("exclusive", "p")

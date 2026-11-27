@@ -16,9 +16,12 @@ x-openrag-env: &openrag_env
   # the font at a bind-mounted dir the app user owns, so the ~15MB download
   # happens once and persists across restarts.
   FONT_PATH: ${FONT_PATH:-/app/data/fonts/GoNotoCurrent-Regular.ttf}
+  # The entrypoint uses this Compose-resolved address when the shared env file
+  # leaves UVICORN_FORWARDED_ALLOW_IPS empty.
+  OPENRAG_ADMIN_UI_PROXY_IP: ${OPENRAG_ADMIN_UI_PROXY_IP:-172.31.253.200}
 
 x-openrag: &openrag_template
-  image: linagoraai/openrag:v2.3.5
+  image: linagoraai/openrag:v2.3.6
   # Start as root so entrypoint.sh can grant GID-0 write on the bind-mounted
   # writable dirs (data/, the HF cache) — which a non-root container
   # can't write when Docker auto-creates them root-owned — then it immediately
@@ -60,7 +63,6 @@ x-openrag: &openrag_template
     # (or a writable host path) override the running code. Uncomment for local
     # development; keep it off in production.
     # - ../../openrag:/app/openrag # For dev mode
-    - ${SHARED_ENV:-./.env}:/ray_mount/.env # Shared environment variables (falls back to ./.env)
   ports:
     - ${APP_PORT:-8080}:${APP_iPORT:-8080}
     # The Ray dashboard (8265) is not published: it has no authentication and
@@ -72,7 +74,8 @@ x-openrag: &openrag_template
       aliases:
         - openrag
   env_file:
-    - ${SHARED_ENV:-.env}
+    - ./proxy-defaults.env
+    - ${OPENRAG_ENV_FILE:-.env}
   environment:
     <<: *openrag_env
   shm_size: 10.24gb
@@ -119,7 +122,7 @@ x-vllm: &vllm_template
 services:
   # ── Admin UI (React SPA + nginx, same-origin reverse proxy to the API) ──
   admin-ui:
-    image: linagoraai/openrag-admin-ui:v2.3.5
+    image: linagoraai/openrag-admin-ui:v2.3.6
     build:
       context: ../..
       dockerfile: infra/docker/ui.Dockerfile
@@ -137,6 +140,9 @@ services:
     restart: unless-stopped
     ports:
       - "${ADMIN_UI_PORT:-8081}:8080"
+    networks:
+      default:
+        ipv4_address: ${OPENRAG_ADMIN_UI_PROXY_IP:-172.31.253.200}
     # No depends_on the API: nginx resolves the `openrag` network alias (shared by
     # the GPU and CPU API variants) at request time, so this works under any
     # profile and starts even before the backend is ready.
@@ -182,11 +188,36 @@ services:
         condition: service_healthy
     # No hard dependency on vllm-cpu (see the GPU service above).
 
+  compose-postgres-secret-check:
+    image: python:3.12-slim
+    user: "${OPENRAG_PREFLIGHT_UID:-1000}:${OPENRAG_PREFLIGHT_GID:-1000}"
+    command: ["python3", "/workspace/scripts/gen_env.py", "--check-compose-postgres"]
+    environment:
+      OPENRAG_PREFLIGHT_ALLOW_INSECURE_OVERRIDE: ${ALLOW_INSECURE_SECRETS-}
+      OPENRAG_PREFLIGHT_ALLOW_INSECURE_OVERRIDE_SET: ${ALLOW_INSECURE_SECRETS+set}
+      OPENRAG_PREFLIGHT_SHARED_ENV: /run/openrag/shared.env
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env}
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ../../scripts/gen_env.py:/workspace/scripts/gen_env.py:ro
+      - ../../openrag/core:/workspace/openrag/core:ro
+      - ${OPENRAG_ENV_FILE:-./.env}:/run/openrag/shared.env:ro
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
   rdb:
     image: postgres:15
     environment:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env}
       - POSTGRES_USER=${POSTGRES_USER:-root}
+    depends_on:
+      compose-postgres-secret-check:
+        condition: service_completed_successfully
     volumes:
       - ${DB_VOLUME:-../../db}:/var/lib/postgresql/data
       - ../../scripts/postgres-init:/docker-entrypoint-initdb.d:ro
@@ -236,6 +267,15 @@ services:
     # For details see https://github.com/vllm-project/vllm/issues/21179
     profiles:
       - "cpu"
+
+networks:
+  default:
+    ipam:
+      config:
+        # Keep the proxy address outside the dynamic pool so it cannot be
+        # assigned to an ordinary container while the proxy is stopped.
+        - subnet: ${OPENRAG_COMPOSE_SUBNET:-172.31.253.0/24}
+          ip_range: ${OPENRAG_COMPOSE_DYNAMIC_RANGE:-172.31.253.0/25}
 
 volumes:
   appdata:

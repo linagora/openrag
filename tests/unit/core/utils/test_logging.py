@@ -14,6 +14,7 @@ from core.utils.logging import (
     AccessLogMinimiser,
     escape_markup,
     get_logger,
+    hash_oidc_sub,
     json_record,
     json_sink,
     mask_email,
@@ -203,12 +204,20 @@ def test_json_mode_omits_exception_key_for_stdlib_empty_exc_info(capsys):
         _restore_default_logger()
 
 
-def test_json_sink_writes_one_parsable_line_without_ansi(capsys):
+@pytest.fixture
+def isolated_json_sink():
+    """Install only the JSON sink under test, then restore configured logging."""
+    logger.remove()
     handler_id = logger.add(json_sink, level="DEBUG")
     try:
-        logger.bind(request_id="req_1").info("line <b>bold</b> {curly}")
+        yield
     finally:
         logger.remove(handler_id)
+        _restore_default_logger()
+
+
+def test_json_sink_writes_one_parsable_line_without_ansi(capsys, isolated_json_sink):
+    logger.bind(request_id="req_1").info("line <b>bold</b> {curly}")
     err = capsys.readouterr().err
     assert err.count("\n") == 1
     assert "\x1b" not in err
@@ -217,12 +226,8 @@ def test_json_sink_writes_one_parsable_line_without_ansi(capsys):
     assert payload["request_id"] == "req_1"
 
 
-def test_json_sink_stringifies_unserialisable_values(capsys):
-    handler_id = logger.add(json_sink, level="DEBUG")
-    try:
-        logger.bind(path=SimpleNamespace(x=1)).info("obj")
-    finally:
-        logger.remove(handler_id)
+def test_json_sink_stringifies_unserialisable_values(capsys, isolated_json_sink):
+    logger.bind(path=SimpleNamespace(x=1)).info("obj")
     payload = json.loads(capsys.readouterr().err)
     assert payload["path"] == "namespace(x=1)"
 
@@ -568,3 +573,17 @@ def test_verbose_config_defaults_are_production_safe():
     config = VerboseConfig()
     assert config.level == "INFO"
     assert config.personal_data is False
+
+
+def test_hash_oidc_sub_is_deterministic():
+    assert hash_oidc_sub("kc-bob") == hash_oidc_sub("kc-bob")
+
+
+def test_hash_oidc_sub_differs_for_different_subjects():
+    assert hash_oidc_sub("kc-bob") != hash_oidc_sub("kc-alice")
+
+
+def test_hash_oidc_sub_returns_sha256_hex_digest():
+    result = hash_oidc_sub("private-subject-123")
+    assert len(result) == 64
+    assert "private-subject-123" not in result

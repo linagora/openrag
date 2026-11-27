@@ -395,7 +395,7 @@ ray:
     registry: "ghcr.io"
     repository: "linagora/openrag-ray"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.3.5"
+    tag: "v2.3.6"
   resources:
     head:
       requests:
@@ -825,6 +825,14 @@ reranker:
   # instead of 100-125 s in our tests.
   extraEnv: []
   replicas: 1
+  # To share a GPU with the pods that request nvidia.com/gpu, set
+  # runtimeClassName (e.g. "nvidia") and a nodeSelector for the GPU nodes, as
+  # values-linagora.yaml does. Left empty, the reranker runs on CPU unless the
+  # node's default runtime is NVIDIA's. The chart sets NVIDIA_VISIBLE_DEVICES
+  # to all and NVIDIA_DRIVER_CAPABILITIES to compute,utility, as the image
+  # does; a value in extraEnv or env.config replaces it. On a node with several
+  # GPUs, all also exposes those the scheduler gave to other pods: set
+  # NVIDIA_VISIBLE_DEVICES in extraEnv to the card to share (e.g. "0").
   runtimeClassName: ""
   # service.port is the port Infinity listens on, the Service port, and the one
   # in RERANKER_BASE_URL. It replaces servicePort.
@@ -876,7 +884,7 @@ adminUi:
     repository: "linagoraai/openrag-admin-ui"
     # Pin to a release tag (ideally a digest) for reproducible deploys. Must be a
     # build from infra/docker/ui.Dockerfile (nginx-unprivileged, listens :8080).
-    tag: "v2.3.5"
+    tag: "v2.3.6"
     pullPolicy: IfNotPresent
   replicaCount: 1
   service:
@@ -933,7 +941,7 @@ openrag:
     registry: ""
     repository: "linagoraai/openrag"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.3.5"
+    tag: "v2.3.6"
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -1159,6 +1167,9 @@ env:
 
     # App
     APP_PORT: "8080"
+    # Set this to the addresses of the proxies that forward to the API.
+    # Reconcile the allowlist when those addresses change.
+    UVICORN_FORWARDED_ALLOW_IPS: "127.0.0.1"
     # Optional white-label name for casual introductions; empty is neutral.
     ASSISTANT_NAME: ""
     # Requires ray.enabled=true (a separate RayCluster with its own "serve" port
@@ -1272,6 +1283,10 @@ env:
     # env_vars.md.
     # PYMUPDF_POOL_SIZE: "4"
     # PYMUPDF_PARSE_MEMORY_LIMIT_MB: "1024"
+    # Spreadsheet charts: full (default) indexes each chart with its data, hidden
+    # worksheets, rows and columns included; without_hidden_data leaves hidden
+    # data out; off reads no chart. See xlsx_ingestion.md.
+    # XLSX_CHARTS: "full"
     XDG_CACHE_HOME: "/app/model_weights"
     MARKER_MAX_TASKS_PER_CHILD: "10"
     # Ceiling (MiB) on what one Marker child may allocate, so an oversized parse
@@ -1313,6 +1328,10 @@ env:
     # only resolves within values.yaml and goes stale once overridden via
     # --set/-f) so the secret always matches the actual DB credential.
     POSTGRES_PASSWORD: "{{ .Values.postgresql.auth.password }}"
+    # For lockout revalidation, use `or-` plus 32 lowercase hex digits.
+    # Run this in a shell and set AUTH_TOKEN to its output:
+    #   printf 'or-%s\n' "$(openssl rand -hex 16)"
+    # Other valid token formats remain subject to 429 during a failed-auth lockout.
     AUTH_TOKEN: "" # API KEY for OpenRAG
     METRICS_TOKEN: "" # Bearer for Prometheus on GET /metrics; empty = 403 unless METRICS_ALLOW_UNAUTHENTICATED
     HF_TOKEN: "" # HuggingFace token

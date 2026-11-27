@@ -23,6 +23,9 @@ services:
     environment:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in your .env}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in your .env}
+    depends_on:
+      compose-secret-check:
+        condition: service_completed_successfully
     volumes:
       - ${MILVUS_VOLUME_DIRECTORY:-./volumes}/minio:/minio_data
     command: minio server /minio_data --console-address ":9001"
@@ -32,14 +35,49 @@ services:
       timeout: 20s
       retries: 3
 
+  # The API checks only its own secrets. This one-shot check validates the
+  # effective MinIO credentials before bundled storage can start.
+  compose-secret-check:
+    image: python:3.12-slim
+    user: "${OPENRAG_PREFLIGHT_UID:-1000}:${OPENRAG_PREFLIGHT_GID:-1000}"
+    command: ["python3", "/workspace/scripts/gen_env.py", "--check-compose-storage"]
+    environment:
+      OPENRAG_PREFLIGHT_ALLOW_INSECURE_OVERRIDE: ${ALLOW_INSECURE_SECRETS-}
+      OPENRAG_PREFLIGHT_ALLOW_INSECURE_OVERRIDE_SET: ${ALLOW_INSECURE_SECRETS+set}
+      OPENRAG_PREFLIGHT_SHARED_ENV: /run/openrag/shared.env
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in your .env}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in your .env}
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ../../../scripts/gen_env.py:/workspace/scripts/gen_env.py:ro
+      - ../../../openrag/core:/workspace/openrag/core:ro
+      - ${OPENRAG_ENV_FILE:-../.env}:/run/openrag/shared.env:ro
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
   milvus-init:
     image: milvusdb/milvus:v3.0.5
     user: "0:0"
     environment:
       LD_PRELOAD: ""
+    depends_on:
+      compose-secret-check:
+        condition: service_completed_successfully
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
+        # A mount root already owned by 999:999 was initialized for Milvus 3
+        # (fresh install or completed migration). Skip the deep scan there:
+        # Docker Desktop bind mounts report some files Milvus 3 itself writes
+        # (e.g. RocksDB LOCK/CURRENT) as 0:0, which would block every restart.
+        if [ "$$(stat -c %u:%g /var/lib/milvus)" = "999:999" ]; then
+          exit 0
+        fi
         incompatible_path="$$(find /var/lib/milvus -mindepth 1 \( ! -uid 999 -o ! -gid 999 \) -print -quit)"
         if [ -n "$$incompatible_path" ]; then
           echo "Existing Milvus data is not owned by UID/GID 999. Back up the deployment and follow the Milvus 2.6-to-3.0 migration guide before starting Milvus 3." >&2

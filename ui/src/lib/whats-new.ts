@@ -64,6 +64,7 @@ export const NEW_SINCE: Readonly<Record<string, string>> = {
   // key and nothing else — see FEATURE_TAG.md.
   //   "models.reranker": "UNRELEASED",
   "partitions.embedder_swap": "2.3.2",
+  "partitions.workspaces": "2.3.6",
 };
 
 type Version = { major: number; minor: number };

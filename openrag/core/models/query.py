@@ -17,7 +17,7 @@ class RetrievalQuery(BaseModel):
     text: str
     partition: str = "default"
     top_k: int = 10
-    similarity_threshold: float = 0.6
+    similarity_threshold: float = 0.2
     filters: dict[str, Any] = Field(default_factory=dict)
     include_related: bool = False
     include_ancestors: bool = False

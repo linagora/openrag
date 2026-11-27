@@ -19,7 +19,7 @@ from api.dependencies.auth import (
 )
 from api.dependencies.files import validate_file_id
 from api.dependencies.retrieval_diagnostics import get_retrieval_diagnostics_guard
-from api.routers.user.chat import check_tokens_limit
+from api.routers.user.chat import _token_budget, check_tokens_limit
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAIMessage
 from api.schemas.user.retrieval_diagnostics import (
     RetrievalDiagnosticRequest,
@@ -78,7 +78,13 @@ class CommonSearchParams:
         text: str = Query(..., description="Text to search semantically"),
         top_k: int = Query(5, ge=1, description="Number of top results to return"),
         similarity_threshold: float = Query(
-            0.75, ge=0, le=1, description="Minimum similarity score for results (0 to 1)"
+            0.2,
+            ge=0,
+            le=1,
+            description=(
+                "Minimum similarity score (0 to 1) for the semantic (dense) candidates, applied before "
+                "they are merged with the keyword (BM25) results, which it does not filter"
+            ),
         ),
         filter: str | None = Query(
             default=None,
@@ -252,6 +258,9 @@ async def retrieval_diagnostics(
 ):
     await diagnostics_guard.authorize(partition_viewer)
     await service.refresh_partition_configs()
+    partitions = [partition]
+    resolved = service.resolve_chat_request(partitions)
+    budget = _token_budget(config, resolved.endpoint_name)
     token_request = OpenAIChatCompletionRequest(
         messages=[OpenAIMessage(**message.model_dump()) for message in payload.messages],
         max_tokens=config.rag.max_contextualized_query_len,
@@ -259,12 +268,11 @@ async def retrieval_diagnostics(
     check_tokens_limit(
         token_request,
         logger.bind(endpoint="/search/partition/{partition}/diagnostics"),
-        config,
-        partitions=[partition],
+        budget,
     )
     request_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID")
     trace = await service.diagnose_retrieval(
-        partitions=[partition],
+        partitions=partitions,
         messages=[message.model_dump() for message in payload.messages],
         query_mode=payload.query_mode,
         top_k=payload.top_k,
@@ -272,6 +280,7 @@ async def retrieval_diagnostics(
         disable_reranker=payload.disable_reranker,
         disable_expansion=payload.disable_expansion,
         request_id=request_id,
+        resolved_request=resolved,
     )
     return RetrievalDiagnosticResponse(
         partition=partition,
@@ -288,7 +297,7 @@ async def retrieval_diagnostics(
 - `partitions`: List of partition names (default: ["all"])
 - `text`: Search query text (required)
 - `top_k`: Number of results to return (default: 5)
-- similarity_threshold: Minimum similarity score for results (0 to 1, default: 0.75)
+- `similarity_threshold`: Minimum similarity score for the semantic (dense) candidates, applied before they are merged with the keyword (BM25) results, which it does not filter (0 to 1, default: 0.2)
 - `rerank`: Rerank the vector search candidates and return the best `top_k` (default: false). A search over one partition uses that partition's reranker preset, a search over several partitions uses the default reranker. Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only. Related and ancestor chunks are appended after the reranked `top_k`, without a score.
 - `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`, or `retriever.top_k` for a search over several partitions; at most 1000). Only used with `rerank=true`.
 - `include_related`: Include chunks from files with same relationship_id (default: false)
@@ -410,7 +419,7 @@ async def search_multiple_partitions(
 **Query Parameters:**
 - `text`: Search query text (required)
 - `top_k`: Number of results to return (default: 5)
-- similarity_threshold: Minimum similarity score for results (0 to 1, default: 0.75)
+- `similarity_threshold`: Minimum similarity score for the semantic (dense) candidates, applied before they are merged with the keyword (BM25) results, which it does not filter (0 to 1, default: 0.2)
 - `rerank`: Rerank the vector search candidates with the partition's reranker and return the best `top_k` (default: false). Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only. Related and ancestor chunks are appended after the reranked `top_k`, without a score.
 - `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`, at most 1000). Only used with `rerank=true`.
 - `include_related`: Include chunks from files with same relationship_id (default: false)
@@ -511,7 +520,7 @@ async def search_one_partition(
 **Query Parameters:**
 - `text`: Search query text (required)
 - `top_k`: Number of results to return (default: 5)
-- similarity_threshold: Minimum similarity score for results (0 to 1, default: 0.75)
+- `similarity_threshold`: Minimum similarity score for the semantic (dense) candidates, applied before they are merged with the keyword (BM25) results, which it does not filter (0 to 1, default: 0.2)
 - `rerank`: Rerank the vector search candidates with the partition's reranker and return the best `top_k` (default: false). Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only.
 - `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`, at most 1000). Only used with `rerank=true`.
 - `filter`: Milvus filter expression string for additional filtering (optional)

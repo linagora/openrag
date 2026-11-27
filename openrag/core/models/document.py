@@ -22,6 +22,7 @@ class DocumentType(str, Enum):
     PDF = "pdf"
     TEXT = "text"
     CSV = "csv"
+    XLS = "xls"
     XLSX = "xlsx"
     HTML = "html"
     MARKDOWN = "markdown"
@@ -30,6 +31,8 @@ class DocumentType(str, Enum):
     VIDEO = "video"
     DOCX = "docx"
     PPTX = "pptx"
+    ODT = "odt"
+    ODP = "odp"
     DOC = "doc"
     EML = "eml"
 
@@ -39,6 +42,7 @@ _EXTENSION_TYPES: dict[str, DocumentType] = {
     "pdf": DocumentType.PDF,
     "txt": DocumentType.TEXT,
     "csv": DocumentType.CSV,
+    "xls": DocumentType.XLS,
     "xlsx": DocumentType.XLSX,
     # Macro-enabled OOXML workbooks use the same safe, read-only tabular
     # parser.  The parser never retains or executes VBA.
@@ -63,6 +67,8 @@ _EXTENSION_TYPES: dict[str, DocumentType] = {
     "flv": DocumentType.VIDEO,
     "docx": DocumentType.DOCX,
     "pptx": DocumentType.PPTX,
+    "odt": DocumentType.ODT,
+    "odp": DocumentType.ODP,
     "doc": DocumentType.DOC,
     "eml": DocumentType.EML,
 }
@@ -93,6 +99,10 @@ class ImageBlock(BaseModel):
       EML image attachments), ``metadata["markdown_ref"]`` is omitted;
       the caption stage produces a free-standing captioned ``TextBlock``
       instead.
+    - An image left uncaptioned (captioning off, or failed on it) has its
+      ref taken out of the text before chunking and extractText
+      (``drop_uncaptioned_image_refs``), its ``metadata["alt"]`` kept. A
+      remote image keeps its link.
 
     Bytes vs. URL:
     - Locally-extracted images set ``image_bytes`` (raw PNG / JPEG bytes)
@@ -238,11 +248,10 @@ class Document(BaseModel):
         (#911).
 
         Whether the yielded path is reachable from another node is the
-        *caller's* property, not this method's: the upload routes save under
-        ``config.paths.data_dir`` (Helm ``persistence.accessMode:
-        ReadWriteMany``, Compose's ``${DATA_VOLUME}:/app/data`` bind mount) and
-        are placeable; ``index_url``'s download is in the node's own temp dir
-        and is not.
+        *caller's* property, not this method's: the upload routes and MCP's
+        ``index_url`` save under ``config.paths.data_dir`` (Helm
+        ``persistence.accessMode: ReadWriteMany``, Compose's
+        ``${DATA_VOLUME}:/app/data`` bind mount), so their files are placeable.
 
         Otherwise ``raw_bytes`` is materialized to a temporary file, which *is*
         removed on context exit even if the body raises. That is the path for
@@ -315,7 +324,10 @@ _DEFAULT_TEMPFILE_SUFFIX: dict[DocumentType, str] = {
     DocumentType.PDF: ".pdf",
     DocumentType.DOCX: ".docx",
     DocumentType.PPTX: ".pptx",
+    DocumentType.XLS: ".xls",
     DocumentType.XLSX: ".xlsx",
+    DocumentType.ODT: ".odt",
+    DocumentType.ODP: ".odp",
     DocumentType.DOC: ".doc",
     DocumentType.AUDIO: ".wav",
     DocumentType.VIDEO: ".mp4",
