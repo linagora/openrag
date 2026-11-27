@@ -65,6 +65,8 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("VDB_TIMEOUT", "vectordb.timeout", float),
     ("VDB_JSON_MAX_LENGTH", "vectordb.json_max_length", int),
     ("VDB_JSON_SAFETY_MARGIN_BYTES", "vectordb.json_safety_margin_bytes", int),
+    ("VDB_INSERT_BATCH_MAX_BYTES", "vectordb.insert_batch_max_bytes", int),
+    ("VDB_INSERT_BATCH_MAX_ROWS", "vectordb.insert_batch_max_rows", int),
     # RDB (Postgres)
     ("POSTGRES_HOST", "rdb.host", str),
     ("POSTGRES_PORT", "rdb.port", int),

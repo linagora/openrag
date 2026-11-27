@@ -772,6 +772,17 @@ class TestPhase14NamedComponentFactories:
         assert embedder.kwargs["max_model_len"] == 4096
         assert embedder.kwargs["embed_concurrency"] == 9
 
+    def test_saved_null_embedder_extras_are_preserved(self):
+        settings = _settings_with_named_models()
+        settings.models.embedder["embed-a"].extra["max_model_len"] = None
+        settings.models.embedder["embed-a"].extra["embed_concurrency"] = None
+        c = ServiceContainer(settings)
+
+        embedder = c.embedder_factory("embed-a")
+
+        assert embedder.kwargs["max_model_len"] is None
+        assert embedder.kwargs["embed_concurrency"] is None
+
     def test_embedder_extra_batch_size_wins_over_top_level(self):
         """An explicit extra['batch_size'] must override the top-level value.
 

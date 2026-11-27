@@ -85,17 +85,23 @@ class _FakeEndpointRepo:
             rows = [r for r in rows if r.model_type == model_type]
         return rows
 
-    async def update(self, name: str, model_type: str, *, guard=None, **fields):
+    async def update(self, name: str, model_type: str, *, guard=None, extra_patch=None, **fields):
         row = self._store.get((name, model_type))
         if row is None:
             return None
+        update_fields = dict(fields)
+        if extra_patch is not None:
+            update_fields["extra"] = {**row.extra, **extra_patch}
         # The real repo checks for a running swap, then runs the guard, on the
         # row it just locked, before writing.
         if model_type == "embedder" and name in self.swap_targets:
             from core.config.model_endpoints import material_embedder_changes
             from core.utils.exceptions import ConflictError
 
-            if changed := material_embedder_changes(row, fields):
+            if changed := material_embedder_changes(
+                row,
+                update_fields,
+            ):
                 raise ConflictError(
                     f"Embedder '{name}' is the target of 1 running embedder swap(s), and changing "
                     f"{', '.join(changed)} would change the vectors they write.",
@@ -104,7 +110,7 @@ class _FakeEndpointRepo:
         if guard is not None:
             await guard(row, lambda: self.indexed_file_usage(name, model_type))
         self.calls.append(("update", (name, model_type)))
-        updated = row.model_copy(update=fields)
+        updated = row.model_copy(update=update_fields)
         self._store[(name, model_type)] = updated
         return updated
 
@@ -154,9 +160,11 @@ def _make_service(
     from core.config.root import Settings
     from services.orchestrators.model_endpoint_service import ModelEndpointService
 
+    config = settings or Settings()
+    model_repo = repo or _FakeEndpointRepo(rows)
     return ModelEndpointService(
-        model_endpoint_repo=repo or _FakeEndpointRepo(rows),
-        config=settings or Settings(),
+        model_endpoint_repo=model_repo,
+        config=config,
         partition_service=partition_service,
         preset_service=preset_service,
         prompt_service=prompt_service,
@@ -189,6 +197,7 @@ async def test_seed_defaults_seeds_the_embedder_with_its_provider(embedder, impl
 
     [row] = [row for (_, model_type), row in repo._store.items() if model_type == "embedder"]
     assert row.extra["implementation"] == implementation
+    assert "max_model_len" not in row.extra
 
 
 @pytest.mark.asyncio
@@ -574,7 +583,7 @@ async def test_seed_defaults_skips_reranker_when_unconfigured(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_seed_defaults_leaves_existing_env_named_row_untouched_by_default(monkeypatch):
+async def test_seed_defaults_preserves_existing_endpoint_values(monkeypatch):
     """sync_on_boot defaults to False: an already-seeded row (name matches the
     env-derived slug) must survive an env-var change across restarts — the DB
     stays the source of truth until an admin (or an opt-in sync) changes it.
@@ -593,8 +602,10 @@ async def test_seed_defaults_leaves_existing_env_named_row_untouched_by_default(
 
     await svc.seed_defaults()
 
-    assert not any(c[0] == "update" for c in repo.calls)
-    assert repo._store[("embed-model", "embedder")].batch_size == 512
+    assert not [c for c in repo.calls if c[0] == "update"]
+    stored = repo._store[("embed-model", "embedder")]
+    assert stored.batch_size == 512
+    assert "max_model_len" not in stored.extra
 
 
 @pytest.mark.asyncio
@@ -645,14 +656,15 @@ async def test_seed_defaults_syncs_env_named_row_when_sync_on_boot_enabled(monke
     # model change can find it by marker instead of by slug.
     from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
 
-    assert updated.extra == {"api_key": "hand-set-secret", ENV_MANAGED_KEY: ENV_MANAGED_VALUE}
+    assert updated.extra == {
+        "api_key": "hand-set-secret",
+        ENV_MANAGED_KEY: ENV_MANAGED_VALUE,
+    }
 
 
 @pytest.mark.asyncio
-async def test_seed_defaults_sync_on_boot_never_touches_differently_named_endpoints(monkeypatch):
-    """sync_on_boot=True must not clobber a hand-created endpoint that doesn't
-    share the env-derived name, and must not create a competing default either.
-    """
+async def test_seed_defaults_sync_on_boot_preserves_differently_named_endpoints(monkeypatch):
+    """sync_on_boot must preserve custom settings."""
     from core.config.root import Settings
 
     monkeypatch.delenv("LLM_ENDPOINT", raising=False)
@@ -670,7 +682,9 @@ async def test_seed_defaults_sync_on_boot_never_touches_differently_named_endpoi
 
     embedder_calls = [c for c in repo.calls if c[0] in ("update", "create") and c[1][1] == "embedder"]
     assert not embedder_calls
-    assert repo._store[("custom", "embedder")].batch_size == 999
+    stored = repo._store[("custom", "embedder")]
+    assert stored.batch_size == 999
+    assert "max_model_len" not in stored.extra
 
 
 @pytest.mark.asyncio
@@ -766,10 +780,11 @@ async def test_seed_defaults_sync_on_boot_keeps_the_model_of_an_embedder_with_in
     a tunable the operator set in the same rollout."""
 
     monkeypatch.setenv("EMBEDDER_BATCH_SIZE", "64")
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
     _, repo = _indexed_env_managed_embedder()
-    settings = _sync_settings(
-        base_url="http://new-embedder:8000/v1", model_name="new-model", api_key="rotated-key", batch_size=64
-    )
+    settings = _sync_settings(model_name="new-model", api_key="rotated-key", batch_size=64)
     svc = _make_service(repo, settings=settings)
 
     warnings = await _seed_capturing_warnings(svc)
@@ -778,51 +793,57 @@ async def test_seed_defaults_sync_on_boot_keeps_the_model_of_an_embedder_with_in
     assert synced.model_name == "indexed-model"
     assert synced.extra["api_key"] == "rotated-key"
     assert synced.batch_size == 64
-    assert synced.endpoint == "http://new-embedder:8000/v1"
-    # The boot log is read by an operator, not an admin-API client: it names
-    # the variable to set, not the API's "Resend ..." instruction. A warning,
-    # worded as a disagreement: the database's model may be an admin's
-    # deliberate change that env was never updated for.
+    assert synced.endpoint == "http://embedder:8000/v1"
+    # A warning names the fields held back and the explicit admin-API path.
     [(level, warning)] = warnings
     assert level == "WARNING"
-    assert "env asks for 'new-model', the database keeps 'indexed-model'" in warning
-    assert "EMBEDDER_MODEL_NAME" in warning
-    assert "vllm.embedderModelName" in warning
+    assert "model_name" in warning
     assert "acknowledge_indexed_data=true" in warning
     assert "Resend" not in warning
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("stored", "env_provider", "configured", "expected"),
+    ("stored", "env_provider", "configured", "expected", "warn"),
     [
-        # Named by env, the vendor syncs, indexed files or not: like the URL, it
-        # is how the operator describes the server, not a change of model.
-        ("vllm", "tei", "tei", "tei"),
+        # The provider implementation participates in the vector fingerprint.
+        ("vllm", "tei", "tei", "vllm", True),
         # Not named by env, the config default must not undo an admin's choice.
-        ("tei", None, "vllm", "tei"),
-        ("tei", "", "vllm", "tei"),
+        ("tei", None, "vllm", "tei", False),
+        ("tei", "", "vllm", "tei", False),
     ],
 )
 async def test_seed_defaults_sync_on_boot_sets_the_embedder_vendor_only_when_env_names_it(
-    monkeypatch, stored, env_provider, configured, expected
+    monkeypatch, stored, env_provider, configured, expected, warn
 ):
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
     if env_provider is None:
         monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
     else:
         monkeypatch.setenv("EMBEDDER_PROVIDER", env_provider)
     _, repo = _indexed_env_managed_embedder(extra={"implementation": stored, "api_key": "old-key", "managed_by": "env"})
-    svc = _make_service(repo, settings=_sync_settings(provider=configured))
+    svc = _make_service(repo, settings=_sync_settings(provider=configured, api_key="rotated-key"))
 
     warnings = await _seed_capturing_warnings(svc)
 
     assert repo._store[("indexed-model", "embedder")].extra["implementation"] == expected
-    assert warnings == []
+    assert repo._store[("indexed-model", "embedder")].extra["api_key"] == ("old-key" if warn else "rotated-key")
+    if warn:
+        [(level, warning)] = warnings
+        assert level == "WARNING"
+        assert "extra.implementation" in warning
+        assert "acknowledge_indexed_data=true" in warning
+    else:
+        assert warnings == []
 
 
 @pytest.mark.asyncio
 async def test_seed_defaults_sync_on_boot_rotates_the_key_of_an_embedder_with_indexed_files(monkeypatch):
     """An API key cannot change a vector, so indexed files do not hold it back."""
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
     _, repo = _indexed_env_managed_embedder()
     svc = _make_service(repo, settings=_sync_settings(api_key="rotated-key"))
 
@@ -834,29 +855,36 @@ async def test_seed_defaults_sync_on_boot_rotates_the_key_of_an_embedder_with_in
 
 
 @pytest.mark.asyncio
-async def test_seed_defaults_sync_on_boot_moves_an_embedder_with_indexed_files_to_a_new_url(monkeypatch):
-    """A new URL is how an operator moves the same model to another server. If
-    that server serves another model, readiness reports the embedder unavailable;
-    the sync does not refuse the move."""
+async def test_seed_defaults_sync_on_boot_holds_an_embedder_url_with_indexed_files(monkeypatch):
+    """A new URL can return different vectors even when its model name matches."""
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
     _, repo = _indexed_env_managed_embedder()
-    svc = _make_service(repo, settings=_sync_settings(base_url="http://embedder.gpu-pool:8000/v1"))
+    svc = _make_service(
+        repo,
+        settings=_sync_settings(base_url="http://embedder.gpu-pool:8000/v1", api_key="rotated-key"),
+    )
 
     warnings = await _seed_capturing_warnings(svc)
 
     synced = repo._store[("indexed-model", "embedder")]
-    assert synced.endpoint == "http://embedder.gpu-pool:8000/v1"
+    assert synced.endpoint == "http://embedder:8000/v1"
     assert synced.model_name == "indexed-model"
-    assert warnings == []
+    assert synced.extra["api_key"] == "old-key"
+    [(level, warning)] = warnings
+    assert level == "WARNING"
+    assert "endpoint" in warning
+    assert "acknowledge_indexed_data=true" in warning
 
 
 @pytest.mark.asyncio
 async def test_seed_defaults_sync_on_boot_holds_the_url_and_model_of_a_running_swaps_target(monkeypatch):
-    """A running swap refuses any change to its target's vectors, the URL
-    included, so the fallback that holds back only the model was refused too and
-    failed boot — before the step that resumes the swap, so every boot failed
-    the same way. The row keeps its URL and model until the swap ends, and takes
-    the rest."""
+    """A running swap holds vector fields and credentials tied to its endpoint."""
     monkeypatch.setenv("EMBEDDER_BATCH_SIZE", "64")
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
     _, repo = _indexed_env_managed_embedder()
     repo.swap_targets.add("indexed-model")
     settings = _sync_settings(
@@ -869,17 +897,20 @@ async def test_seed_defaults_sync_on_boot_holds_the_url_and_model_of_a_running_s
     synced = repo._store[("indexed-model", "embedder")]
     assert synced.endpoint == "http://embedder:8000/v1"
     assert synced.model_name == "indexed-model"
-    assert synced.extra["api_key"] == "rotated-key"
+    assert synced.extra["api_key"] == "old-key"
     assert synced.batch_size == 64
     [(level, warning)] = warnings
     assert level == "WARNING"
     assert "running embedder swap" in warning
-    assert "http://embedder.gpu-pool:8000/v1" in warning
+    assert "endpoint, model_name" in warning
 
 
 @pytest.mark.asyncio
 async def test_seed_defaults_sync_on_boot_rotates_the_key_of_a_running_swaps_target(monkeypatch):
     """A swap holds back only what changes its vectors."""
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
     _, repo = _indexed_env_managed_embedder()
     repo.swap_targets.add("indexed-model")
     svc = _make_service(repo, settings=_sync_settings(api_key="rotated-key"))
@@ -888,6 +919,291 @@ async def test_seed_defaults_sync_on_boot_rotates_the_key_of_a_running_swaps_tar
 
     assert repo._store[("indexed-model", "embedder")].extra["api_key"] == "rotated-key"
     assert warnings == []
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_rotates_key_during_model_only_swap_conflict(monkeypatch):
+    """A model change waits for the swap, while its independent key rotation can proceed."""
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
+    _, repo = _indexed_env_managed_embedder()
+    repo.swap_targets.add("indexed-model")
+    svc = _make_service(repo, settings=_sync_settings(model_name="new-model", api_key="rotated-key"))
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    synced = repo._store[("indexed-model", "embedder")]
+    assert synced.model_name == "indexed-model"
+    assert synced.extra["api_key"] == "rotated-key"
+    assert len(warnings) == 1
+    assert "running embedder swap" in warnings[0][1]
+
+
+@pytest.mark.asyncio
+async def test_key_rotation_during_swap_uses_the_saved_provider_when_env_does_not_own_it(monkeypatch):
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
+    _, repo = _indexed_env_managed_embedder(
+        extra={"implementation": "tei", "api_key": "old-key", ENV_MANAGED_KEY: ENV_MANAGED_VALUE}
+    )
+    repo.swap_targets.add("indexed-model")
+    svc = _make_service(
+        repo,
+        settings=_sync_settings(model_name="new-model", provider="vllm", api_key="rotated-key"),
+    )
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    saved = repo._store[("indexed-model", "embedder")]
+    assert saved.extra["implementation"] == "tei"
+    assert saved.extra["api_key"] == "rotated-key"
+    assert any("running embedder swap" in warning for _, warning in warnings)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during_swap", [True, False])
+async def test_key_rotation_preserves_concurrent_max_model_len(monkeypatch, during_swap):
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
+    _, repo = _indexed_env_managed_embedder(
+        extra={
+            "implementation": "vllm",
+            "api_key": "old-key",
+            "max_model_len": 8192,
+            ENV_MANAGED_KEY: ENV_MANAGED_VALUE,
+        }
+    )
+    if during_swap:
+        repo.swap_targets.add("indexed-model")
+    original_update = repo.update
+    raced = False
+
+    async def update_with_changed_locked_limit(name, model_type, *, guard=None, extra_patch=None, **fields):
+        nonlocal raced
+        racing_update = fields.get("model_name") == "new-model" if during_swap else "model_name" not in fields
+        if not raced and racing_update and not (extra_patch and "api_key" in extra_patch):
+            current = repo._store[(name, model_type)]
+            repo._store[(name, model_type)] = current.model_copy(
+                update={"extra": {**current.extra, "max_model_len": 4096}}
+            )
+            raced = True
+        return await original_update(name, model_type, guard=guard, extra_patch=extra_patch, **fields)
+
+    repo.update = update_with_changed_locked_limit
+    svc = _make_service(repo, settings=_sync_settings(model_name="new-model", api_key="rotated-key"))
+
+    await _seed_capturing_warnings(svc)
+
+    saved = repo._store[("indexed-model", "embedder")]
+    assert raced
+    assert saved.extra["api_key"] == "rotated-key"
+    assert saved.extra["max_model_len"] == 4096
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured_api_key", ["EMPTY", "env-rotated-key"])
+async def test_indexed_retry_preserves_a_concurrent_api_key_rotation(monkeypatch, configured_api_key):
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
+    _, repo = _indexed_env_managed_embedder()
+    original_update = repo.update
+    raced = False
+
+    async def update_with_concurrent_key(name, model_type, *, guard=None, extra_patch=None, **fields):
+        nonlocal raced
+        # The initial model update is refused because indexed files use the
+        # saved model. Rotate the key just before the safe-field retry locks it.
+        if not raced and "model_name" not in fields and extra_patch and "api_key" not in extra_patch:
+            current = repo._store[(name, model_type)]
+            repo._store[(name, model_type)] = current.model_copy(
+                update={"extra": {**current.extra, "api_key": "admin-rotated-key"}}
+            )
+            raced = True
+        return await original_update(name, model_type, guard=guard, extra_patch=extra_patch, **fields)
+
+    repo.update = update_with_concurrent_key
+    svc = _make_service(
+        repo,
+        settings=_sync_settings(model_name="new-model", api_key=configured_api_key),
+    )
+
+    await _seed_capturing_warnings(svc)
+
+    saved = repo._store[("indexed-model", "embedder")]
+    assert raced
+    assert saved.model_name == "indexed-model"
+    assert saved.extra["api_key"] == "admin-rotated-key"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed_config", ["endpoint", "provider"])
+async def test_key_rotation_is_skipped_when_endpoint_or_provider_changes_after_seed(monkeypatch, changed_config):
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    row, repo = _indexed_env_managed_embedder()
+    repo._indexed_usage = []
+    if changed_config == "endpoint":
+        monkeypatch.setenv("EMBEDDER_ENDPOINT", "http://configured:8000/v1")
+        settings = _sync_settings(api_key="env-rotated-key")
+    else:
+        monkeypatch.setenv("EMBEDDER_PROVIDER", "tei")
+        settings = _sync_settings(provider="tei", api_key="env-rotated-key")
+    original_update = repo.update
+    raced = False
+
+    async def update_with_concurrent_vector_change(name, model_type, *, guard=None, extra_patch=None, **fields):
+        nonlocal raced
+        result = await original_update(name, model_type, guard=guard, extra_patch=extra_patch, **fields)
+        if not raced and not (extra_patch and "api_key" in extra_patch):
+            current = repo._store[(name, model_type)]
+            if changed_config == "endpoint":
+                repo._store[(name, model_type)] = current.model_copy(update={"endpoint": "http://admin:8000/v1"})
+            else:
+                repo._store[(name, model_type)] = current.model_copy(
+                    update={"extra": {**current.extra, "implementation": "vllm"}}
+                )
+            raced = True
+        return result
+
+    repo.update = update_with_concurrent_vector_change
+    warnings = await _seed_capturing_warnings(_make_service(repo, settings=settings))
+
+    current = repo._store[(row.name, "embedder")]
+    assert raced
+    assert current.extra["api_key"] == "old-key"
+    if changed_config == "endpoint":
+        assert current.endpoint == "http://admin:8000/v1"
+    else:
+        assert current.extra["implementation"] == "vllm"
+    assert any("configuration changed" in warning for _, warning in warnings)
+
+
+@pytest.mark.asyncio
+async def test_indexed_sync_retry_keeps_guard_against_concurrent_model_change(monkeypatch):
+    from core.utils.exceptions import ConflictError
+
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    _, repo = _indexed_env_managed_embedder()
+    original_update = repo.update
+    initial_refused = False
+
+    async def update_with_concurrent_model_change(name, model_type, *, guard=None, extra_patch=None, **fields):
+        nonlocal initial_refused
+        try:
+            return await original_update(name, model_type, guard=guard, extra_patch=extra_patch, **fields)
+        except ConflictError:
+            if not initial_refused and "endpoint" in fields:
+                current = repo._store[(name, model_type)]
+                repo._store[(name, model_type)] = current.model_copy(update={"model_name": "admin-model"})
+                initial_refused = True
+            raise
+
+    repo.update = update_with_concurrent_model_change
+    settings = _sync_settings(base_url="http://new-embedder:8000/v1", model_name="indexed-model")
+
+    await _seed_capturing_warnings(_make_service(repo, settings=settings))
+
+    assert initial_refused
+    assert repo._store[("indexed-model", "embedder")].model_name == "admin-model"
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_does_not_overwrite_concurrent_api_key_change(monkeypatch):
+    """A key rotation made after the seed snapshot wins over a stale env value."""
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
+    _, repo = _indexed_env_managed_embedder()
+    repo.swap_targets.add("indexed-model")
+    original_update = repo.update
+    raced = False
+
+    async def update_with_concurrent_key(name, model_type, *, guard=None, extra_patch=None, **fields):
+        nonlocal raced
+        if not raced and extra_patch == {"api_key": "env-rotated-key"}:
+            current = repo._store[(name, model_type)]
+            repo._store[(name, model_type)] = current.model_copy(
+                update={"extra": {**current.extra, "api_key": "admin-rotated-key"}}
+            )
+            raced = True
+        return await original_update(name, model_type, guard=guard, extra_patch=extra_patch, **fields)
+
+    repo.update = update_with_concurrent_key
+    svc = _make_service(repo, settings=_sync_settings(model_name="new-model", api_key="env-rotated-key"))
+
+    await _seed_capturing_warnings(svc)
+
+    synced = repo._store[("indexed-model", "embedder")]
+    assert raced
+    assert synced.extra["api_key"] == "admin-rotated-key"
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_preserves_concurrent_non_key_extra_edit(monkeypatch):
+    """A safe key rotation merges with a concurrent non-material admin edit."""
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("EMBEDDER_PROVIDER", raising=False)
+    _, repo = _indexed_env_managed_embedder(
+        extra={"api_key": "old-key", "max_model_len": 8192, ENV_MANAGED_KEY: ENV_MANAGED_VALUE}
+    )
+    repo.swap_targets.add("indexed-model")
+    original_update = repo.update
+    raced = False
+
+    async def update_with_concurrent_extra(name, model_type, *, guard=None, extra_patch=None, **fields):
+        nonlocal raced
+        if not raced and extra_patch == {"api_key": "env-rotated-key"}:
+            current = repo._store[(name, model_type)]
+            repo._store[(name, model_type)] = current.model_copy(
+                update={"extra": {**current.extra, "implementation": "vllm", "custom_kwarg": "admin-value"}}
+            )
+            raced = True
+        return await original_update(name, model_type, guard=guard, extra_patch=extra_patch, **fields)
+
+    repo.update = update_with_concurrent_extra
+    svc = _make_service(repo, settings=_sync_settings(model_name="new-model", api_key="env-rotated-key"))
+
+    await _seed_capturing_warnings(svc)
+
+    synced = repo._store[("indexed-model", "embedder")]
+    assert raced
+    assert synced.extra["api_key"] == "env-rotated-key"
+    assert synced.extra["max_model_len"] == 8192
+    assert synced.extra["implementation"] == "vllm"
+    assert synced.extra["custom_kwarg"] == "admin-value"
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_keeps_key_when_provider_changes_during_swap(monkeypatch):
+    """A key for a new provider must not be applied to the saved provider."""
+    monkeypatch.delenv("EMBEDDER_ENDPOINT", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    monkeypatch.setenv("EMBEDDER_PROVIDER", "tei")
+    _, repo = _indexed_env_managed_embedder()
+    repo.swap_targets.add("indexed-model")
+    svc = _make_service(repo, settings=_sync_settings(provider="tei", api_key="rotated-key"))
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    synced = repo._store[("indexed-model", "embedder")]
+    assert synced.extra["implementation"] == "vllm"
+    assert synced.extra["api_key"] == "old-key"
+    assert len(warnings) == 1
+    assert "running embedder swap" in warnings[0][1]
 
 
 @pytest.mark.asyncio
@@ -1221,6 +1537,7 @@ async def test_create_model_endpoint_inserts_and_returns_row():
     result = await svc.create_model_endpoint(row)
 
     assert result.name == "new-endpoint"
+    assert "max_model_len" not in result.extra
     assert any(c[0] == "create" for c in repo.calls)
 
 
@@ -1558,6 +1875,25 @@ async def test_update_refuses_a_material_embedder_edit_over_indexed_files(fields
 
 
 @pytest.mark.asyncio
+async def test_update_refuses_clearing_material_extra_over_indexed_files():
+    from core.config.root import Settings
+    from core.utils.exceptions import ConflictError
+
+    repo = _FakeEndpointRepo(
+        rows=[_make_row(name="jina", extra={"implementation": "ollama", "max_model_len": 512})],
+        indexed_usage=[{"partition": "docs", "file_count": 1}],
+    )
+    svc = _make_service(repo, settings=Settings(embedder={"max_model_len": 2047}))
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_model_endpoint("jina", "embedder", extra=None)
+
+    assert exc.value.code == "EMBEDDER_EDIT_AFFECTS_INDEXED_DATA"
+    assert "extra.implementation" in exc.value.message
+    assert "extra.max_model_len" in exc.value.message
+
+
+@pytest.mark.asyncio
 async def test_update_applies_a_material_embedder_edit_once_acknowledged():
     repo = _FakeEndpointRepo(rows=[_make_row(name="jina")], indexed_usage=[{"partition": "docs", "file_count": 31}])
     svc = _make_service(repo)
@@ -1669,6 +2005,18 @@ async def test_update_extra_without_api_key_preserves_existing_secret():
 
     updated = repo._store[("jina", "embedder")]
     assert updated.extra == {"implementation": "vllm", "temperature": 0.2, "api_key": "stored-key"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested_extra", [None, {}])
+async def test_update_null_or_empty_extra_preserves_existing_api_key(requested_extra):
+    existing = _make_row(name="mistral", model_type="llm", extra={"api_key": "stored-key"})
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+
+    await svc.update_model_endpoint("mistral", "llm", extra=requested_extra)
+
+    assert repo._store[("mistral", "llm")].extra == {"api_key": "stored-key"}
 
 
 @pytest.mark.asyncio
@@ -3128,3 +3476,25 @@ async def test_a_failed_field_drop_does_not_fail_the_committed_delete():
     store.drop_vector_field.assert_awaited_once_with("vector_e5")
     assert ("e5", "embedder") not in repo._store
     assert partition_service.load_partitions_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_switching_a_saved_null_window_to_inheritance_requires_acknowledgement():
+    from core.utils.exceptions import ConflictError
+
+    row = _make_row(name="jina", extra={"max_model_len": None})
+    repo = _FakeEndpointRepo(rows=[row], indexed_usage=[{"partition": "docs", "file_count": 1}])
+    service = _make_service(repo)
+
+    updated = await service.update_model_endpoint("jina", "embedder", timeout=45, extra={"max_model_len": None})
+    assert updated.timeout == 45
+    assert updated.extra == {"max_model_len": None}
+
+    with pytest.raises(ConflictError) as info:
+        await service.update_model_endpoint("jina", "embedder", extra={})
+
+    assert info.value.code == "EMBEDDER_EDIT_AFFECTS_INDEXED_DATA"
+    saved = await repo.get("jina", "embedder")
+    assert saved.extra == {"max_model_len": None}
+    updated = await service.update_model_endpoint("jina", "embedder", extra={}, acknowledge_indexed_data=True)
+    assert "max_model_len" not in updated.extra
