@@ -5,10 +5,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from services.workers.parsers.parser_dispatcher import (
     ParserDispatcher,
     build_caption_vlm,
+    lane_for,
 )
 
 
@@ -444,3 +446,22 @@ def test_configure_pymupdf_pool_pushes_the_loader_settings():
         )
     finally:
         pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings())
+
+
+@pytest.mark.parametrize(
+    ("filename", "mimetype", "pdf_loader", "strategy", "expected"),
+    [
+        ("report.pdf", None, "MarkerLoader", None, "gpu"),
+        ("report.pdf", None, "DoclingLoader", None, "gpu"),
+        ("report.pdf", None, "PyMuPDFLoader", "docling", "gpu"),
+        ("report.pdf", None, "MarkerLoader", "pymupdf", "cpu"),
+        ("report.pdf", None, "DotsOCRLoader", None, "cpu"),
+        ("report", "application/pdf", "OpenAILoader", "marker", "gpu"),
+        ("mail.eml", None, "DoclingLoader", "pymupdf", "gpu"),
+        ("mail.eml", None, "PyMuPDFLoader", "marker", "cpu"),
+        ("recording.mp3", None, "MarkerLoader", None, "cpu"),
+    ],
+)
+def test_lane_for_matches_parser_routing(filename, mimetype, pdf_loader, strategy, expected):
+    preset = IndexationPipelineConfig(parsing_strategy=strategy)
+    assert lane_for(filename, mimetype, preset, _config(pdf=pdf_loader)) == expected
