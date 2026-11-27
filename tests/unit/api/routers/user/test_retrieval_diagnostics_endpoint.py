@@ -25,13 +25,13 @@ def _deterministic_token_counter(monkeypatch):
 def _config(max_context_tokens=4096):
     models = SimpleNamespace(
         llm={},
-        llm_context_size=lambda _name: max_context_tokens,
+        llm_context_size=lambda name: max_context_tokens if name == "legal-model" else None,
         llm_output_tokens=lambda _name: 1,
     )
     return SimpleNamespace(
         models=models,
         partitions={},
-        llm_context=SimpleNamespace(max_llm_context_size=max_context_tokens, max_output_tokens=1),
+        llm_context=SimpleNamespace(max_llm_context_size=8192, max_output_tokens=1),
         rag=SimpleNamespace(max_contextualized_query_len=2),
     )
 
@@ -41,9 +41,15 @@ def _client(*, max_context_tokens=4096, user=None):
         def __init__(self):
             self.calls = []
             self.events = []
+            self.resolved = SimpleNamespace(endpoint_name="legal-model")
 
         async def refresh_partition_configs(self):
             self.events.append("refresh")
+
+        def resolve_chat_request(self, partitions):
+            assert partitions == ["legal"]
+            self.events.append("resolve")
+            return self.resolved
 
         async def diagnose_retrieval(self, **kwargs):
             self.events.append("diagnose")
@@ -87,7 +93,7 @@ def test_endpoint_refreshes_partition_configs_before_token_validation(monkeypatc
     )
 
     assert response.status_code == 200
-    assert service.events == ["refresh", "token_check", "diagnose"]
+    assert service.events == ["refresh", "resolve", "token_check", "diagnose"]
 
 
 def test_endpoint_runs_typed_retrieval_without_answer_generation():
@@ -119,6 +125,7 @@ def test_endpoint_runs_typed_retrieval_without_answer_generation():
             "disable_reranker": True,
             "disable_expansion": True,
             "request_id": "request-from-header",
+            "resolved_request": service.resolved,
         }
     ]
 

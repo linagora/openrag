@@ -627,7 +627,7 @@ class ServiceContainer:
                         embedder=self.embedder_factory(embedder_name),
                         document_repo=self.document_repo,
                         collection=settings.vectordb.collection_name,
-                        vector_field=lambda: _vector_field_for(embedder_name),
+                        vector_field=_vector_field_for(embedder_name),
                     ),
                     self.document_repo,
                 )
