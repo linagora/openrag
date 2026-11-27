@@ -28,8 +28,10 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     MetaData,
+    SmallInteger,
     String,
     Table,
+    Text,
     UniqueConstraint,
     func,
     text,
@@ -265,6 +267,8 @@ files = Table(
     Column("relationship_id", String, nullable=True, index=True),
     Column("parent_id", String, nullable=True, index=True),
     Column("content_sha256", String(64), nullable=True),
+    # A retry can recognize the catalog row committed by its own job.
+    Column("indexed_by_job", Text, nullable=True),
     Column("chunk_count", Integer, nullable=True),
     Column(
         "indexed_at",
@@ -387,6 +391,19 @@ jobs = Table(
     # This records the attempt whose settlement was confirmed before marking
     # an open stage as interrupted.
     Column("stage_interruption_confirmed_attempt", Integer, nullable=True),
+    # A null lane identifies a Ray job, including rows from before the queue.
+    Column("lane", Text),
+    Column("payload", JSONB),
+    Column("object_key", Text),
+    Column("attempt", Integer, server_default=text("0"), nullable=False),
+    Column("max_attempts", Integer, server_default=text("3"), nullable=False),
+    Column("lease_owner", Text),
+    Column("lease_expires_at", DateTime(timezone=True)),
+    Column("heartbeat_at", DateTime(timezone=True)),
+    Column("cancel_requested", Boolean, server_default=text("false"), nullable=False),
+    Column("available_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("priority", SmallInteger, server_default=text("0"), nullable=False),
+    Column("superseded_by", Text),
     Column("created_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
     # Queue wait is ``started_at - created_at`` and service time is
@@ -402,10 +419,23 @@ jobs = Table(
     # excludes the legacy CHUNKING/INSERTING states, which #721 removed from the
     # public state machine and which no write path can produce.
     CheckConstraint(_JOB_STATUS_CHECK, name="ck_jobs_status"),
+    CheckConstraint("lane IS NULL OR lane IN ('cpu', 'gpu', 'remote')", name="ck_jobs_lane"),
     # Queue views filter by status and order by recency.
     Index("ix_jobs_status_created_at", "status", "created_at"),
     # Per-user task listing, which filters on user_id and often on status too.
     Index("ix_jobs_user_status", "user_id", "status"),
+    Index(
+        "ix_jobs_queue_claim",
+        "lane",
+        text("priority DESC"),
+        "available_at",
+        postgresql_where=text("status = 'QUEUED'"),
+    ),
+    Index(
+        "ix_jobs_queue_running_user",
+        "user_id",
+        postgresql_where=text("status = 'SERIALIZING' AND lane IS NOT NULL"),
+    ),
     # Retention sweeps terminal rows by settle time, which is
     # ``COALESCE(completed_at, created_at)``: a row whose terminal write raced a
     # failure has no completed_at and ages out on created_at instead. The index

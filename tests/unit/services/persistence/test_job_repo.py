@@ -133,8 +133,8 @@ async def test_upsert_job_keeps_settled_states_and_bounds_the_error():
 
     query, params = pool.calls[0]
     # A settled row never reopens, mirroring the TaskStateManager guard.
-    assert "WHEN jobs.status = ANY($13::text[]) THEN jobs.status" in query
-    assert sorted(params[12]) == ["CANCELLED", "COMPLETED", "FAILED"]
+    assert "WHEN jobs.status = ANY($25::text[]) THEN jobs.status" in query
+    assert sorted(params[24]) == ["CANCELLED", "COMPLETED", "FAILED"]
     assert len(params[5]) == 8_000
 
 
@@ -184,7 +184,7 @@ async def test_upsert_job_freezes_the_outcome_fields_together_on_a_settled_row()
 
     query, _params = pool.calls[0]
     compact = " ".join(query.split())
-    settled = "jobs.status = ANY($13::text[])"
+    settled = "jobs.status = ANY($25::text[])"
     for field, frozen in (
         ("status", "jobs.status"),
         ("error", "jobs.error"),

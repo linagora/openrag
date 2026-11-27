@@ -162,7 +162,7 @@ class JobRepository(ABC):
 
     @abstractmethod
     async def fail_orphaned_jobs(self, *, active_ids: list[str], error: str, before: datetime) -> int:
-        """Fail unfinished records no live task owns, e.g. after a restart."""
+        """Fail unfinished Ray jobs no live actor task owns, e.g. after a restart."""
 
     @abstractmethod
     async def purge_terminal_jobs(self, *, older_than: datetime) -> int:
