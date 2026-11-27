@@ -809,7 +809,27 @@ class WorkerDispatcher(IndexingDispatcher):
 
         target_catalog_metadata = dict(catalog_metadata)
         target_catalog_metadata.update(public_metadata)
-        await self._upsert_entities(entities, protected_metadata=target_catalog_metadata)
+        try:
+            await self._upsert_entities(entities, protected_metadata=target_catalog_metadata)
+        except BaseException as error:
+            # A large file is written in several requests: those before a failed
+            # or cancelled one carry the new metadata while the catalog keeps the
+            # old, and a metadata filter would find part of the file. Its rows go
+            # back as they were read.
+            if isinstance(error, asyncio.CancelledError) and self._file_fences.enabled:
+                # Except when cancelled under a fence: that can be the fence's
+                # own stop, one round before its lease ends, and rows written
+                # back after it could land once a delete has taken the file,
+                # bringing its chunks back. Sending the change again completes it.
+                raise
+            try:
+                await self._upsert_entities(rows, protected_metadata=catalog_metadata)
+            except Exception as exc:
+                logger.bind(file_id=file_id, partition=partition).warning(
+                    "Could not restore the chunks of a failed metadata change; sending the change again completes it",
+                    error=str(exc),
+                )
+            raise
 
         await self._document_repo.update_file_metadata_in_db(file_id, partition, public_metadata)
 
@@ -950,7 +970,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 entity.pop("_id", None)
                 entity.update(public_metadata)
                 entity["indexed_at"] = indexed_at.isoformat()
-                # Marks this copy's chunks, so a refused catalog write removes exactly them.
+                # Marks this copy's chunks, so a copy that fails removes exactly them.
                 entity[INDEXING_TASK_ID_METADATA_KEY] = claim_token
                 entities.append(entity)
 
@@ -998,8 +1018,10 @@ class WorkerDispatcher(IndexingDispatcher):
                         raise target_exists(target_file_id, target_partition)
                     raise PartitionNotFoundError(f"Partition '{target_partition}' no longer exists.")
             except (Exception, asyncio.CancelledError):
-                # Also a copy stopped because its target fence was lost: the
-                # vectors it inserted, all marked with its token, go with it,
+                # A large file is inserted in several requests, so a failure or
+                # a cancel can come part way through them. Also a copy stopped
+                # because its target fence was lost: the vectors it inserted,
+                # all marked with its token, go with it,
                 # unless its catalog row committed after all (a failure at the
                 # commit itself), which must keep them. A refused insert is
                 # known not to have committed: no lookup can say otherwise.

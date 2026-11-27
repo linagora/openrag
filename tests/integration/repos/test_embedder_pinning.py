@@ -293,3 +293,55 @@ class TestEditRacingIndexing:
             await tx.commit()
 
         assert await asyncio.wait_for(reindex, timeout=5) is True
+
+
+class TestIndexedEmbedderUsage:
+    async def test_counts_files_left_in_an_embedder_field_after_partition_repoint(self, postgres_store: PostgresStore):
+        await _embedders(postgres_store, "source", "target", default="source")
+        target = await postgres_store.model_endpoint_repo.get("target", "embedder")
+        assert target is not None and target.vector_field is not None
+        await _partition(postgres_store, "docs", embedder="source")
+        await postgres_store.document_repo.add_file_to_partition(
+            file_id="leftover-target-vector",
+            partition="docs",
+            indexation_config={"embedder_vector_field": target.vector_field},
+        )
+
+        repo = postgres_store.model_endpoint_repo
+        assert await repo.indexed_file_usage("target", "embedder") == [{"partition": "docs", "file_count": 1}]
+        new_endpoint = "http://replacement:8000/v1"
+        with pytest.raises(ConflictError) as exc:
+            await repo.update("target", "embedder", endpoint=new_endpoint, guard=_edit_guard(endpoint=new_endpoint))
+        assert exc.value.code == "EMBEDDER_EDIT_AFFECTS_INDEXED_DATA"
+
+    async def test_counts_a_file_once_when_partition_and_vector_field_both_match(self, postgres_store: PostgresStore):
+        await _embedders(postgres_store, "source", "target", default="source")
+        target = await postgres_store.model_endpoint_repo.get("target", "embedder")
+        assert target is not None and target.vector_field is not None
+        await _partition(postgres_store, "docs", embedder="target")
+        await postgres_store.document_repo.add_file_to_partition(
+            file_id="target-vector-in-target-partition",
+            partition="docs",
+            indexation_config={"embedder_vector_field": target.vector_field},
+        )
+
+        async with postgres_store.pool.acquire() as conn:
+            index = await conn.fetchval("SELECT to_regclass('ix_files_embedder_vector_field')")
+
+        assert index == "ix_files_embedder_vector_field"
+        assert await postgres_store.model_endpoint_repo.indexed_file_usage("target", "embedder") == [
+            {"partition": "docs", "file_count": 1}
+        ]
+
+    async def test_acknowledged_clear_persists_an_empty_extra_object(self, postgres_store: PostgresStore):
+        await _embedders(postgres_store, "jina", default="jina")
+        await _partition(postgres_store, "docs", embedder="jina", files=1)
+        repo = postgres_store.model_endpoint_repo
+        await repo.update("jina", "embedder", extra={"max_model_len": 512})
+
+        with pytest.raises(ConflictError) as exc:
+            await repo.update("jina", "embedder", extra=None, guard=_edit_guard(extra=None))
+        assert exc.value.code == "EMBEDDER_EDIT_AFFECTS_INDEXED_DATA"
+
+        updated = await repo.update("jina", "embedder", extra=None)
+        assert updated is not None and updated.extra == {}

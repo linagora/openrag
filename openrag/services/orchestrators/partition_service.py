@@ -25,7 +25,7 @@ raised). The container supplies both from settings/the catalog store.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager, nullcontext
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
@@ -123,6 +123,26 @@ class PartitionService:
         self._task_state_manager_factory = task_state_manager_factory
         self._task_cancel_timeout = task_cancel_timeout
         self._partition_locks: dict[str, asyncio.Lock] = {}
+
+    @staticmethod
+    def lookup_cached_config(
+        configs: Mapping[str, PartitionConfig],
+        partition: str,
+    ) -> PartitionConfig | None:
+        """Look up a concrete partition in the caller's captured cache view."""
+        return configs.get(partition)
+
+    @classmethod
+    def require_cached_config(
+        cls,
+        configs: Mapping[str, PartitionConfig],
+        partition: str,
+    ) -> PartitionConfig:
+        """Return the cached configuration or report an unknown partition."""
+        config = cls.lookup_cached_config(configs, partition)
+        if config is None:
+            raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
+        return config
 
     # ------------------------------------------------------------------
     # Existence guards (mirror the legacy _check_* helpers, core exceptions)

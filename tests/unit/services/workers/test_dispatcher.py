@@ -6,7 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
-from core.utils.exceptions import DocumentNotFoundError, ServiceUnavailableError
+from core.utils.exceptions import DocumentNotFoundError, ServiceUnavailableError, VDBInsertError
 from ray.exceptions import ActorUnavailableError
 from services.workers.task_state import PENDING_TASK_DETAILS, SUBMITTED_TASK_WITHOUT_REF
 
@@ -3562,6 +3562,168 @@ async def test_a_copy_the_catalog_refuses_leaves_none_of_its_chunks() -> None:
     store.delete_by_filter.assert_awaited_once_with(
         {"partition": "b", "file_id": "copy-1", INDEXING_TASK_ID_METADATA_KEY: marker}
     )
+
+
+@pytest.mark.parametrize(
+    "interruption",
+    [
+        VDBInsertError("Milvus raw entity insert failed (batch 2 of 3)"),
+        # Not an Exception: a cleanup under ``except Exception`` would let it through.
+        asyncio.CancelledError(),
+    ],
+    ids=["refused", "cancelled"],
+)
+async def test_a_copy_whose_insert_stops_partway_leaves_none_of_its_chunks(interruption: BaseException) -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+    from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
+
+    # A large file is inserted in several requests; the ones before the failed one landed.
+    store = _vector_store()
+    store.insert_entities = AsyncMock(side_effect=interruption)
+    repo = _document_repo()
+    steps = MagicMock()
+    steps.attach_mock(store.delete_by_filter, "delete_by_filter")
+    steps.attach_mock(repo.release_content_sha256_claim, "release_content_sha256_claim")
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=store,
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(type(interruption)):
+        await dispatcher.copy_file(
+            "file-1", {"file_id": "copy-1", "partition": "b", "content_sha256": "abc123"}, "tenant-a", user=None
+        )
+
+    marker = store.insert_entities.await_args.args[0][0][INDEXING_TASK_ID_METADATA_KEY]
+    store.delete_by_filter.assert_awaited_once_with(
+        {"partition": "b", "file_id": "copy-1", INDEXING_TASK_ID_METADATA_KEY: marker}
+    )
+    repo.add_file_to_partition.assert_not_awaited()
+    # Removed before the claim goes: a retry admitted by the released claim
+    # finds none of this copy's chunks.
+    assert [name for name, _, _ in steps.mock_calls] == ["delete_by_filter", "release_content_sha256_claim"]
+
+
+@pytest.mark.parametrize(
+    "interruption",
+    [VDBInsertError("Milvus raw entity upsert failed (batch 2 of 2)"), asyncio.CancelledError()],
+    ids=["refused", "cancelled"],
+)
+async def test_a_metadata_change_stopped_after_its_first_batch_puts_the_rows_back(
+    interruption: BaseException,
+) -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    rows = [
+        {"_id": i, "text": f"t{i}", "vector": [0.1], "file_id": "file-1", "partition": "tenant-a", "title": "old"}
+        for i in range(4)
+    ]
+    milvus = {row["_id"]: dict(row) for row in rows}
+    writes = 0
+
+    async def upsert_entities(entities, collection="default", *, protected_metadata=None):
+        # The change's first batch lands, its second one fails.
+        nonlocal writes
+        writes += 1
+        for entity in entities if writes > 1 else entities[:2]:
+            milvus[entity["_id"]] = dict(entity)
+        if writes == 1:
+            raise interruption
+        return len(entities)
+
+    store = _vector_store()
+    store.query_chunks_by_filter = AsyncMock(return_value=[dict(row) for row in rows])
+    store.upsert_entities = AsyncMock(side_effect=upsert_entities)
+    repo = _document_repo()
+    catalog_metadata = repo.get_file_metadata.return_value
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=store,
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(type(interruption)):
+        await dispatcher.update_file_metadata("file-1", {"title": "new"}, "tenant-a", user={"id": 7})
+
+    # Every chunk agrees with the catalog again, which kept the old metadata.
+    assert [milvus[row["_id"]] for row in rows] == rows
+    assert store.upsert_entities.await_args.kwargs["protected_metadata"] == catalog_metadata
+    repo.update_file_metadata_in_db.assert_not_awaited()
+
+
+async def test_a_metadata_change_whose_restore_fails_still_raises_its_own_error() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    refused = VDBInsertError("Milvus raw entity upsert failed (batch 2 of 2)")
+    store = _vector_store()
+    store.upsert_entities = AsyncMock(side_effect=[refused, VDBInsertError("Milvus is down")])
+    repo = _document_repo()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=store,
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(VDBInsertError) as raised:
+        await dispatcher.update_file_metadata("file-1", {"title": "new"}, "tenant-a", user={"id": 7})
+
+    assert raised.value is refused
+    assert store.upsert_entities.await_count == 2
+    repo.update_file_metadata_in_db.assert_not_awaited()
+
+
+async def test_a_copy_cancelled_during_its_catalog_write_keeps_its_chunks() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    # The COMMIT may have landed before the cancellation reached the caller:
+    # deleting the chunks then would leave a registered file with none.
+    store = _vector_store()
+    repo = _document_repo()
+    source_record = repo.get_file_metadata.return_value
+    committed: dict[str, str] = {}
+
+    async def commit_then_cancel(**kwargs) -> None:
+        committed["indexed_at"] = kwargs["indexed_at"].isoformat()
+        raise asyncio.CancelledError()
+
+    async def read_metadata(file_id, _partition) -> dict | None:
+        if file_id == "copy-1":
+            return {"file_id": "copy-1", "indexed_at": committed["indexed_at"]} if committed else None
+        return source_record
+
+    repo.add_file_to_partition = AsyncMock(side_effect=commit_then_cancel)
+    repo.get_file_metadata = AsyncMock(side_effect=read_metadata)
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=store,
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await dispatcher.copy_file(
+            "file-1", {"file_id": "copy-1", "partition": "b", "content_sha256": "abc123"}, "tenant-a", user=None
+        )
+
+    store.insert_entities.assert_awaited_once()
+    store.delete_by_filter.assert_not_awaited()
+    repo.release_content_sha256_claim.assert_awaited_once()
 
 
 def _ref_failed_on_its_own_timeout() -> asyncio.Future[None]:
