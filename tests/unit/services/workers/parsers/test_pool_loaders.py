@@ -1,5 +1,6 @@
-"""The pooled loaders must create their Ray pool lazily via
-``get_or_create_actor`` rather than assuming bootstrap already created it.
+"""The pooled loaders, and the Ray conversions behind the PDF loaders, must
+create their Ray pool lazily via ``get_or_create_actor`` rather than assuming
+bootstrap already created it.
 
 Bootstrap no longer pre-warms any parser pool, and a per-preset
 ``parsing_strategy`` can select any backend at runtime (#569). A get-only
@@ -18,16 +19,16 @@ from core.models.document import Document, DocumentType
 _POOL_LOADERS = pytest.mark.parametrize(
     ("module_name", "loader_name", "pool_name", "pool_attr"),
     [
-        ("services.workers.parsers.docling_workers", "DoclingLoader", "DoclingPool", "DoclingPool"),
-        ("services.workers.parsers.marker_workers", "MarkerLoader", "MarkerPool", "MarkerPool"),
+        ("services.workers.parsers.docling_workers", "RayDoclingConversion", "DoclingPool", "DoclingPool"),
+        ("services.workers.parsers.marker_workers", "RayMarkerConversion", "MarkerPool", "MarkerPool"),
         ("services.workers.parsers.whisper_workers", "LocalWhisperLoader", "WhisperPool", "WhisperPool"),
     ],
 )
 
 # How each loader hands one file to its pool.
 _DISPATCH = {
-    "DoclingLoader": lambda loader: loader._dispatch("/tmp/doc.pdf"),
-    "MarkerLoader": lambda loader: loader._convert_pdf("/tmp/doc.pdf"),
+    "RayDoclingConversion": lambda conversion: conversion.convert("/tmp/doc.pdf"),
+    "RayMarkerConversion": lambda conversion: conversion.convert("/tmp/doc.pdf"),
     "LocalWhisperLoader": lambda loader: loader.parse(
         Document(filename="a.wav", content_type=DocumentType.AUDIO, raw_bytes=b"wav")
     ),

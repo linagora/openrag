@@ -220,14 +220,14 @@ class ParserDispatcher(DocumentParser):
         return _create("core.indexing.parsers.eml_parser", "eml", attachment_parsers=attachment_parsers)
 
     def _build_marker(self) -> DocumentParser:
-        from services.workers.parsers.marker_workers import MarkerLoader
+        from services.workers.parsers.marker_workers import MarkerLoader, RayMarkerConversion
 
-        return _create("core.indexing.parsers.pdf.marker", "marker", pool=MarkerLoader())
+        return _create("core.indexing.parsers.pdf.marker", "marker", pool=MarkerLoader(RayMarkerConversion()))
 
     def _build_docling(self) -> DocumentParser:
-        from services.workers.parsers.docling_workers import DoclingLoader
+        from services.workers.parsers.docling_workers import DoclingLoader, RayDoclingConversion
 
-        return _create("core.indexing.parsers.pdf.docling", "docling", pool=DoclingLoader())
+        return _create("core.indexing.parsers.pdf.docling", "docling", pool=DoclingLoader(RayDoclingConversion()))
 
     def _build_local_whisper(self) -> DocumentParser:
         from services.workers.parsers.whisper_workers import LocalWhisperLoader

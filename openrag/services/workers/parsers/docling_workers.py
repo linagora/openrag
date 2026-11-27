@@ -60,6 +60,7 @@ from docling_core.types.doc.document import (
 from pydantic import PrivateAttr
 
 from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
+from .pdf_conversion import DoclingConversion
 
 logger = get_logger()
 
@@ -389,17 +390,8 @@ class DoclingPool:
         )
 
 
-class DoclingLoader(BasePooledParser):
-    """``BasePooledParser`` facade over the Docling Ray pool.
-
-    Materialises ``Document.raw_bytes`` to a temporary file, dispatches to the
-    named ``DoclingPool`` actor, and converts the ``ConversionResult`` into a
-    ``ProcessedDocument`` with one ``TextBlock`` per page and one ``ImageBlock``
-    per picture.  Image captioning is left to the downstream caption stage:
-    each picture is printed in its page's text as the ref of its block, and
-    each block keeps its picture's page (``prov[0].page_no``), so the stage can
-    land every caption where the figure was.
-    """
+class RayDoclingConversion:
+    """``DoclingConversion`` through the named ``DoclingPool`` Ray actor."""
 
     def __init__(self) -> None:
         self.config = load_config()
@@ -407,7 +399,7 @@ class DoclingLoader(BasePooledParser):
     def _pool(self) -> DoclingPool:
         """Look up the named ``DoclingPool`` actor; call once per dispatch.
 
-        Never cached: this loader lives as long as its indexer worker, and
+        Never cached: this conversion lives as long as its indexer worker, and
         ``POST /actors/DoclingPool/restart`` replaces the pool with a new actor,
         so a cached handle would keep dispatching to the killed one. Store the
         result before calling a method on it: Ray's ``ActorMethod`` holds its
@@ -420,6 +412,30 @@ class DoclingLoader(BasePooledParser):
         from services.workers.bootstrap import get_or_create_actor
 
         return get_or_create_actor("DoclingPool", DoclingPool, lifetime="detached")
+
+    async def convert(self, file_path: str) -> ConversionResult:
+        pool = self._pool()
+        return await call_ray_actor_with_timeout(
+            pool.process_pdf.remote(file_path),
+            timeout=self.config.loader.docling_timeout,
+            task_description=f"DoclingLoader PDF loading ({file_path})",
+        )
+
+
+class DoclingLoader(BasePooledParser):
+    """``BasePooledParser`` facade over a Docling conversion.
+
+    Materialises ``Document.raw_bytes`` to a temporary file, hands it to its
+    ``DoclingConversion`` (the Ray pool: ``RayDoclingConversion``), and converts
+    the ``ConversionResult`` into a ``ProcessedDocument`` with one ``TextBlock``
+    per page and one ``ImageBlock`` per picture.  Image captioning is left to the downstream caption stage:
+    each picture is printed in its page's text as the ref of its block, and
+    each block keeps its picture's page (``prov[0].page_no``), so the stage can
+    land every caption where the figure was.
+    """
+
+    def __init__(self, conversion: DoclingConversion) -> None:
+        self._conversion = conversion
 
     def supported_types(self) -> list[str]:
         return [DocumentType.PDF.value]
@@ -512,12 +528,7 @@ class DoclingLoader(BasePooledParser):
         )
 
     async def _dispatch(self, file_path: str) -> ConversionResult:
-        pool = self._pool()
-        return await call_ray_actor_with_timeout(
-            pool.process_pdf.remote(file_path),
-            timeout=self.config.loader.docling_timeout,
-            task_description=f"DoclingLoader PDF loading ({file_path})",
-        )
+        return await self._conversion.convert(file_path)
 
     @staticmethod
     def _build_text_blocks(
@@ -569,4 +580,4 @@ class DoclingLoader(BasePooledParser):
         return blocks
 
 
-__all__ = ["DoclingLoader", "DoclingPool", "DoclingWorker"]
+__all__ = ["DoclingLoader", "DoclingPool", "DoclingWorker", "RayDoclingConversion"]

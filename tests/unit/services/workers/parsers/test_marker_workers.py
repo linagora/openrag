@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 from core.utils import process_limits
-from services.workers.parsers import marker_workers
+from services.workers.parsers import marker_runtime, marker_workers
 
 
 def _config(marker_num_gpus: float = 0.25):
@@ -82,7 +82,7 @@ class _NullLogger:
 @pytest.fixture(autouse=True)
 def _kill_fakes_by_pid(monkeypatch):
     """_force_kill_executor kills by pid; route that to the fake with the pid."""
-    real_kill = marker_workers.kill_process_group
+    real_kill = marker_runtime.kill_process_group
 
     def kill(pid: int) -> None:
         if pid in _fake_procs:
@@ -90,7 +90,7 @@ def _kill_fakes_by_pid(monkeypatch):
         else:
             real_kill(pid)
 
-    monkeypatch.setattr(marker_workers, "kill_process_group", kill)
+    monkeypatch.setattr(marker_runtime, "kill_process_group", kill)
 
 
 def test_force_kill_executor_kills_every_worker_then_shuts_down():
@@ -128,7 +128,7 @@ def test_force_kill_executor_treats_a_crashed_child_as_gone(monkeypatch):
     """A broken pool keeps its crashed child after reaping it, so its pid is
     free: killing it as a live child could hit an unrelated process."""
     killed: list[int] = []
-    monkeypatch.setattr(marker_workers, "kill_process_group", killed.append)
+    monkeypatch.setattr(marker_runtime, "kill_process_group", killed.append)
     executor = concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("fork"))
     with pytest.raises(concurrent.futures.process.BrokenProcessPool):
         executor.submit(os._exit, 9).result(timeout=60)
@@ -1045,7 +1045,7 @@ def test_a_ceiling_failure_reaches_the_parent_as_memory_error(monkeypatch, conve
     recycle nor ``no_retry`` fires. From ``MemoryError`` onwards, the Ray wrapping
     is pinned by ``_as_production_raises_it``.
     """
-    monkeypatch.setattr(marker_workers, "PdfConverter", converter)  # inherited by the fork
+    monkeypatch.setattr(marker_runtime, "PdfConverter", converter)  # inherited by the fork
     # On a GPU host the forked child cannot touch CUDA, so the cleanup in
     # _process_pdf's `finally` would raise and replace the MemoryError.
     # Production starts these children with spawn, where that doesn't happen.
@@ -1122,8 +1122,8 @@ def test_worker_init_logs_before_it_applies_the_limit(monkeypatch):
     from services.workers.parsers import marker_workers as mw
 
     order = []
-    monkeypatch.setattr(mw, "logger", SimpleNamespace(debug=lambda *a, **k: order.append("log")))
-    monkeypatch.setattr(mw, "_apply_parse_memory_limit", lambda _mb: order.append("limit"))
+    monkeypatch.setattr(marker_runtime, "logger", SimpleNamespace(debug=lambda *a, **k: order.append("log")))
+    monkeypatch.setattr(marker_runtime, "_apply_parse_memory_limit", lambda _mb: order.append("limit"))
 
     mw.MarkerWorker._worker_init({}, 2048)
 
@@ -1172,9 +1172,13 @@ def _loader_raising(monkeypatch, exc: BaseException, limit_mb: int):
         raise exc
 
     monkeypatch.setattr(marker_workers, "call_ray_actor_with_timeout", fake_call)
+    config = SimpleNamespace(loader=SimpleNamespace(marker_timeout=60, marker_parse_memory_limit_mb=limit_mb))
+    conversion = marker_workers.RayMarkerConversion.__new__(marker_workers.RayMarkerConversion)
+    conversion.config = config
+    conversion._pool = lambda: SimpleNamespace(process_pdf=SimpleNamespace(remote=lambda path: None))
     loader = marker_workers.MarkerLoader.__new__(marker_workers.MarkerLoader)
-    loader.config = SimpleNamespace(loader=SimpleNamespace(marker_timeout=60, marker_parse_memory_limit_mb=limit_mb))
-    loader._pool = lambda: SimpleNamespace(process_pdf=SimpleNamespace(remote=lambda path: None))
+    loader.config = config
+    loader._conversion = conversion
     return loader
 
 
