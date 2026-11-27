@@ -581,7 +581,9 @@ async def test_a_delete_still_waiting_at_the_timeout_names_the_holder() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_delete_that_must_not_take_over_indexing_is_refused_instead() -> None:
+async def test_a_delete_that_must_not_take_over_indexing_is_refused_instead(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: list[dict] = []
+    monkeypatch.setattr(module, "record_file_fence_conflict", lambda **labels: recorded.append(labels))
     repo = _Fences()
     repo.hold(FileFenceKind.INDEX, "task-1")
 
@@ -594,6 +596,7 @@ async def test_a_delete_that_must_not_take_over_indexing_is_refused_instead() ->
     assert repo.fences[(PARTITION, FILE_ID)].holder_id == "task-1"
     # Nor through a job that already reads as finished: its worker may still write.
     assert repo.took_over_finished_task is False
+    assert recorded == [{"file_operation": "delete", "holder_kind": "index"}]
 
 
 # ── Metrics ──────────────────────────────────────────────────────────

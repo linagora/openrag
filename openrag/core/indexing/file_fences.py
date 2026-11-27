@@ -172,7 +172,7 @@ class FileFences:
             if fence.holder_id == holder_id:
                 return
             if fence.kind is FileFenceKind.INDEX and not take_over_indexing:
-                raise busy(fence)
+                raise self._refused(fence, "delete")
             if fence.kind is FileFenceKind.INDEX:
                 if await self._repo.take_over(
                     partition=partition,

@@ -383,8 +383,6 @@ LLM_TOKENS_TOTAL = MetricSpec(
 )
 
 
-#: Every spec declared above. The cardinality test walks this; the backends
-#: instantiate from it. A metric that is not here is not covered by either.
 #: Each refusal of an operation because another one held the file (#1430).
 #: Recorded where the refusal is decided, in the API process; with
 #: ``FILE_FENCES=ray`` nothing is recorded.
@@ -405,9 +403,10 @@ FILE_FENCE_COMMITS_REFUSED_TOTAL = MetricSpec(
     labels=(),
 )
 
-#: A renewal that failed on a database error and will be retried. The lease
-#: outlasts three missed rounds, so a burst is harmless; a sustained rate means
-#: fences are about to lapse.
+#: A renewal that failed: a database error, retried at the next round, or a
+#: renewal that failed or didn't answer on the last round before the lease ends,
+#: which stops the operation. The lease outlasts three missed rounds, so a burst
+#: is harmless; a sustained rate means fences are about to lapse.
 FILE_FENCE_RENEWAL_FAILURES_TOTAL = MetricSpec(
     name="openrag_file_fence_renewal_failures_total",
     description="File fence renewals that failed, retried or ending the operation, by the kind of holder",
@@ -416,6 +415,8 @@ FILE_FENCE_RENEWAL_FAILURES_TOTAL = MetricSpec(
 )
 
 
+#: Every spec declared above. The cardinality test walks this; the backends
+#: instantiate from it. A metric that is not here is not covered by either.
 ALL_SPECS: tuple[MetricSpec, ...] = (
     CIRCUIT_BREAKER_STATE,
     INGEST_DOCUMENTS_TOTAL,
