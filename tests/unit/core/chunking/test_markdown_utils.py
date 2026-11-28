@@ -371,6 +371,92 @@ class TestChunkTable:
         assert "first" not in second_chunk
         assert "second" not in second_chunk
 
+    def test_overlap_row_does_not_push_a_piece_past_chunk_size(self):
+        """One row fits the budget and two do not. The replayed row was added
+        to the new piece without being counted, so every piece after the first
+        held two rows and left over ``chunk_size``."""
+        header = "| Requirement | Description |\n|---|---|"
+        rows = [f"| REQ-{i} | {' '.join([f'word{i}'] * 30)} |" for i in range(1, 6)]
+        table = "\n".join([header, *rows])
+
+        def length(text: str) -> int:
+            return len(text.split())
+
+        chunk_size = length(header) + length(rows[0]) + 10
+        chunks = chunk_table(
+            MDElement(type="table", content=table, page_number=1), chunk_size=chunk_size, length_function=length
+        )
+
+        assert len(chunks) == 5
+        assert all(length(chunk.content) <= chunk_size for chunk in chunks)
+        # Nothing is lost by leaving the overlap out: each row is in one piece.
+        for i in range(1, 6):
+            assert [f"REQ-{i} " in chunk.content for chunk in chunks].count(True) == 1
+
+    def test_overlap_row_is_replayed_only_beside_a_group_it_fits_with(self):
+        """A short row that opens a piece still gets the previous row replayed
+        above it. A row that fills the piece by itself gets none."""
+        header = "| Requirement | Description |\n|---|---|"
+        short = [f"| REQ-{i} | {' '.join([f'short{i}'] * 8)} |" for i in range(1, 6)]
+        long = f"| REQ-6 | {' '.join(['long'] * 30)} |"
+        table = "\n".join([header, *short, long])
+
+        def length(text: str) -> int:
+            return len(text.split())
+
+        # Room for three short rows, or for the long one alone.
+        chunk_size = length(header) + length(long) + 6
+        chunks = chunk_table(
+            MDElement(type="table", content=table, page_number=1), chunk_size=chunk_size, length_function=length
+        )
+
+        assert [[i for i in range(1, 7) if f"REQ-{i} " in chunk.content] for chunk in chunks] == [
+            [1, 2, 3],
+            [3, 4, 5],  # REQ-3 is the overlap
+            [6],  # REQ-5 would not fit beside it
+        ]
+        assert all(length(chunk.content) <= chunk_size for chunk in chunks)
+
+    def test_line_breaks_between_rows_count_against_a_character_budget(self):
+        """With ``len``, the header, the replayed row and the new row fitted by
+        their sum and made a chunk two characters over: the line breaks that
+        join them were not counted. Every budget around that boundary is tried."""
+        # The delimiter row as chunk_table writes it, so that the sizes below are those of the chunks.
+        header = "| k | v |\n| --- | --- |"
+        rows = [f"| r{i} | {'x' * 20} |" for i in range(1, 5)]
+        table = "\n".join([header, *rows])
+
+        for chunk_size in range(len(header) + len(rows[0]) + 1, len(header) + 3 * len(rows[0]) + 4):
+            chunks = chunk_table(
+                MDElement(type="table", content=table, page_number=1), chunk_size=chunk_size, length_function=len
+            )
+
+            assert all(len(chunk.content) <= chunk_size for chunk in chunks), chunk_size
+            # Every row is still there, and the table reads in order.
+            for row in rows:
+                assert any(row in chunk.content for chunk in chunks), chunk_size
+
+    def test_overlap_row_is_replayed_when_it_fits_with_its_line_breaks(self):
+        """Exactly at the size of the header, the replayed row and the new row
+        with their two line breaks, the overlap is kept; one character under, it
+        is left out."""
+        # The delimiter row as chunk_table writes it, so that the sizes below are those of the chunks.
+        header = "| k | v |\n| --- | --- |"
+        rows = [f"| r{i} | {'x' * 20} |" for i in range(1, 4)]
+        table = "\n".join([header, *rows])
+        exact = len("\n".join([header, rows[0], rows[1]]))
+
+        def second_chunk(chunk_size: int) -> str:
+            chunks = chunk_table(
+                MDElement(type="table", content=table, page_number=1), chunk_size=chunk_size, length_function=len
+            )
+            return chunks[1].content
+
+        # Room for two rows: the first chunk holds r1 and r2, the second replays r2 above r3.
+        assert second_chunk(exact) == "\n".join([header, rows[1], rows[2]])
+        # One character short of two rows: one row a chunk, and no room to replay.
+        assert second_chunk(exact - 1) == "\n".join([header, rows[1]])
+
     def test_csv_rows_are_packed_whole_with_a_header_in_every_chunk(self):
         table = (
             "| id | name | note |\n"
