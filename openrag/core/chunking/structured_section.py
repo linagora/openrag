@@ -209,6 +209,10 @@ class _Unit:
     atomic: bool = False  # table / image — never merged into prose, never split by us
     metadata: dict[str, Any] = field(default_factory=dict)
     caption: str = ""  # leads ``text``; repeated on every piece of a split table
+    #: What stands between this unit and the one it is merged into: a blank
+    #: line between two paragraphs, a line break for a piece cut out of a code
+    #: listing, whose lines would otherwise come back with a blank line added.
+    joiner: str = "\n\n"
 
     @property
     def start_page(self) -> int | None:
@@ -731,7 +735,7 @@ class StructuredSectionChunker(BaseChunker):
             if cur is None:
                 cur = _copy_unit(unit)
             elif cur.heading_path == unit.heading_path and self.length_function(
-                strip_keeping_first_indent(f"{cur.text}\n\n{unit.text}")
+                _merged_text(cur, unit)
             ) <= self._packing_budget(filename, cur.heading_path, cur.pages | unit.pages):
                 _absorb(cur, unit, self.length_function)
             else:
@@ -894,17 +898,18 @@ class StructuredSectionChunker(BaseChunker):
         fences = CodeFenceTracker()
         units: list[_Unit] = []
         for piece, pages in zip(pieces, page_sets, strict=True):
-            text = strip_keeping_first_indent(piece) if fences.in_fence else piece.strip()
+            in_listing = fences.in_fence
             for line in piece.split("\n"):
                 fences.feed(line)
             units.append(
                 _Unit(
                     heading_path=list(unit.heading_path),
-                    text=text,
+                    text=strip_keeping_first_indent(piece) if in_listing else piece.strip(),
                     tokens=self.length_function(piece),
                     pages=pages,
                     chunk_type=chunk_type,
                     atomic=unit.atomic,
+                    joiner="\n" if in_listing else "\n\n",
                 )
             )
         return units
@@ -984,7 +989,7 @@ class StructuredSectionChunker(BaseChunker):
         # this strategy exists to remove, arriving through the merge pass.
         if _is_headings_only(unit, self._is_heading_line):
             return False
-        if self.length_function(strip_keeping_first_indent(f"{prev.text}\n\n{unit.text}")) > self._effective_max(
+        if self.length_function(_merged_text(prev, unit)) > self._effective_max(
             filename, merged_path, prev.pages | unit.pages
         ):
             return False
@@ -1134,11 +1139,17 @@ def _copy_unit(unit: _Unit) -> _Unit:
         chunk_type=unit.chunk_type,
         atomic=unit.atomic,
         metadata=dict(unit.metadata),
+        joiner=unit.joiner,
     )
 
 
+def _merged_text(prev: _Unit, unit: _Unit) -> str:
+    """The text of ``unit`` merged into ``prev``, as ``_absorb`` writes it."""
+    return strip_keeping_first_indent(f"{prev.text}{unit.joiner}{unit.text}")
+
+
 def _absorb(cur: _Unit, unit: _Unit, length_function: Callable[[str], int], *, path: list[str] | None = None) -> None:
-    cur.text = strip_keeping_first_indent(f"{cur.text}\n\n{unit.text}")
+    cur.text = _merged_text(cur, unit)
     cur.tokens = length_function(cur.text)
     cur.pages |= unit.pages
     if unit.chunk_type is not ChunkType.TEXT and cur.chunk_type is ChunkType.TEXT:

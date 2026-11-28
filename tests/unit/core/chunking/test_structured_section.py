@@ -1207,3 +1207,19 @@ def test_prose_piece_is_still_stripped():
 
     assert len(chunks) > 1
     assert all(chunk.content == chunk.content.strip() for chunk in chunks)
+
+
+def test_listing_pieces_merged_back_get_no_blank_line():
+    """The short last piece of a cut listing is merged into the piece before
+    it. Joined like two paragraphs, they came back with a blank line that the
+    listing does not have."""
+    lines = [f"    key{i}: value{i}" for i in range(297)]
+    listing = "```yaml\nservices:\n" + "\n".join(lines) + "\n```"
+    chunker = _chunker(chunk_size=200)
+
+    chunks = chunker.chunk(_doc(f"# Guide\n\n{listing}\n"))
+
+    assert len(chunks) > 1
+    # Put end to end, the chunks are the listing, line for line.
+    emitted = "\n".join(chunk.content for chunk in chunks)
+    assert emitted[emitted.index("```yaml") :] == listing
