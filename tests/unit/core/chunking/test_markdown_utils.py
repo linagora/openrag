@@ -417,6 +417,46 @@ class TestChunkTable:
         ]
         assert all(length(chunk.content) <= chunk_size for chunk in chunks)
 
+    def test_line_breaks_between_rows_count_against_a_character_budget(self):
+        """With ``len``, the header, the replayed row and the new row fitted by
+        their sum and made a chunk two characters over: the line breaks that
+        join them were not counted. Every budget around that boundary is tried."""
+        # The delimiter row as chunk_table writes it, so that the sizes below are those of the chunks.
+        header = "| k | v |\n| --- | --- |"
+        rows = [f"| r{i} | {'x' * 20} |" for i in range(1, 5)]
+        table = "\n".join([header, *rows])
+
+        for chunk_size in range(len(header) + len(rows[0]) + 1, len(header) + 3 * len(rows[0]) + 4):
+            chunks = chunk_table(
+                MDElement(type="table", content=table, page_number=1), chunk_size=chunk_size, length_function=len
+            )
+
+            assert all(len(chunk.content) <= chunk_size for chunk in chunks), chunk_size
+            # Every row is still there, and the table reads in order.
+            for row in rows:
+                assert any(row in chunk.content for chunk in chunks), chunk_size
+
+    def test_overlap_row_is_replayed_when_it_fits_with_its_line_breaks(self):
+        """Exactly at the size of the header, the replayed row and the new row
+        with their two line breaks, the overlap is kept; one character under, it
+        is left out."""
+        # The delimiter row as chunk_table writes it, so that the sizes below are those of the chunks.
+        header = "| k | v |\n| --- | --- |"
+        rows = [f"| r{i} | {'x' * 20} |" for i in range(1, 4)]
+        table = "\n".join([header, *rows])
+        exact = len("\n".join([header, rows[0], rows[1]]))
+
+        def second_chunk(chunk_size: int) -> str:
+            chunks = chunk_table(
+                MDElement(type="table", content=table, page_number=1), chunk_size=chunk_size, length_function=len
+            )
+            return chunks[1].content
+
+        # Room for two rows: the first chunk holds r1 and r2, the second replays r2 above r3.
+        assert second_chunk(exact) == "\n".join([header, rows[1], rows[2]])
+        # One character short of two rows: one row a chunk, and no room to replay.
+        assert second_chunk(exact - 1) == "\n".join([header, rows[1]])
+
     def test_csv_rows_are_packed_whole_with_a_header_in_every_chunk(self):
         table = (
             "| id | name | note |\n"

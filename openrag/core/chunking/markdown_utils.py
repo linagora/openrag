@@ -336,10 +336,21 @@ def chunk_table(
     body_size = 0
     prev_last_row: str | None = None
 
+    def fits(*rows: str) -> bool:
+        """Whether the header and *rows*, written as the chunk writes them, fit
+        ``chunk_size``. The sum of the parts leaves out the line breaks that
+        join them, which a character count charges for: two rows that fitted
+        by their sum made a chunk two characters over."""
+        if length_function is len:
+            return len(header_text) + sum(len(row) + 1 for row in rows) <= chunk_size
+        return length_function("\n".join([header_text, *rows])) <= chunk_size
+
     for group_txt, g_ntoks in zip(group_texts, groups_ntoks, strict=True):
         # Only flush when we actually have body content to flush — otherwise an
-        # oversized first group would emit a header-only chunk.
-        if body_rows and header_ntoks + body_size + g_ntoks > chunk_size:
+        # oversized first group would emit a header-only chunk. The sum is a
+        # lower bound of the written size: past it the group cannot fit, and
+        # under it the written chunk is measured.
+        if body_rows and (header_ntoks + body_size + g_ntoks > chunk_size or not fits(*body_rows, group_txt)):
             subtables.append("\n".join([header_text, *body_rows]))
             body_rows = []
             body_size = 0
@@ -350,11 +361,9 @@ def chunk_table(
             # row replayed beside a group it does not fit with left the chunk
             # over ``chunk_size`` although each of its rows fitted, and what an
             # embedder then truncates is the chunk's tail, the new rows.
-            if prev_last_row:
-                overlap_ntoks = length_function(prev_last_row)
-                if header_ntoks + overlap_ntoks + g_ntoks <= chunk_size:
-                    body_rows.append(prev_last_row)
-                    body_size += overlap_ntoks
+            if prev_last_row and fits(prev_last_row, group_txt):
+                body_rows.append(prev_last_row)
+                body_size += length_function(prev_last_row)
         body_rows.append(group_txt)
         body_size += g_ntoks
         # The "last row" is the trailing line of this group, not the whole group.
