@@ -207,39 +207,46 @@ def _captionable_count(images: list[ImageBlock]) -> int:
     return sum(1 for image in images if image.image_bytes)
 
 
-async def _encode_deferred_images(images: list[ImageBlock]) -> None:
+async def _encode_deferred_images(images: list[ImageBlock]) -> set[int]:
     """PNG-encode the images a parser handed over decoded, off the event loop.
 
     A figure-heavy PDF takes seconds to minutes of CPU to encode. It is paid
     here, not at parse, so a document that is never captioned never pays it.
     A cancel cannot interrupt the thread; the event tells it to stop.
+    Returns the indexes of images whose encoding failed.
     """
     if all(image.pil_image is None for image in images):
-        return
+        return set()
+
     cancelled = threading.Event()
     try:
-        await asyncio.to_thread(_encode_in_place, images, cancelled)
+        return await asyncio.to_thread(_encode_in_place, images, cancelled)
     except asyncio.CancelledError:
         cancelled.set()
         raise
 
 
-def _encode_in_place(images: list[ImageBlock], cancelled: threading.Event) -> None:
-    for image in images:
+def _encode_in_place(images: list[ImageBlock], cancelled: threading.Event) -> set[int]:
+    failed_images: set[int] = set()
+
+    for index, image in enumerate(images):
         if cancelled.is_set():
-            return
+            return failed_images
         # Dropped as it is encoded, so the decoded figures and their PNGs are
         # never all held at once.
         pil_image, image.pil_image = image.pil_image, None
+
         if pil_image is None or image.image_bytes:
             continue
         try:
             image.image_bytes = pil_to_png_bytes(pil_image)
-        except Exception as exc:  # noqa: BLE001 - one unreadable figure must not cost the others their captions
-            # Left without bytes, it is skipped like a remote image: uncaptioned,
-            # its ref kept in the text.
+        except Exception as exc:  # noqa: BLE001
+            failed_images.add(index)
+
             ref = image.metadata.get("markdown_ref") or "without a ref"
             logger.warning(f"Failed to encode image {ref}: {exc}")
+
+    return failed_images
 
 
 async def _caption_document(
@@ -267,7 +274,7 @@ async def _caption_document(
     images = processed_document.images
     if not images:
         return processed_document
-    await _encode_deferred_images(images)
+    failed_encoding = await _encode_deferred_images(images)
 
     # Per-document fan-out bound. One task per image is created either way, but
     # only this many contend for the shared VLM gate at a time. Without it a
@@ -279,10 +286,15 @@ async def _caption_document(
         asyncio.Semaphore(max_concurrency) if max_concurrency is not None and max_concurrency > 0 else nullcontext()
     )
 
-    async def caption_one(image: ImageBlock) -> str | None:
+    async def caption_one(index: int, image: ImageBlock) -> str | None:
+        if image.source_url:
+            # Remote markdown images are never fetched.
+            return None
         if not image.image_bytes:
-            # A remote markdown image (only ``source_url``) is never fetched:
-            # it stays uncaptioned and its link stays in the text (#1294).
+            # Encoding failures have already been logged.
+            if index not in failed_encoding:
+                ref = image.metadata.get("markdown_ref") or "without a ref"
+                logger.warning(f"Image {ref} has no bytes; skipping captioning")
             return None
         # Bound the fan-out cluster-wide so every indexer actor shares one VLM budget.
         async with limiter, get_vlm_semaphore():
@@ -292,7 +304,7 @@ async def _caption_document(
     # timeout), so nothing keeps holding the shared VLM semaphore afterwards.
     label = processed_document.metadata.get("filename") or processed_document.document_id
     results = await gather_with_progress(
-        *(caption_one(image) for image in images),
+        *(caption_one(index, image) for index, image in enumerate(images)),
         desc=f"Captioning images of *{label}*",
         return_exceptions=True,
     )
