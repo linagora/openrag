@@ -80,8 +80,47 @@ def decode_bytes(raw: bytes, encoding: str | None = None) -> str:
         return raw.decode(DEFAULT_FALLBACK_ENCODING, errors="replace")
 
 
-# A ``` / ~~~ fenced-code-block delimiter line (open or close).
-_CODE_FENCE_LINE_RE = re.compile(r"^\s*(?:```|~~~)")
+# A line that may open or close a fenced code block: its run of ` or ~, then the rest.
+_CODE_FENCE_LINE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+
+
+class CodeFenceTracker:
+    """Tells, line by line, what is inside a fenced code block.
+
+    A fence closes as CommonMark closes it: on a line of the character that
+    opened it, at least as long as the opening run, with nothing after it. A
+    shorter run, or the other character, is a line of the listing, so a
+    four-backtick block that shows a three-backtick block stays one block. A
+    fence left open runs to the end of the text.
+    """
+
+    def __init__(self) -> None:
+        self._opening: str | None = None
+
+    @property
+    def in_fence(self) -> bool:
+        return self._opening is not None
+
+    def feed(self, line: str) -> str:
+        """``"fence"`` for a line that opens or closes a block, ``"code"`` for
+        a line inside one, ``"text"`` for any other."""
+        marker = _CODE_FENCE_LINE_RE.match(line)
+        if self._opening is None:
+            # The info string of a backtick fence holds no backtick: ```x``` is inline code.
+            if marker is None or (marker[1][0] == "`" and "`" in marker[2]):
+                return "text"
+            self._opening = marker[1]
+            return "fence"
+        closes = (
+            marker is not None
+            and marker[1][0] == self._opening[0]
+            and len(marker[1]) >= len(self._opening)
+            and not marker[2].strip()
+        )
+        if not closes:
+            return "code"
+        self._opening = None
+        return "fence"
 
 
 def _normalize_whitespace(text: str, keep_code_indentation: bool) -> str:
@@ -97,15 +136,12 @@ def _normalize_whitespace(text: str, keep_code_indentation: bool) -> str:
         text = re.sub(r"(?m)^ +", "", text)
         return re.sub(r"(?m) +$", "", text)
     lines: list[str] = []
-    in_fence = False
+    fences = CodeFenceTracker()
     for line in text.split("\n"):
-        is_fence = _CODE_FENCE_LINE_RE.match(line) is not None
-        if in_fence and not is_fence:
+        if fences.feed(line) == "code":
             lines.append(line.rstrip(" "))
         else:
             lines.append(re.sub(r"\t+", " ", re.sub(r" {2,}", " ", line)).strip(" "))
-        if is_fence:
-            in_fence = not in_fence
     return "\n".join(lines)
 
 

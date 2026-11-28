@@ -49,7 +49,6 @@ from core.chunking.markdown_utils import (
     split_md_elements,
 )
 from core.chunking.recursive import (
-    _CODE_FENCE_RE,
     _INLINE_ELEMENT_TOKEN_THRESHOLD,
     BaseChunker,
     dewrap_paragraphs,
@@ -60,7 +59,7 @@ from core.chunking.registry import chunking_registry
 from core.models.chunk import Chunk, ChunkType
 from core.models.document import ProcessedDocument
 from core.utils.consts import WORKBOOK_TABULAR_FORMATS, XLSX_TEXT_CONTENT_KINDS
-from core.utils.text import sanitize_text
+from core.utils.text import CodeFenceTracker, sanitize_text
 
 # Markdown ATX heading: ``## Title``. Level = number of ``#``.
 _MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(\S.*?)\s*#*$")
@@ -1245,7 +1244,8 @@ _SPLIT_LADDER = (_SENTENCE_RE, *_CLAUSE_RES)
 
 
 def _holds_code_fence(text: str) -> bool:
-    return any(_CODE_FENCE_RE.match(line) for line in text.split("\n"))
+    fences = CodeFenceTracker()
+    return any(fences.feed(line) == "fence" for line in text.split("\n"))
 
 
 def _paragraphs_keeping_code_blocks(text: str) -> list[str]:
@@ -1256,15 +1256,35 @@ def _paragraphs_keeping_code_blocks(text: str) -> list[str]:
     two chunks, the second one opening on code with no fence above it.
     """
     paragraphs: list[str] = []
-    in_fence = False
+    fences = CodeFenceTracker()
     for paragraph in re.split(r"\n{2,}", text):
-        if in_fence:
+        if fences.in_fence:
             paragraphs[-1] = f"{paragraphs[-1]}\n\n{paragraph}"
         else:
             paragraphs.append(paragraph)
-        if sum(1 for line in paragraph.split("\n") if _CODE_FENCE_RE.match(line)) % 2:
-            in_fence = not in_fence
+        for line in paragraph.split("\n"):
+            fences.feed(line)
     return paragraphs
+
+
+# A word of a code line with the spaces that follow it, or the line's indentation.
+_CODE_SPAN_RE = re.compile(r"\s+|\S+\s*")
+
+
+def _wrap_code_line(line: str, target: int, length_function: Callable[[str], int]) -> list[str]:
+    """Cut one code line that is over the ceiling by itself, between two of
+    its words, and leave the spaces inside each piece as they are: the words
+    of prose can be joined again with one space, a string literal cannot."""
+    pieces: list[str] = []
+    buf = ""
+    for span in _CODE_SPAN_RE.findall(line):
+        if buf.strip() and length_function(buf + span) > target:
+            pieces.append(buf.rstrip())
+            buf = ""
+        buf += span
+    if buf.strip():
+        pieces.append(buf.rstrip())
+    return pieces or [line]
 
 
 def _greedy_split(text: str, target: int, max_tokens: int, length_function: Callable[[str], int]) -> list[str]:
@@ -1283,14 +1303,14 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
         after a ``:`` or a ``;``, and joining the parts with a space would put
         ``api:`` and ``image: openrag`` on one line."""
         if "\n" in item and _holds_code_fence(item):
-            return pack(item.split("\n"), "\n", ())
+            return pack(item.split("\n"), "\n", (), code=True)
         for i, splitter in enumerate(levels):
             parts = splitter.split(item)
             if len(parts) > 1:
                 return pack(parts, " ", levels[i + 1 :])
         return _hard_wrap(item, packing_target, length_function)
 
-    def pack(items: list[str], joiner: str, levels: tuple[re.Pattern[str], ...]) -> list[str]:
+    def pack(items: list[str], joiner: str, levels: tuple[re.Pattern[str], ...], code: bool = False) -> list[str]:
         out: list[str] = []
         buf: list[str] = []
         char_count = 0
@@ -1305,7 +1325,10 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
                 buf = []
                 char_count = 0
             if it > max_tokens and not buf:
-                out.extend(descend(item, levels))
+                if code:
+                    out.extend(_wrap_code_line(item, packing_target, length_function))
+                else:
+                    out.extend(descend(item, levels))
                 continue
             char_count += (len(joiner) if buf else 0) + len(item)
             buf.append(item)
@@ -1321,11 +1344,14 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
     # sentence-split prefixes and word-wrap fragments ineligible, while still
     # recognizing an intact heading from a word-wrapped paragraph. The word
     # span distinguishes identical text that appears elsewhere in the source.
+    # A line of a code block that starts with ``#`` is a comment or a literal,
+    # not a heading: moved to the next piece, it would leave its listing.
     source_heading_spans: set[tuple[int, int, str]] = set()
     word_offset = 0
+    fences = CodeFenceTracker()
     for line in sanitized.splitlines():
         word_count = len(line.split())
-        if _CAPTION_HEADING_RE.match(line):
+        if fences.feed(line) == "text" and _CAPTION_HEADING_RE.match(line):
             source_heading_spans.add((word_offset, word_offset + word_count, line))
         word_offset += word_count
 

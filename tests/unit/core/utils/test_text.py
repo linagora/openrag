@@ -334,3 +334,40 @@ def test_sanitize_text_keeps_code_indentation_when_asked():
     )
     # The default still flattens every line, as its other callers expect.
     assert sanitize_text(text) == "Some prose\n\n```yaml\nservices:\napi:\nimage: openrag\n```\nmore prose"
+
+
+def test_code_fence_tracker_closes_a_fence_as_commonmark_does():
+    """A fence closes on a run of its own character, at least as long as the one
+    that opened it, with nothing after it. Toggling on every ``` line closed a
+    four-backtick block at the three-backtick block it shows."""
+    from core.utils.text import CodeFenceTracker
+
+    def kinds(text: str) -> list[str]:
+        fences = CodeFenceTracker()
+        return [fences.feed(line) for line in text.split("\n")]
+
+    assert kinds("````markdown\n```python\nx = 1\n```\n````\nafter") == [
+        "fence",
+        "code",
+        "code",
+        "code",
+        "fence",
+        "text",
+    ]
+    # The other character, and a closing run followed by text, are lines of the listing.
+    assert kinds("```\n~~~\n``` not a close\n```") == ["fence", "code", "code", "fence"]
+    assert kinds("~~~yaml\n```\n~~~~") == ["fence", "code", "fence"]
+    # A backtick run with a backtick after it is inline code, not a fence.
+    assert kinds("```x``` and words") == ["text"]
+    # A fence left open runs to the end of the text.
+    assert kinds("```\n  a\n  b") == ["fence", "code", "code"]
+
+
+def test_sanitize_text_keeps_the_indentation_of_a_block_that_shows_a_block():
+    from core.utils.text import sanitize_text
+
+    text = "````markdown\n```python\ndef f():\n    return 1\n```\n````\n  prose   after"
+
+    assert sanitize_text(text, keep_code_indentation=True) == (
+        "````markdown\n```python\ndef f():\n    return 1\n```\n````\nprose after"
+    )

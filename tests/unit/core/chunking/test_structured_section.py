@@ -1140,3 +1140,43 @@ def test_oversize_code_block_is_cut_between_two_lines():
     assert len(pieces) > 1
     assert all(_words(piece) <= 30 for piece in pieces)
     assert "\n".join(pieces) == listing
+
+
+def test_code_line_over_the_ceiling_keeps_its_inner_spaces():
+    """One code line over the ceiling by itself fell back to the word wrap of
+    prose, which joins words with one space: a string literal lost its spaces."""
+    long_line = 'message = "one  two"  # ' + " ".join(f"w{i}" for i in range(40))
+    listing = f"```python\nx = 1\n{long_line}\ny = 2\n```"
+
+    pieces = _greedy_split(listing, 10, 12, _words)
+
+    assert any('message = "one  two"  #' in piece for piece in pieces)
+    assert all(_words(piece) <= 12 for piece in pieces)
+    # Nothing is lost or reordered: only line breaks were added inside the long line.
+    assert " ".join(pieces).split() == listing.split()
+
+
+def test_code_line_that_looks_like_a_heading_stays_in_its_listing():
+    """A line of a listing that starts with ``#`` is no heading: taken for one
+    at the end of a piece, it was moved to the next piece with a blank line."""
+    listing = '```python\ntext = """\n### title\nliteral\n"""\n```'
+
+    pieces = _greedy_split(listing, 6, 8, _words)
+
+    assert len(pieces) > 1
+    assert "\n".join(pieces) == listing
+
+
+def test_block_that_shows_a_block_with_a_blank_line_is_one_paragraph():
+    """The inner ``` of a four-backtick block does not close it, so the blank
+    line after it is still inside the listing, not a paragraph break."""
+    first = " ".join(f"f{i}" for i in range(20))
+    second = " ".join(f"s{i}" for i in range(20))
+    listing = f"````markdown\n```python\n{first}\n\n{second}\n```\n````"
+    before = " ".join(f"b{i}" for i in range(30))
+    after = " ".join(f"a{i}" for i in range(30))
+
+    # The two halves do not fit one piece of 36 words: a cut at the blank line would show.
+    pieces = _greedy_split(f"{before}\n\n{listing}\n\n{after}", 36, 60, _words)
+
+    assert [listing in piece for piece in pieces].count(True) == 1

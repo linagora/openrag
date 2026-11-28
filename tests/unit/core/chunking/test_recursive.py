@@ -971,3 +971,18 @@ def test_a_marker_too_long_to_be_a_page_number_is_text():
 
     assert chunks
     assert all(c.page_number == 1 for c in chunks)
+
+
+def test_dewrap_keeps_a_block_that_shows_a_block_verbatim():
+    """The inner ``` of a four-backtick block is a line of the listing: it does
+    not close the block, so the lines after it are not reflowed as prose."""
+    from core.chunking.recursive import dewrap_paragraphs
+
+    block = "````markdown\n```python\ndef f():\n    return 1\n```\nstill inside\nthe block\n````"
+    text = f"Intro wrapped\nacross two.\n\n{block}\n\nOutro wrapped\nacross two."
+
+    out = dewrap_paragraphs(text)
+
+    assert block in out
+    assert "Intro wrapped across two." in out
+    assert "Outro wrapped across two." in out

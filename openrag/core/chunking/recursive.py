@@ -29,7 +29,7 @@ from core.chunking.registry import chunking_registry
 from core.models.chunk import Chunk, ChunkType
 from core.models.document import ProcessedDocument
 from core.utils.consts import WORKBOOK_TABULAR_FORMATS, XLSX_TEXT_CONTENT_KINDS
-from core.utils.text import sanitize_text
+from core.utils.text import CodeFenceTracker, sanitize_text
 
 # Substring (case-insensitive) marking a "no useful content" image caption.
 # Detection logic mirrors the legacy chunker, which skips these elements so
@@ -148,9 +148,6 @@ _BLOCK_LINE_RE = re.compile(
     r")"
 )
 
-# A ``` / ~~~ fenced-code-block delimiter line (open or close).
-_CODE_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
-
 
 def dewrap_paragraphs(text: str) -> str:
     """Reflow PDF visual line-wraps so prose paragraphs sit on a single line.
@@ -165,7 +162,7 @@ def dewrap_paragraphs(text: str) -> str:
     """
     out: list[str] = []
     paragraph: list[str] = []
-    in_fence = False
+    fences = CodeFenceTracker()
 
     def flush() -> None:
         if paragraph:
@@ -175,12 +172,12 @@ def dewrap_paragraphs(text: str) -> str:
     for line in text.split("\n"):
         # Inside a ``` / ~~~ code fence, emit lines verbatim — never reflow, or
         # we'd destroy code indentation and line breaks.
-        if _CODE_FENCE_RE.match(line):
+        kind = fences.feed(line)
+        if kind == "fence":
             flush()
-            in_fence = not in_fence
             out.append(line)
             continue
-        if in_fence:
+        if kind == "code":
             out.append(line)
             continue
         if line.strip() == "":
