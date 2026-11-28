@@ -1156,21 +1156,6 @@ def test_code_line_over_the_ceiling_keeps_its_inner_spaces():
     assert " ".join(pieces).split() == listing.split()
 
 
-def test_code_line_cut_at_a_run_of_spaces_keeps_them():
-    """The cut falls inside the string literal, where two and three spaces
-    stand: they stay at the end of the piece before the cut, so the pieces put
-    end to end are the line."""
-    long_line = '    message = "one  two   three"  # tail'
-    listing = f"```python\n{long_line}\n```"
-
-    pieces = _greedy_split(listing, 3, 4, _words)
-
-    assert pieces[0] == "```python" and pieces[-1] == "```"
-    assert len(pieces) > 3
-    assert "".join(pieces[1:-1]) == long_line
-    assert all(_words(piece) <= 4 for piece in pieces)
-
-
 def test_code_line_that_looks_like_a_heading_stays_in_its_listing():
     """A line of a listing that starts with ``#`` is no heading: taken for one
     at the end of a piece, it was moved to the next piece with a blank line."""

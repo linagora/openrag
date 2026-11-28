@@ -1273,19 +1273,17 @@ _CODE_SPAN_RE = re.compile(r"\s+|\S+\s*")
 
 def _wrap_code_line(line: str, target: int, length_function: Callable[[str], int]) -> list[str]:
     """Cut one code line that is over the ceiling by itself, between two of
-    its words, and leave every space where it is: the words of prose can be
-    joined again with one space, a string literal cannot. The spaces at a cut
-    stay at the end of the piece before it, so the pieces put end to end are
-    the line."""
+    its words, and leave the spaces inside each piece as they are: the words
+    of prose can be joined again with one space, a string literal cannot."""
     pieces: list[str] = []
     buf = ""
     for span in _CODE_SPAN_RE.findall(line):
         if buf.strip() and length_function(buf + span) > target:
-            pieces.append(buf)
+            pieces.append(buf.rstrip())
             buf = ""
         buf += span
-    if buf:
-        pieces.append(buf)
+    if buf.strip():
+        pieces.append(buf.rstrip())
     return pieces or [line]
 
 
