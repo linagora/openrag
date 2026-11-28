@@ -29,7 +29,7 @@ from core.chunking.registry import chunking_registry
 from core.models.chunk import Chunk, ChunkType
 from core.models.document import ProcessedDocument
 from core.utils.consts import WORKBOOK_TABULAR_FORMATS, XLSX_TEXT_CONTENT_KINDS
-from core.utils.text import sanitize_text
+from core.utils.text import CodeFenceTracker, sanitize_text
 
 # Substring (case-insensitive) marking a "no useful content" image caption.
 # Detection logic mirrors the legacy chunker, which skips these elements so
@@ -148,9 +148,6 @@ _BLOCK_LINE_RE = re.compile(
     r")"
 )
 
-# A ``` / ~~~ fenced-code-block delimiter line (open or close).
-_CODE_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
-
 
 def dewrap_paragraphs(text: str) -> str:
     """Reflow PDF visual line-wraps so prose paragraphs sit on a single line.
@@ -165,7 +162,7 @@ def dewrap_paragraphs(text: str) -> str:
     """
     out: list[str] = []
     paragraph: list[str] = []
-    in_fence = False
+    fences = CodeFenceTracker()
 
     def flush() -> None:
         if paragraph:
@@ -175,12 +172,12 @@ def dewrap_paragraphs(text: str) -> str:
     for line in text.split("\n"):
         # Inside a ``` / ~~~ code fence, emit lines verbatim — never reflow, or
         # we'd destroy code indentation and line breaks.
-        if _CODE_FENCE_RE.match(line):
+        kind = fences.feed(line)
+        if kind == "fence":
             flush()
-            in_fence = not in_fence
             out.append(line)
             continue
-        if in_fence:
+        if kind == "code":
             out.append(line)
             continue
         if line.strip() == "":
@@ -469,6 +466,8 @@ class BaseChunker(ChunkingStrategy):
                 remove_zero_width_chars=True,
                 max_consecutive_newlines=2,
                 normalize_unicode=True,
+                # dewrap_paragraphs kept the code blocks verbatim for this.
+                keep_code_indentation=True,
             )
             # Markers closing the buffer label nothing. Left in, one could split
             # off with the replayed overlap, as a chunk with no new content.
@@ -478,6 +477,16 @@ class BaseChunker(ChunkingStrategy):
             # on the page of the element before it, which the leading entry gives.
             page_markers = [(-1, prev_page - 1)]
             page_markers += [(match.start(), int(match.group(1))) for match in PAGE_RE.finditer(sanitized)]
+            # Where each line of a code listing starts in `sanitized`. The splitter
+            # strips its chunks, so a chunk that starts on such a line has lost
+            # the indentation of that line: it is read back from `sanitized`.
+            code_line_starts: set[int] = set()
+            fences = CodeFenceTracker()
+            offset = 0
+            for line in sanitized.split("\n"):
+                if fences.feed(line) == "code":
+                    code_line_starts.add(offset)
+                offset += len(line) + 1
             previous_start = -1
             previous_end = 0
             for text_chunk in split(sanitized):
@@ -495,10 +504,22 @@ class BaseChunker(ChunkingStrategy):
                 if not PAGE_RE.sub("", text_chunk).strip():
                     continue
                 first_word = start + _LEADING_PAGE_MARKERS_RE.match(text_chunk).end()
+                page_content = text_chunk.strip()
+                line_start = sanitized.rfind("\n", 0, start) + 1
+                indentation = sanitized[line_start:start]
+                if (
+                    indentation
+                    and not indentation.strip()
+                    and line_start in code_line_starts
+                    # Never at the cost of the budget: a chunk that would go
+                    # over it with these spaces stays stripped.
+                    and self.length_function(indentation + page_content) <= body_size
+                ):
+                    page_content = indentation + page_content
                 chunks.append(
                     {
                         **metadata,
-                        "page_content": text_chunk.strip(),
+                        "page_content": page_content,
                         "page": get_page_number(first_word, page_markers),
                         "chunk_type": "text",
                     }

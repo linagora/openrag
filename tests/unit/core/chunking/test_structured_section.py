@@ -1098,3 +1098,154 @@ def test_chart_pieces_fit_the_ceiling_lowered_by_hard_max_tokens():
     assert len(chunks) > 1
     assert all(_words(chunk.text) <= 80 for chunk in chunks)
     assert all("| Month | Actual | Target |" in chunk.text for chunk in chunks)
+
+
+YAML_BLOCK = "```yaml\nservices:\n  api:\n    image: openrag\n    environment:\n      - RETRIEVER_TOP_K=50\n```"
+
+
+def test_split_section_keeps_code_block_indentation():
+    """A section over the ceiling is sanitized before it is split, and that
+    stripped the indentation of every code line in it, whatever the size of
+    the code block: YAML lost its nesting and Python its blocks."""
+    prose = " ".join(f"Sentence number {i} explains the deployment." for i in range(200))
+    chunker = _chunker(chunk_size=512)
+
+    chunks = chunker.chunk(_doc(f"# Guide\n\n{prose}\n\n{YAML_BLOCK}\n"))
+
+    assert len(chunks) > 1
+    assert [YAML_BLOCK in chunk.text for chunk in chunks].count(True) == 1
+
+
+def test_code_block_with_a_blank_line_is_not_cut_at_it():
+    """The blank line of a listing is not a paragraph break: cut there, the
+    second half opened a chunk as bare code, with no fence above it."""
+    listing = "```python\ndef first():\n    return 1\n\ndef second():\n    return 2\n```"
+    before = " ".join(f"b{i}" for i in range(30))
+    after = " ".join(f"a{i}" for i in range(30))
+
+    pieces = _greedy_split(f"{before}\n\n{listing}\n\n{after}", 36, 60, _words)
+
+    assert [listing in piece for piece in pieces].count(True) == 1
+
+
+def test_oversize_code_block_is_cut_between_two_lines():
+    """A listing over the ceiling went down the sentence and clause ladder,
+    whose separators match the line break after a ``:``: ``api:`` and
+    ``image: openrag`` came back joined on one line."""
+    lines = [f"{'  ' * (i % 3)}key{i}: value{i}" for i in range(40)]
+    listing = "```yaml\n" + "\n".join(lines) + "\n```"
+
+    pieces = _greedy_split(listing, 20, 30, _words)
+
+    assert len(pieces) > 1
+    assert all(_words(piece) <= 30 for piece in pieces)
+    assert "\n".join(pieces) == listing
+
+
+def test_code_line_over_the_ceiling_keeps_its_inner_spaces():
+    """One code line over the ceiling by itself fell back to the word wrap of
+    prose, which joins words with one space: a string literal lost its spaces."""
+    long_line = 'message = "one  two"  # ' + " ".join(f"w{i}" for i in range(40))
+    listing = f"```python\nx = 1\n{long_line}\ny = 2\n```"
+
+    pieces = _greedy_split(listing, 10, 12, _words)
+
+    assert any('message = "one  two"  #' in piece for piece in pieces)
+    assert all(_words(piece) <= 12 for piece in pieces)
+    # Nothing is lost or reordered: only line breaks were added inside the long line.
+    assert " ".join(pieces).split() == listing.split()
+
+
+def test_code_line_that_looks_like_a_heading_stays_in_its_listing():
+    """A line of a listing that starts with ``#`` is no heading: taken for one
+    at the end of a piece, it was moved to the next piece with a blank line."""
+    listing = '```python\ntext = """\n### title\nliteral\n"""\n```'
+
+    pieces = _greedy_split(listing, 6, 8, _words)
+
+    assert len(pieces) > 1
+    assert "\n".join(pieces) == listing
+
+
+def test_block_that_shows_a_block_with_a_blank_line_is_one_paragraph():
+    """The inner ``` of a four-backtick block does not close it, so the blank
+    line after it is still inside the listing, not a paragraph break."""
+    first = " ".join(f"f{i}" for i in range(20))
+    second = " ".join(f"s{i}" for i in range(20))
+    listing = f"````markdown\n```python\n{first}\n\n{second}\n```\n````"
+    before = " ".join(f"b{i}" for i in range(30))
+    after = " ".join(f"a{i}" for i in range(30))
+
+    # The two halves do not fit one piece of 36 words: a cut at the blank line would show.
+    pieces = _greedy_split(f"{before}\n\n{listing}\n\n{after}", 36, 60, _words)
+
+    assert [listing in piece for piece in pieces].count(True) == 1
+
+
+def test_chunk_that_starts_inside_a_listing_keeps_its_first_indentation():
+    """A listing over the ceiling is cut between two lines. The piece after the
+    cut was stripped like prose, so its first line moved to column zero: in
+    YAML, a key at another level than the keys under it."""
+    lines = [f"    key{i}: value{i}" for i in range(120)]
+    listing = "```yaml\nservices:\n" + "\n".join(lines) + "\n```"
+    chunker = _chunker(chunk_size=60)
+
+    chunks = chunker.chunk(_doc(f"# Guide\n\n{listing}\n"))
+
+    bodies = [chunk.content for chunk in chunks]
+    assert len(bodies) > 1
+    emitted = [line for body in bodies for line in body.split("\n") if "key" in line]
+    assert emitted == lines
+
+
+def test_prose_piece_is_still_stripped():
+    """Only a piece that starts inside a listing keeps leading spaces."""
+    prose = " ".join(f"Sentence {i} of the section goes on for a few words." for i in range(60))
+    chunker = _chunker(chunk_size=60)
+
+    chunks = chunker.chunk(_doc(f"# Guide\n\n{prose}\n"))
+
+    assert len(chunks) > 1
+    assert all(chunk.content == chunk.content.strip() for chunk in chunks)
+
+
+def test_listing_pieces_merged_back_get_no_blank_line():
+    """The short last piece of a cut listing is merged into the piece before
+    it. Joined like two paragraphs, they came back with a blank line that the
+    listing does not have."""
+    lines = [f"    key{i}: value{i}" for i in range(297)]
+    listing = "```yaml\nservices:\n" + "\n".join(lines) + "\n```"
+    chunker = _chunker(chunk_size=200)
+
+    chunks = chunker.chunk(_doc(f"# Guide\n\n{listing}\n"))
+
+    assert len(chunks) > 1
+    # Put end to end, the chunks are the listing, line for line.
+    emitted = "\n".join(chunk.content for chunk in chunks)
+    assert emitted[emitted.index("```yaml") :] == listing
+
+
+def test_first_indentation_is_dropped_rather_than_break_the_hard_bound():
+    """One word cut out of a long code line can fill the ceiling by itself:
+    kept with its indentation, the chunk went one character over the hard
+    bound. The bound wins, and the line is stripped as it was before."""
+    chunker = StructuredSectionChunker(chunk_size=8, max_tokens=8, hard_max_tokens=8, length_function=len)
+    doc = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="```\n    abcde x\n```", page_number=1)])
+
+    chunks = chunker.chunk(doc)
+
+    assert all(len(chunk.text) <= 8 for chunk in chunks)
+    assert any(chunk.text.startswith("abcde") for chunk in chunks)
+
+
+def test_comment_line_of_a_listing_is_not_read_as_a_heading():
+    """``# source: config`` in a Python listing is a comment. Read as a
+    markdown heading that the structure rejects, it lost its ``#``; read as one
+    the structure accepts, it would have opened a section inside the listing."""
+    listing = "```python\n# source: config\nvalue = 1\n    # nested comment\n# Installation\nother = 2\n```"
+    chunker = _chunker(chunk_size=200)
+
+    chunks = chunker.chunk(_doc(f"# Guide\n\nIntro paragraph.\n\n{listing}\n\nEnd."))
+
+    assert listing in "\n".join(chunk.content for chunk in chunks)
+    assert all("Installation" not in chunk.metadata["hierarchy_path"] for chunk in chunks)

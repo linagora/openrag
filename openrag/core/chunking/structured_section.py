@@ -59,7 +59,7 @@ from core.chunking.registry import chunking_registry
 from core.models.chunk import Chunk, ChunkType
 from core.models.document import ProcessedDocument
 from core.utils.consts import WORKBOOK_TABULAR_FORMATS, XLSX_TEXT_CONTENT_KINDS
-from core.utils.text import sanitize_text
+from core.utils.text import CodeFenceTracker, sanitize_text, strip_keeping_first_indent
 
 # Markdown ATX heading: ``## Title``. Level = number of ``#``.
 _MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(\S.*?)\s*#*$")
@@ -209,6 +209,10 @@ class _Unit:
     atomic: bool = False  # table / image — never merged into prose, never split by us
     metadata: dict[str, Any] = field(default_factory=dict)
     caption: str = ""  # leads ``text``; repeated on every piece of a split table
+    #: What stands between this unit and the one it is merged into: a blank
+    #: line between two paragraphs, a line break for a piece cut out of a code
+    #: listing, whose lines would otherwise come back with a blank line added.
+    joiner: str = "\n\n"
 
     @property
     def start_page(self) -> int | None:
@@ -348,7 +352,8 @@ class StructuredSectionChunker(BaseChunker):
         chunks: list[Chunk] = []
         for idx, unit in enumerate(candidates):
             base = unit.metadata if xlsx_table and unit.metadata else metadata
-            body = unit.text.strip()
+            # A unit cut out of a code listing opens on an indented line.
+            body = strip_keeping_first_indent(unit.text)
             header = self._build_header(filename, unit.heading_path, unit.pages, body=body)
             text = f"{header}\n\n{body}" if header else body
             chunks.append(
@@ -584,11 +589,19 @@ class StructuredSectionChunker(BaseChunker):
                     units.append(atomic)
                 continue
 
+            fences = CodeFenceTracker()
             for raw_line in dewrap_paragraphs(element.content).split("\n"):
                 page_match = PAGE_RE.fullmatch(raw_line.strip())
                 if page_match:
                     # Content AFTER ``[PAGE_k]`` is page k+1 (see markdown_utils).
                     page = int(page_match.group(1)) + 1
+                    continue
+
+                # A line of a code listing is neither a heading nor a leaf: a
+                # ``# comment`` would open a section, or lose its ``#`` as a
+                # heading rejected below. It goes to the body as it is.
+                if fences.feed(raw_line) != "text" and raw_line.strip():
+                    add_line(raw_line, page)
                     continue
 
                 level_text = self._heading(raw_line)
@@ -730,7 +743,7 @@ class StructuredSectionChunker(BaseChunker):
             if cur is None:
                 cur = _copy_unit(unit)
             elif cur.heading_path == unit.heading_path and self.length_function(
-                f"{cur.text}\n\n{unit.text}".strip()
+                _merged_text(cur, unit)
             ) <= self._packing_budget(filename, cur.heading_path, cur.pages | unit.pages):
                 _absorb(cur, unit, self.length_function)
             else:
@@ -878,26 +891,46 @@ class StructuredSectionChunker(BaseChunker):
         """
         path = unit.heading_path
         reserve = self._header_reserve(filename, path, unit.pages)
+        body_ceiling = (
+            max(1, ceiling - reserve) if ceiling is not None else self._effective_max(filename, path, unit.pages)
+        )
         pieces = _greedy_split(
             unit.text,
             # The bounded header leaves room for body text even at small
             # limits; keep the body budget positive for the splitter.
             max(1, target - reserve) if target is not None else self._packing_budget(filename, path, unit.pages),
-            max(1, ceiling - reserve) if ceiling is not None else self._effective_max(filename, path, unit.pages),
+            body_ceiling,
             self.length_function,
         )
         page_sets = _attribute_pages(unit, pieces)
-        return [
-            _Unit(
-                heading_path=list(unit.heading_path),
-                text=piece.strip(),
-                tokens=self.length_function(piece),
-                pages=pages,
-                chunk_type=chunk_type,
-                atomic=unit.atomic,
+        # A piece that starts inside a code listing keeps the indentation of its
+        # first line: stripped with the piece, that line would sit at another
+        # level than the lines under it. Prose is stripped as before.
+        fences = CodeFenceTracker()
+        units: list[_Unit] = []
+        for piece, pages in zip(pieces, page_sets, strict=True):
+            in_listing = fences.in_fence
+            for line in piece.split("\n"):
+                fences.feed(line)
+            text = piece.strip()
+            if in_listing:
+                indented = strip_keeping_first_indent(piece)
+                # Never at the cost of the ceiling: one word cut out of a long
+                # line can fill it, and its indentation would go over.
+                if self.length_function(indented) <= body_ceiling:
+                    text = indented
+            units.append(
+                _Unit(
+                    heading_path=list(unit.heading_path),
+                    text=text,
+                    tokens=self.length_function(piece),
+                    pages=pages,
+                    chunk_type=chunk_type,
+                    atomic=unit.atomic,
+                    joiner="\n" if in_listing else "\n\n",
+                )
             )
-            for piece, pages in zip(pieces, page_sets, strict=True)
-        ]
+        return units
 
     @staticmethod
     def _flush_into(out: list[_Unit], cur: _Unit | None) -> None:
@@ -974,7 +1007,7 @@ class StructuredSectionChunker(BaseChunker):
         # this strategy exists to remove, arriving through the merge pass.
         if _is_headings_only(unit, self._is_heading_line):
             return False
-        if self.length_function(f"{prev.text}\n\n{unit.text}".strip()) > self._effective_max(
+        if self.length_function(_merged_text(prev, unit)) > self._effective_max(
             filename, merged_path, prev.pages | unit.pages
         ):
             return False
@@ -1124,11 +1157,17 @@ def _copy_unit(unit: _Unit) -> _Unit:
         chunk_type=unit.chunk_type,
         atomic=unit.atomic,
         metadata=dict(unit.metadata),
+        joiner=unit.joiner,
     )
 
 
+def _merged_text(prev: _Unit, unit: _Unit) -> str:
+    """The text of ``unit`` merged into ``prev``, as ``_absorb`` writes it."""
+    return strip_keeping_first_indent(f"{prev.text}{unit.joiner}{unit.text}")
+
+
 def _absorb(cur: _Unit, unit: _Unit, length_function: Callable[[str], int], *, path: list[str] | None = None) -> None:
-    cur.text = f"{cur.text}\n\n{unit.text}".strip()
+    cur.text = _merged_text(cur, unit)
     cur.tokens = length_function(cur.text)
     cur.pages |= unit.pages
     if unit.chunk_type is not ChunkType.TEXT and cur.chunk_type is ChunkType.TEXT:
@@ -1243,6 +1282,50 @@ _CLAUSE_RES = (
 _SPLIT_LADDER = (_SENTENCE_RE, *_CLAUSE_RES)
 
 
+def _holds_code_fence(text: str) -> bool:
+    fences = CodeFenceTracker()
+    return any(fences.feed(line) == "fence" for line in text.split("\n"))
+
+
+def _paragraphs_keeping_code_blocks(text: str) -> list[str]:
+    """The paragraphs of *text*, a fenced code block staying in one of them.
+
+    A blank line inside a ``` / ~~~ fence separates two parts of the same
+    listing, not two paragraphs: cut there, the listing could be packed into
+    two chunks, the second one opening on code with no fence above it.
+    """
+    paragraphs: list[str] = []
+    fences = CodeFenceTracker()
+    for paragraph in re.split(r"\n{2,}", text):
+        if fences.in_fence:
+            paragraphs[-1] = f"{paragraphs[-1]}\n\n{paragraph}"
+        else:
+            paragraphs.append(paragraph)
+        for line in paragraph.split("\n"):
+            fences.feed(line)
+    return paragraphs
+
+
+# A word of a code line with the spaces that follow it, or the line's indentation.
+_CODE_SPAN_RE = re.compile(r"\s+|\S+\s*")
+
+
+def _wrap_code_line(line: str, target: int, length_function: Callable[[str], int]) -> list[str]:
+    """Cut one code line that is over the ceiling by itself, between two of
+    its words, and leave the spaces inside each piece as they are: the words
+    of prose can be joined again with one space, a string literal cannot."""
+    pieces: list[str] = []
+    buf = ""
+    for span in _CODE_SPAN_RE.findall(line):
+        if buf.strip() and length_function(buf + span) > target:
+            pieces.append(buf.rstrip())
+            buf = ""
+        buf += span
+    if buf.strip():
+        pieces.append(buf.rstrip())
+    return pieces or [line]
+
+
 def _greedy_split(text: str, target: int, max_tokens: int, length_function: Callable[[str], int]) -> list[str]:
     """Pack paragraphs (then sentences for an over-``max`` paragraph) to ``target``."""
 
@@ -1252,14 +1335,21 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
         """Split one over-``max`` item on the strongest separator it actually
         contains, then keep the weaker ones in reserve for its own oversize
         pieces. Word-wrapping is the last resort because it is the only step
-        that can cut mid-sentence."""
+        that can cut mid-sentence.
+
+        A code listing is cut between two of its lines and nowhere else: the
+        sentence and clause separators match the line break and indentation
+        after a ``:`` or a ``;``, and joining the parts with a space would put
+        ``api:`` and ``image: openrag`` on one line."""
+        if "\n" in item and _holds_code_fence(item):
+            return pack(item.split("\n"), "\n", (), code=True)
         for i, splitter in enumerate(levels):
             parts = splitter.split(item)
             if len(parts) > 1:
                 return pack(parts, " ", levels[i + 1 :])
         return _hard_wrap(item, packing_target, length_function)
 
-    def pack(items: list[str], joiner: str, levels: tuple[re.Pattern[str], ...]) -> list[str]:
+    def pack(items: list[str], joiner: str, levels: tuple[re.Pattern[str], ...], code: bool = False) -> list[str]:
         out: list[str] = []
         buf: list[str] = []
         char_count = 0
@@ -1274,7 +1364,10 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
                 buf = []
                 char_count = 0
             if it > max_tokens and not buf:
-                out.extend(descend(item, levels))
+                if code:
+                    out.extend(_wrap_code_line(item, packing_target, length_function))
+                else:
+                    out.extend(descend(item, levels))
                 continue
             char_count += (len(joiner) if buf else 0) + len(item)
             buf.append(item)
@@ -1282,19 +1375,22 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
             out.append(joiner.join(buf))
         return out
 
-    sanitized = sanitize_text(text, max_consecutive_newlines=2)
-    pieces = pack(re.split(r"\n{2,}", sanitized), "\n\n", _SPLIT_LADDER)
+    sanitized = sanitize_text(text, max_consecutive_newlines=2, keep_code_indentation=True)
+    pieces = pack(_paragraphs_keeping_code_blocks(sanitized), "\n\n", _SPLIT_LADDER)
 
     # A heading is eligible only when the emitted line is the same complete
     # line at the same word position in the sanitized source. This keeps
     # sentence-split prefixes and word-wrap fragments ineligible, while still
     # recognizing an intact heading from a word-wrapped paragraph. The word
     # span distinguishes identical text that appears elsewhere in the source.
+    # A line of a code block that starts with ``#`` is a comment or a literal,
+    # not a heading: moved to the next piece, it would leave its listing.
     source_heading_spans: set[tuple[int, int, str]] = set()
     word_offset = 0
+    fences = CodeFenceTracker()
     for line in sanitized.splitlines():
         word_count = len(line.split())
-        if _CAPTION_HEADING_RE.match(line):
+        if fences.feed(line) == "text" and _CAPTION_HEADING_RE.match(line):
             source_heading_spans.add((word_offset, word_offset + word_count, line))
         word_offset += word_count
 

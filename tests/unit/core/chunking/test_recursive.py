@@ -382,6 +382,23 @@ def test_dewrap_preserves_code_fence_verbatim():
     assert "Outro wrapped across two." in lines
 
 
+def test_code_block_keeps_its_indentation_in_the_chunk():
+    """dewrap_paragraphs leaves a fenced block verbatim, but the sanitizer that
+    runs after it stripped the indentation of every line: the YAML below was
+    indexed with ``api``, ``image`` and ``environment`` at the same level."""
+    code = "```yaml\nservices:\n  api:\n    image: openrag\n    environment:\n      - RETRIEVER_TOP_K=50\n```"
+    splitter = RecursiveSplitter(chunk_size=200, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=f"The   configuration:\n\n{code}\n\nEnd of the guide.", page_number=1)],
+    )
+
+    (chunk,) = splitter.chunk(doc, partition="p1")
+
+    assert code in chunk.text
+    assert "The configuration:" in chunk.text  # prose is still normalized
+
+
 def test_placeholder_only_image_block_is_skipped():
     """A caption the VLM could make nothing of is still noise — keep skipping it."""
     from core.chunking.recursive import is_placeholder_image
@@ -954,3 +971,50 @@ def test_a_marker_too_long_to_be_a_page_number_is_text():
 
     assert chunks
     assert all(c.page_number == 1 for c in chunks)
+
+
+def test_dewrap_keeps_a_block_that_shows_a_block_verbatim():
+    """The inner ``` of a four-backtick block is a line of the listing: it does
+    not close the block, so the lines after it are not reflowed as prose."""
+    from core.chunking.recursive import dewrap_paragraphs
+
+    block = "````markdown\n```python\ndef f():\n    return 1\n```\nstill inside\nthe block\n````"
+    text = f"Intro wrapped\nacross two.\n\n{block}\n\nOutro wrapped\nacross two."
+
+    out = dewrap_paragraphs(text)
+
+    assert block in out
+    assert "Intro wrapped across two." in out
+    assert "Outro wrapped across two." in out
+
+
+def test_chunk_that_starts_inside_a_listing_keeps_its_first_indentation():
+    """The text splitter strips its chunks, so a chunk that starts in the
+    middle of a listing lost the indentation of its first line. It is read
+    back from the text the chunk was cut from, with a word count and with a
+    character count, where the chunk must still fit its budget."""
+    lines = [f"    key{i}: value{i}" for i in range(120)]
+    listing = "```yaml\nservices:\n" + "\n".join(lines) + "\n```"
+    doc = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text=listing, page_number=1)])
+
+    for chunk_size, length_function in ((60, _word_tokens), (400, len)):
+        splitter = RecursiveSplitter(chunk_size=chunk_size, chunk_overlap_rate=0.0, length_function=length_function)
+
+        chunks = splitter.chunk(doc, partition="p1")
+
+        assert len(chunks) > 1
+        assert all(length_function(chunk.text) <= chunk_size for chunk in chunks)
+        emitted = [line for chunk in chunks for line in chunk.text.split("\n") if "key" in line]
+        assert emitted == lines
+
+
+def test_prose_chunk_is_still_stripped():
+    """Only a chunk that starts on a line of a listing keeps leading spaces."""
+    prose = "\n\n".join(f"Paragraph {i} of the guide goes on for a few more words." for i in range(40))
+    splitter = RecursiveSplitter(chunk_size=30, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text=prose, page_number=1)])
+
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert len(chunks) > 1
+    assert all(chunk.text == chunk.text.strip() for chunk in chunks)
