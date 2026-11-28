@@ -589,11 +589,19 @@ class StructuredSectionChunker(BaseChunker):
                     units.append(atomic)
                 continue
 
+            fences = CodeFenceTracker()
             for raw_line in dewrap_paragraphs(element.content).split("\n"):
                 page_match = PAGE_RE.fullmatch(raw_line.strip())
                 if page_match:
                     # Content AFTER ``[PAGE_k]`` is page k+1 (see markdown_utils).
                     page = int(page_match.group(1)) + 1
+                    continue
+
+                # A line of a code listing is neither a heading nor a leaf: a
+                # ``# comment`` would open a section, or lose its ``#`` as a
+                # heading rejected below. It goes to the body as it is.
+                if fences.feed(raw_line) != "text" and raw_line.strip():
+                    add_line(raw_line, page)
                     continue
 
                 level_text = self._heading(raw_line)
@@ -883,12 +891,15 @@ class StructuredSectionChunker(BaseChunker):
         """
         path = unit.heading_path
         reserve = self._header_reserve(filename, path, unit.pages)
+        body_ceiling = (
+            max(1, ceiling - reserve) if ceiling is not None else self._effective_max(filename, path, unit.pages)
+        )
         pieces = _greedy_split(
             unit.text,
             # The bounded header leaves room for body text even at small
             # limits; keep the body budget positive for the splitter.
             max(1, target - reserve) if target is not None else self._packing_budget(filename, path, unit.pages),
-            max(1, ceiling - reserve) if ceiling is not None else self._effective_max(filename, path, unit.pages),
+            body_ceiling,
             self.length_function,
         )
         page_sets = _attribute_pages(unit, pieces)
@@ -901,10 +912,17 @@ class StructuredSectionChunker(BaseChunker):
             in_listing = fences.in_fence
             for line in piece.split("\n"):
                 fences.feed(line)
+            text = piece.strip()
+            if in_listing:
+                indented = strip_keeping_first_indent(piece)
+                # Never at the cost of the ceiling: one word cut out of a long
+                # line can fill it, and its indentation would go over.
+                if self.length_function(indented) <= body_ceiling:
+                    text = indented
             units.append(
                 _Unit(
                     heading_path=list(unit.heading_path),
-                    text=strip_keeping_first_indent(piece) if in_listing else piece.strip(),
+                    text=text,
                     tokens=self.length_function(piece),
                     pages=pages,
                     chunk_type=chunk_type,

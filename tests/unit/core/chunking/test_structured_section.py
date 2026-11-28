@@ -1223,3 +1223,29 @@ def test_listing_pieces_merged_back_get_no_blank_line():
     # Put end to end, the chunks are the listing, line for line.
     emitted = "\n".join(chunk.content for chunk in chunks)
     assert emitted[emitted.index("```yaml") :] == listing
+
+
+def test_first_indentation_is_dropped_rather_than_break_the_hard_bound():
+    """One word cut out of a long code line can fill the ceiling by itself:
+    kept with its indentation, the chunk went one character over the hard
+    bound. The bound wins, and the line is stripped as it was before."""
+    chunker = StructuredSectionChunker(chunk_size=8, max_tokens=8, hard_max_tokens=8, length_function=len)
+    doc = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="```\n    abcde x\n```", page_number=1)])
+
+    chunks = chunker.chunk(doc)
+
+    assert all(len(chunk.text) <= 8 for chunk in chunks)
+    assert any(chunk.text.startswith("abcde") for chunk in chunks)
+
+
+def test_comment_line_of_a_listing_is_not_read_as_a_heading():
+    """``# source: config`` in a Python listing is a comment. Read as a
+    markdown heading that the structure rejects, it lost its ``#``; read as one
+    the structure accepts, it would have opened a section inside the listing."""
+    listing = "```python\n# source: config\nvalue = 1\n    # nested comment\n# Installation\nother = 2\n```"
+    chunker = _chunker(chunk_size=200)
+
+    chunks = chunker.chunk(_doc(f"# Guide\n\nIntro paragraph.\n\n{listing}\n\nEnd."))
+
+    assert listing in "\n".join(chunk.content for chunk in chunks)
+    assert all("Installation" not in chunk.metadata["hierarchy_path"] for chunk in chunks)
