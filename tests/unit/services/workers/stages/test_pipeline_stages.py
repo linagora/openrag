@@ -2,6 +2,7 @@ import asyncio
 import base64
 import re
 from contextlib import asynccontextmanager
+from unittest import mock
 
 import pytest
 from core.chunking.chunking_strategy import ChunkingStrategy
@@ -554,8 +555,10 @@ async def test_caption_stage_leaves_a_figure_it_cannot_encode_uncaptioned(monkey
     row = {"processed_document": processed}
     vlm = FakeVLM(["caption:ok"])
 
-    await caption_stage(row, vlm)
+    with mock.patch.object(caption_module, "logger") as mock_logger:
+        await caption_stage(row, vlm)
 
+    assert mock_logger.warning.call_count == 1
     out = row["processed_document"]
     assert vlm.calls == [(b"ok", None)]
     assert [image.caption for image in out.images] == ["caption:ok", None]
@@ -1205,6 +1208,28 @@ async def test_caption_stage_skips_remote_markdown_image_without_bytes():
     assert remote_ref in text
     remote = next(image for image in row["processed_document"].images if image.source_url)
     assert remote.caption is None
+
+
+@pytest.mark.asyncio
+async def test_caption_stage_warns_when_non_remote_image_has_no_bytes():
+    processed = ProcessedDocument(
+        document_id="doc-1",
+        images=[ImageBlock()],
+    )
+    row = {"processed_document": processed}
+    vlm = FakeVLM([])
+
+    with mock.patch.object(caption_module, "logger") as mock_logger:
+        await caption_stage(row, vlm)
+
+    mock_logger.warning.assert_called_once()
+
+    warning_message = mock_logger.warning.call_args.args[0]
+    assert "without a ref" in warning_message
+    assert "bytes" in warning_message.lower()
+
+    assert vlm.calls == []
+    assert row["stage"] == "captioned"
 
 
 @pytest.mark.asyncio
