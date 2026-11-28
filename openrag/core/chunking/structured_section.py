@@ -59,7 +59,7 @@ from core.chunking.registry import chunking_registry
 from core.models.chunk import Chunk, ChunkType
 from core.models.document import ProcessedDocument
 from core.utils.consts import WORKBOOK_TABULAR_FORMATS, XLSX_TEXT_CONTENT_KINDS
-from core.utils.text import CodeFenceTracker, sanitize_text
+from core.utils.text import CodeFenceTracker, sanitize_text, strip_keeping_first_indent
 
 # Markdown ATX heading: ``## Title``. Level = number of ``#``.
 _MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(\S.*?)\s*#*$")
@@ -348,7 +348,8 @@ class StructuredSectionChunker(BaseChunker):
         chunks: list[Chunk] = []
         for idx, unit in enumerate(candidates):
             base = unit.metadata if xlsx_table and unit.metadata else metadata
-            body = unit.text.strip()
+            # A unit cut out of a code listing opens on an indented line.
+            body = strip_keeping_first_indent(unit.text)
             header = self._build_header(filename, unit.heading_path, unit.pages, body=body)
             text = f"{header}\n\n{body}" if header else body
             chunks.append(
@@ -730,7 +731,7 @@ class StructuredSectionChunker(BaseChunker):
             if cur is None:
                 cur = _copy_unit(unit)
             elif cur.heading_path == unit.heading_path and self.length_function(
-                f"{cur.text}\n\n{unit.text}".strip()
+                strip_keeping_first_indent(f"{cur.text}\n\n{unit.text}")
             ) <= self._packing_budget(filename, cur.heading_path, cur.pages | unit.pages):
                 _absorb(cur, unit, self.length_function)
             else:
@@ -887,17 +888,26 @@ class StructuredSectionChunker(BaseChunker):
             self.length_function,
         )
         page_sets = _attribute_pages(unit, pieces)
-        return [
-            _Unit(
-                heading_path=list(unit.heading_path),
-                text=piece.strip(),
-                tokens=self.length_function(piece),
-                pages=pages,
-                chunk_type=chunk_type,
-                atomic=unit.atomic,
+        # A piece that starts inside a code listing keeps the indentation of its
+        # first line: stripped with the piece, that line would sit at another
+        # level than the lines under it. Prose is stripped as before.
+        fences = CodeFenceTracker()
+        units: list[_Unit] = []
+        for piece, pages in zip(pieces, page_sets, strict=True):
+            text = strip_keeping_first_indent(piece) if fences.in_fence else piece.strip()
+            for line in piece.split("\n"):
+                fences.feed(line)
+            units.append(
+                _Unit(
+                    heading_path=list(unit.heading_path),
+                    text=text,
+                    tokens=self.length_function(piece),
+                    pages=pages,
+                    chunk_type=chunk_type,
+                    atomic=unit.atomic,
+                )
             )
-            for piece, pages in zip(pieces, page_sets, strict=True)
-        ]
+        return units
 
     @staticmethod
     def _flush_into(out: list[_Unit], cur: _Unit | None) -> None:
@@ -974,7 +984,7 @@ class StructuredSectionChunker(BaseChunker):
         # this strategy exists to remove, arriving through the merge pass.
         if _is_headings_only(unit, self._is_heading_line):
             return False
-        if self.length_function(f"{prev.text}\n\n{unit.text}".strip()) > self._effective_max(
+        if self.length_function(strip_keeping_first_indent(f"{prev.text}\n\n{unit.text}")) > self._effective_max(
             filename, merged_path, prev.pages | unit.pages
         ):
             return False
@@ -1128,7 +1138,7 @@ def _copy_unit(unit: _Unit) -> _Unit:
 
 
 def _absorb(cur: _Unit, unit: _Unit, length_function: Callable[[str], int], *, path: list[str] | None = None) -> None:
-    cur.text = f"{cur.text}\n\n{unit.text}".strip()
+    cur.text = strip_keeping_first_indent(f"{cur.text}\n\n{unit.text}")
     cur.tokens = length_function(cur.text)
     cur.pages |= unit.pages
     if unit.chunk_type is not ChunkType.TEXT and cur.chunk_type is ChunkType.TEXT:

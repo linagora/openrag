@@ -123,6 +123,18 @@ class CodeFenceTracker:
         return "fence"
 
 
+def strip_keeping_first_indent(text: str) -> str:
+    """``str.strip`` that leaves the indentation of the first line in place.
+
+    A chunk that starts in the middle of a code listing opens on an indented
+    line. Stripped like prose, that line moves to column zero and, in YAML or
+    Python, to another level than the lines under it. Blank lines before the
+    first line and everything after the last one are still removed. For a text
+    with no leading spaces it is ``str.strip``.
+    """
+    return re.sub(r"\A\s*\n", "", text).rstrip()
+
+
 def _normalize_whitespace(text: str, keep_code_indentation: bool) -> str:
     """Collapse runs of spaces and tabs, and trim each line.
 

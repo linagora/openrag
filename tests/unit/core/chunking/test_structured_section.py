@@ -1180,3 +1180,30 @@ def test_block_that_shows_a_block_with_a_blank_line_is_one_paragraph():
     pieces = _greedy_split(f"{before}\n\n{listing}\n\n{after}", 36, 60, _words)
 
     assert [listing in piece for piece in pieces].count(True) == 1
+
+
+def test_chunk_that_starts_inside_a_listing_keeps_its_first_indentation():
+    """A listing over the ceiling is cut between two lines. The piece after the
+    cut was stripped like prose, so its first line moved to column zero: in
+    YAML, a key at another level than the keys under it."""
+    lines = [f"    key{i}: value{i}" for i in range(120)]
+    listing = "```yaml\nservices:\n" + "\n".join(lines) + "\n```"
+    chunker = _chunker(chunk_size=60)
+
+    chunks = chunker.chunk(_doc(f"# Guide\n\n{listing}\n"))
+
+    bodies = [chunk.content for chunk in chunks]
+    assert len(bodies) > 1
+    emitted = [line for body in bodies for line in body.split("\n") if "key" in line]
+    assert emitted == lines
+
+
+def test_prose_piece_is_still_stripped():
+    """Only a piece that starts inside a listing keeps leading spaces."""
+    prose = " ".join(f"Sentence {i} of the section goes on for a few words." for i in range(60))
+    chunker = _chunker(chunk_size=60)
+
+    chunks = chunker.chunk(_doc(f"# Guide\n\n{prose}\n"))
+
+    assert len(chunks) > 1
+    assert all(chunk.content == chunk.content.strip() for chunk in chunks)

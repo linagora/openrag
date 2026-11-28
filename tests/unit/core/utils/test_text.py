@@ -371,3 +371,15 @@ def test_sanitize_text_keeps_the_indentation_of_a_block_that_shows_a_block():
     assert sanitize_text(text, keep_code_indentation=True) == (
         "````markdown\n```python\ndef f():\n    return 1\n```\n````\nprose after"
     )
+
+
+def test_strip_keeping_first_indent():
+    from core.utils.text import strip_keeping_first_indent
+
+    # The first line keeps its indentation; blank lines before it and
+    # everything after the last line go, as with str.strip.
+    assert strip_keeping_first_indent("\n \n    key: value\n  other: 1  \n\n") == "    key: value\n  other: 1"
+    assert strip_keeping_first_indent("    key: value") == "    key: value"
+    # A text whose first line is not indented is stripped as str.strip does.
+    for text in ("", "   ", "\n\n", "word", "word  \n", "\n\nword\nnext\n", " \n\t\nword"):
+        assert strip_keeping_first_indent(text) == text.strip()

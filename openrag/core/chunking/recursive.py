@@ -477,6 +477,16 @@ class BaseChunker(ChunkingStrategy):
             # on the page of the element before it, which the leading entry gives.
             page_markers = [(-1, prev_page - 1)]
             page_markers += [(match.start(), int(match.group(1))) for match in PAGE_RE.finditer(sanitized)]
+            # Where each line of a code listing starts in `sanitized`. The splitter
+            # strips its chunks, so a chunk that starts on such a line has lost
+            # the indentation of that line: it is read back from `sanitized`.
+            code_line_starts: set[int] = set()
+            fences = CodeFenceTracker()
+            offset = 0
+            for line in sanitized.split("\n"):
+                if fences.feed(line) == "code":
+                    code_line_starts.add(offset)
+                offset += len(line) + 1
             previous_start = -1
             previous_end = 0
             for text_chunk in split(sanitized):
@@ -494,10 +504,22 @@ class BaseChunker(ChunkingStrategy):
                 if not PAGE_RE.sub("", text_chunk).strip():
                     continue
                 first_word = start + _LEADING_PAGE_MARKERS_RE.match(text_chunk).end()
+                page_content = text_chunk.strip()
+                line_start = sanitized.rfind("\n", 0, start) + 1
+                indentation = sanitized[line_start:start]
+                if (
+                    indentation
+                    and not indentation.strip()
+                    and line_start in code_line_starts
+                    # Never at the cost of the budget: a chunk that would go
+                    # over it with these spaces stays stripped.
+                    and self.length_function(indentation + page_content) <= body_size
+                ):
+                    page_content = indentation + page_content
                 chunks.append(
                     {
                         **metadata,
-                        "page_content": text_chunk.strip(),
+                        "page_content": page_content,
                         "page": get_page_number(first_word, page_markers),
                         "chunk_type": "text",
                     }
